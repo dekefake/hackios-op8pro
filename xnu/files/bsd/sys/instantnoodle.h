@@ -13,7 +13,8 @@
 #define INSTANTNOODLE_TLMM_SOUTH        0x0f500000UL
 #define INSTANTNOODLE_TLMM_NORTH        0x0f900000UL
 
-bool instantnoodle_board(void);         /* boot-arg board=instantnoodle (xnuloader passes it) */
+bool instantnoodle_board(void);         /* boot-arg board=instantnoodle or instantnoodlep (xnuloader passes it) */
+bool instantnoodlep_board(void);        /* board=instantnoodlep only: the OnePlus 8 Pro (QHD panel with an Iris chip, S6SY791 touch) */
 
 struct instantnoodle_pin {
 	uint64_t tile;                  /* INSTANTNOODLE_TLMM_* */

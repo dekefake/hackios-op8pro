@@ -57,6 +57,7 @@
 #include "hk_ufshc.h"
 
 extern vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, unsigned int flags);
+extern vm_offset_t ml_static_ptovirt(vm_offset_t paddr);
 extern void IOSleep(unsigned int milliseconds);
 extern void loader_return(void);        /* osfmk/arm64/loader_return.c */
 extern void FlushPoC_DcacheRegion(vm_offset_t va, size_t length);   /* osfmk/arm64/caches_asm.s */
@@ -926,7 +927,7 @@ hk_data_rw(int write, uint64_t offset, uint8_t *data, uint64_t len)
 	if (offset > hk_data_bytes || len > hk_data_bytes - offset) {
 		return EIO;
 	}
-	if (hk_data_mode == 2) {
+	if (hk_data_mode >= 2) {
 		if (write) {
 			memcpy(hk_data_ram + offset, data, len);
 		} else {
@@ -1107,12 +1108,18 @@ static const struct cdevsw hk_data_cdevsw = {
 	.d_type       = D_DISK,
 };
 
+
 static void
 hk_data_start(void)
 {
 	uint32_t mode = 0, mb = 1536;
 
-	if (!PE_parse_boot_argn("hk_data", &mode, sizeof(mode)) || (mode != 1 && mode != 2)) {
+	/* (hkdata=3 for the loader's kept RAM: the loader's own hk_data_pa= comes first on the line and "hk_data" finds it) */
+	if (!PE_parse_boot_argn("hkdata", &mode, sizeof(mode)) &&
+	    !PE_parse_boot_argn("hk_data", &mode, sizeof(mode))) {
+		return;
+	}
+	if (mode != 1 && mode != 2 && mode != 3) {
 		return;
 	}
 	if (mode == 1) {
@@ -1121,6 +1128,20 @@ hk_data_start(void)
 			return;
 		}
 		hk_data_bytes = (UFS_DARWIN_BLOCKS - UFS_DATA_FIRST) * DATA_BLOCK;
+	} else if (mode == 3) {
+		/* hk_data=3: RAM the loader allocated and keeps from run to run (hk_data_pa=, hk_data_mb=): the volume is
+		 * still there when the next kernel starts, as long as the phone is not reset. Mapped as normal memory
+		 * without caching (what the loader wrote and what an earlier run left are then the same bytes). */
+		uint64_t pa = 0;
+
+		PE_parse_boot_argn("hk_data_mb", &mb, sizeof(mb));
+		if (!PE_parse_boot_argn("hk_data_pa", &pa, sizeof(pa)) || pa == 0) {
+			printf("hk_data: hk_data=3, but the loader gave no memory to keep (hk_data_pa=)\n");
+			return;
+		}
+		hk_data_bytes = (uint64_t)mb << 20;
+		hk_data_ram = (uint8_t *)ml_static_ptovirt((vm_offset_t)pa);      /* the static region's direct map, as the RAM disks' */
+		printf("hk_data: %u MB at pa %#llx, kept by the loader from run to run\n", mb, pa);
 	} else {
 		PE_parse_boot_argn("hk_data_mb", &mb, sizeof(mb));
 		hk_data_bytes = (uint64_t)mb << 20;
@@ -1140,7 +1161,8 @@ hk_data_start(void)
 	(void)devfs_make_node(makedev(hk_data_bmajor, 0), DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0640, "hk_data");
 	(void)devfs_make_node(makedev(hk_data_cmajor, 0), DEVFS_CHAR, UID_ROOT, GID_OPERATOR, 0640, "rhk_data");
 	printf("hk_data: /dev/hk_data: %llu MB, %s\n", hk_data_bytes >> 20, mode == 1 ?
-	    "the store from block 3145728 to its end (read and written through the loader)" : "in memory (a RAM-only run's)");
+	    "the store from block 3145728 to its end (read and written through the loader)" :
+	    mode == 3 ? "in the loader's memory, kept between runs" : "in memory (a RAM-only run's)");
 }
 
 /*
@@ -1739,6 +1761,8 @@ SYSCTL_PROC(_kern_hackios, OID_AUTO, ufs_native, CTLTYPE_INT | CTLFLAG_RW | CTLF
 SYSCTL_QUAD(_kern_hackios, OID_AUTO, ufs_native_fallbacks, CTLFLAG_RD | CTLFLAG_LOCKED, &ufs_native_fallbacks,
     "times a read of this kernel's own UFS driver failed and the loader's was used instead");
 
+static bool data_started;               /* hk_data=3 made its volume at the very start of hk_ufs_init */
+
 /* ---- bringing it up ---- */
 
 void
@@ -1747,6 +1771,16 @@ hk_ufs_init(void)
 	uint64_t pa = 0, buffer_pa;
 	uint32_t check = 0, made = 0;
 	vm_offset_t base;
+	uint32_t data_mode = 0;
+
+	/*
+	 * hk_data=3 needs no storage at all (the loader's kept RAM): where the loader serves no storage
+	 * (ufs=2 not asked for, or no UFS to serve, as on the OnePlus 8 Pro) the volume is made here.
+	 */
+	if (PE_parse_boot_argn("hkdata", &data_mode, sizeof(data_mode)) && data_mode == 3) {
+		hk_data_start();
+		data_started = true;
+	}
 
 	ufs_store_from_args();
 
@@ -1878,7 +1912,9 @@ hk_ufs_init(void)
 			printf("ufs: nothing takes writes: %s is not among the partitions\n", ufs_store_name);
 		}
 	}
-	hk_data_start();
+	if (!data_started) {
+		hk_data_start();
+	}
 
 	/*
 	 * ufs_native=1: through this kernel's own driver instead, its own transfer list in the

@@ -557,6 +557,7 @@ struct platform {
 	uint32_t timeout_scale;          /* a kernel on several cores gets this much longer to wait for a lock, 0: as it is */
 	uint32_t small_cores;            /* a bit for each of the slower cores, by number: "small-core" in the device tree */
 	uint64_t fb_base;                /* the framebuffer the firmware reports (GOP): it tells this device apart */
+	uint32_t fb_height;              /* ... and, when two devices share that base (the OnePlus 8 and 8 Pro), its height; 0: any */
 	/*
 	 * The port's partition on this device's flash: where the iOS volume lies, and the only one a
 	 * write may reach (block_is_darwin). Its GPT identity, all of it: name, type and unique GUIDs,
@@ -613,7 +614,7 @@ static const struct platform platform_instantnoodle = {
 	.gic_dist = 0x17A00000, .gic_redist = 0x17A60000, .uart = 0, .log_other_cpu = 1,
 	.cores = 8, .core_shift = 8,
 	.small_cores = 0x0f,
-	.fb_base = 0x9C000000,
+	.fb_base = 0x9C000000, .fb_height = 2400,
 	/*
 	 * Its whole userdata (sda23), which the port took over once Android was gone: no GPT change.
 	 * The layout in it is darwin's (the iOS volume and both cryptexes from block 0, written with
@@ -628,6 +629,25 @@ static const struct platform platform_instantnoodle = {
 };
 
 /*
+ * OnePlus 8 Pro (instantnoodlep, SM8250, IN2023 12 GB): the OnePlus 8's SoC, GIC and cores. Its ABL leaves the
+ * continuous splash at the same 0x9c000000, but 1080 x 2376 (abl_log: "DisplayDxe: Resolution 1080x2376"): the
+ * UEFI's PcdFrameBufferHeight tells the two phones apart. The panel (Samsung AMS678UW01 / ANA6706) sits behind a
+ * Pixelworks Iris chip that ABL has set up; the kernel keeps the firmware's scan-out and rate on this board unless
+ * fb_push= is given (MiniIOMobileFramebuffer.cpp, pushMode()), until the push path and the 120 Hz switch are checked. This one keeps its Android: the port's own
+ * partition is `darwin`, cut off the end of userdata (tools/userdata-carve.py), as on the POCO X5 Pro.
+ */
+static const struct platform platform_instantnoodlep = {
+	.name = "instantnoodlep", .io_base = 0x00400000, .io_size = 0x3FC00000,
+	.gic_dist = 0x17A00000, .gic_redist = 0x17A60000, .uart = 0, .log_other_cpu = 1,
+	.cores = 8, .core_shift = 8,
+	.small_cores = 0x0f,
+	.fb_base = 0x9C000000, .fb_height = 2376,
+	.store = "darwin", .store_type = BLOCK_DARWIN_TYPE, .store_uniq = BLOCK_DARWIN_UNIQ,
+	.store_first = BLOCK_DARWIN_FIRST, .store_last = BLOCK_DARWIN_LAST,
+	.board_args = "board_thermal_gpuss_0=0xf board_thermal_gpuss_1=0x108",
+};
+
+/*
  * The devices the loader knows, told apart by the framebuffer base their UEFI reports. A port to another
  * device adds its description here (common/new-device.sh writes a starting point, docs/PORTING.md says
  * where each value comes from); a display that matches none is QEMU's ramfb.
@@ -635,6 +655,7 @@ static const struct platform platform_instantnoodle = {
 static const struct platform *const platforms[] = {
 	&platform_redwood,
 	&platform_instantnoodle,
+	&platform_instantnoodlep,
 };
 
 /* ------------------------------------------------------------------------ */
@@ -647,6 +668,8 @@ static const struct platform *const platforms[] = {
  */
 static void usb_quiesce(void);
 static const struct platform *PLAT;
+/* the SM8250 phones: the OnePlus 8 and 8 Pro share the PM8150 power-on block, the SPMI arbiter and the bootloader menu entries */
+#define PLAT_IS_KONA() (PLAT == &platform_instantnoodle || PLAT == &platform_instantnoodlep)
 
 /*
  * What the PMIC does when the SoC lets go of PS_HOLD (a PSCI reset or switch-off ends with that): the
@@ -709,7 +732,7 @@ pon_reg(int ch, uint8_t reg, int write, uint8_t *value)
 static int
 spmi_channel(uint32_t id, int writable)
 {
-	if (PLAT != &platform_instantnoodle || (*(volatile uint32_t *)SPMI_CORE >> 28) != 5) {
+	if (!PLAT_IS_KONA() || (*(volatile uint32_t *)SPMI_CORE >> 28) != 5) {
 		return -1;
 	}
 	for (int n = 0; n < 512; n++) {
@@ -752,7 +775,7 @@ pon_ps_hold(uint8_t type)
 	int ch = spmi_channel(0x008, 1);
 	uint8_t ctl, ctl2, off;
 
-	if (PLAT != &platform_instantnoodle) {
+	if (!PLAT_IS_KONA()) {
 		return;
 	}
 	if (ch < 0 || !pon_reg(ch, 0x5b, 0, &ctl2) || !pon_reg(ch, 0x5a, 0, &ctl)) {
@@ -3069,6 +3092,17 @@ screen_now(uint64_t *base, uint32_t *stride)
 }
 static uint64_t win_base, win_size; /* XNU's physical memory window, claimed once */
 static uint64_t resident_rd_size;   /* root image kept at win_base + RESIDENT_RD_OFFSET, 0 if none */
+/*
+ * hk_data=3: a data volume that outlives the kernel's runs. The loader stays resident from run to run, and the resident
+ * root image (above) lies in the kernel's window yet outside what the kernel allocates from; the volume lies right after
+ * it, in the same static region: the kernel reaches it through its direct map as it does the image, nobody clears it
+ * but this loader, and iOS keeps its /private/var from one run to the next. A reset or power-off loses it (nothing is
+ * written anywhere). It is cleared when the resident image is uploaded again (the place moves with the image's size)
+ * or another size is asked for. Needs the resident image (xl ramdisk): without one there is no stable place.
+ */
+static uint64_t persist_pa, persist_bytes;
+static int persist_valid;           /* the region has been cleared for this resident image and this size */
+
 static char last_result[64] = "idle";
 
 static void
@@ -3278,6 +3312,41 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	}
 	/* everything up to topOfKernelData is the kernel's static region: it must cover both images */
 	uint64_t dt_pa = rd1_size != 0 ? rd1_pa + rd1_size : rd_pa + rd_size;
+	/* hk_data=3 (the scan of the command line is further down; the line is in pi.cmdline): the kept volume, after the resident image */
+	uint64_t want_persist = 0;
+	for (const char *c = pi.cmdline; *c; c++) {
+		if (starts_with(c, "hk_data=3") && (c == pi.cmdline || c[-1] == ' ') && (c[9] == 0 || c[9] == ' ')) {
+			want_persist = 1;
+		}
+	}
+	if (want_persist) {
+		uint64_t mb = 1536;
+
+		for (const char *c = pi.cmdline; *c; c++) {
+			if (starts_with(c, "hk_data_mb=") && (c == pi.cmdline || c[-1] == ' ')) {
+				uint64_t n = 0;
+
+				for (const char *d = c + 11; *d >= '0' && *d <= '9' && n < 100000; d++) {
+					n = n * 10 + (uint64_t)(*d - '0');
+				}
+				if (n >= 64 && n <= 3072) {
+					mb = n;
+				}
+			}
+		}
+		if (resident_rd_size == 0) {
+			print("hk_data=3: needs the resident image (xl ramdisk): not kept\n");
+		} else {
+			uint64_t bytes = mb << 20, at = (dt_pa + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
+
+			if (persist_pa != at || persist_bytes != bytes) {
+				persist_valid = 0;
+			}
+			persist_pa = at;
+			persist_bytes = bytes;
+			dt_pa = at + bytes;
+		}
+	}
 	uint64_t dt_max = 0x10000;
 	uint64_t ba_pa = dt_pa + dt_max;
 	uint64_t top = ba_pa + PAGE_SIZE_MAX;
@@ -3298,6 +3367,15 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		memcpy((void *)(sg->vmaddr + slide), kernel + sg->fileoff, sg->filesize);
 	}
 	print("kernel loaded at pa %x..%x\n", kern_lo, kern_hi);
+	if (persist_pa != 0 && persist_bytes != 0 && want_persist) {
+		if (!persist_valid) {
+			memset((void *)(uintptr_t)persist_pa, 0, (size_t)persist_bytes);
+			persist_valid = 1;
+			print("hk_data=3: %d MB at pa %x kept between runs (new, cleared)\n", persist_bytes >> 20, persist_pa);
+		} else {
+			print("hk_data=3: %d MB at pa %x kept from an earlier run\n", persist_bytes >> 20, persist_pa);
+		}
+	}
 	if (rd_resident) {
 		print("resident ramdisk at pa %x size %x\n", rd_pa, rd_size);
 	} else if (rd_size != 0) {
@@ -3499,6 +3577,18 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		for (const char *c = "hv_wdt_pet=1 "; *c && n < BOOT_LINE_LENGTH - 1; c++) {
 			ba->commandLine[n++] = *c;
 		}
+	}
+	if (want_persist && persist_pa != 0 && persist_valid) {
+		static const char prefix[] = "hk_data_pa=0x";
+		static const char hex[] = "0123456789abcdef";
+
+		for (const char *c = prefix; *c && n < BOOT_LINE_LENGTH - 1; c++) {
+			ba->commandLine[n++] = *c;
+		}
+		for (int shift = 60; shift >= 0 && n < BOOT_LINE_LENGTH - 1; shift -= 4) {
+			ba->commandLine[n++] = hex[(persist_pa >> shift) & 0xf];
+		}
+		if (n < BOOT_LINE_LENGTH - 1) ba->commandLine[n++] = ' ';
 	}
 	if (block_enabled) {
 		static const char prefix[] = "ufs_shared_pa=0x";
@@ -4285,6 +4375,7 @@ fb_command(char *cmd)
 			if (got == total) {
 				if (to_ramdisk) {
 					resident_rd_size = total;
+				persist_valid = 0;          /* (hk_data=3: the kept volume lies after the image, which has changed) */
 				} else {
 					download_len = total;
 				}
@@ -4618,7 +4709,8 @@ efi_main(efi_handle image, efi_system_table *st)
 		SCREEN.height = GOP->mode->info->height;
 		SCREEN.stride = GOP->mode->info->pixels_per_scanline * 4;
 		for (unsigned i = 0; i < sizeof(platforms) / sizeof(platforms[0]); i++)
-			if (platforms[i]->fb_base == SCREEN.base)
+			if (platforms[i]->fb_base == SCREEN.base &&
+			    (platforms[i]->fb_height == 0 || platforms[i]->fb_height == SCREEN.height))
 				PLAT = platforms[i];
 		if (PLAT == &platform_qemu_virt)
 			ramfb_phone_screen();

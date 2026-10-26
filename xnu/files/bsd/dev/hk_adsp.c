@@ -1026,10 +1026,24 @@ root_file(const char *name, uint64_t *size)
 
 static bool from_root;                  /* the image is in memory of ours (root_file()), to be given back once written */
 
-/* For the sound (hk_sound.c): a file of /fw on the root, read whole into memory of ours, and given back. */
+/*
+ * For the sound (hk_sound.c): a file of /fw on the root, or of fw/ in the small image (ADSP=1 userland/build.sh puts the amplifiers'
+ * configuration there too), read whole into memory of ours, and given back.
+ */
+extern const uint8_t *hk_image_file(const char *dir, const char *name, uint64_t *size, int *disk_out);
 const uint8_t *
 hk_adsp_fw_file(const char *name, uint64_t *size)
 {
+	const uint8_t *in_image = hk_image_file("fw", name, size, NULL);  /* (hk_image.c) */
+
+	if (in_image != NULL) {
+		uint8_t *copy = kalloc_data(*size, Z_WAITOK);
+
+		if (copy != NULL) {
+			memcpy(copy, in_image, *size);
+			return copy;
+		}
+	}
 	return root_file(name, size);
 }
 
@@ -3449,6 +3463,10 @@ hk_adsp_init(void)
 	if (instantnoodle_board()) {
 		adsp_memory = 0x8fe00000u;      /* dt: pil_adsp_region@8fe00000 (in the UEFI's "PIL Reserved") */
 		adsp_memory_size = 0x02500000u;
+		if (instantnoodlep_board()) {
+			/* the 8 Pro's live dt: pil_adsp_region@91b00000, the same 0x2500000 bytes (the 8's address is not the Pro's) */
+			adsp_memory = 0x91b00000u;
+		}
 	}
 	if (last_step == 0) {
 		/* all of it, on a thread of its own, and left up */

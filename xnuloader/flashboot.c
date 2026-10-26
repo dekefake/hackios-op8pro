@@ -983,7 +983,7 @@ fb_standalone(void)
 	fb_offmode();
 	have[MENU_ANDROID] = !PLAT->no_android && ab_available();
 	/* the phone's own modes, by the reason in its PMIC (reboot_to()): never the countdown's choice */
-	have[MENU_RECOVERY] = have[MENU_BOOTLOADER] = have[MENU_POWER_OFF] = PLAT == &platform_instantnoodle;
+	have[MENU_RECOVERY] = have[MENU_BOOTLOADER] = have[MENU_POWER_OFF] = PLAT_IS_KONA();
 	for (;;) {
 		int auto_slot = fb.bio ? fb_auto_slot() : -1, by_hand, choice, dflt;
 

@@ -425,6 +425,23 @@ linuxkpi_ieee80211_get_channel(struct wiphy *wiphy, uint32_t frequency)
 	return (NULL);
 }
 
+/*
+ * The traffic identifier of a frame (ath11k's dp_rx.c asks for it of the frames it defragments): the low four bits
+ * of the QoS control field, which follows the three addresses (the fourth too when the frame goes from one
+ * distribution system to another); a frame without one has none (FreeBSD's linux_80211.c answers the same).
+ */
+uint8_t
+linuxkpi_ieee80211_get_tid(struct ieee80211_hdr *hdr, bool nonqos_ok)
+{
+	const uint8_t *frame = (const uint8_t *)hdr;
+	const unsigned control = frame[0] | frame[1] << 8;
+
+	if ((control & 0x008c) != 0x0088) {     /* (type data, and the subtype's QoS bit) */
+		return ((uint8_t)(nonqos_ok ? 16 : 0));
+	}
+	return (frame[(control & 0x0300) == 0x0300 ? 30 : 24] & 0x0f);
+}
+
 /* ---- what the driver has the layer above do for it ------------------------------------------------- */
 
 void

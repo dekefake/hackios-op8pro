@@ -59,7 +59,17 @@ instantnoodle_board(void)
 {
 	char board[32] = "";
 
-	return PE_parse_boot_argn("board", board, sizeof(board)) && strcmp(board, "instantnoodle") == 0;
+	/* the OnePlus 8 Pro (instantnoodlep) is the same SoC and mostly the same board: it takes this phone's paths */
+	return PE_parse_boot_argn("board", board, sizeof(board)) &&
+	       (strcmp(board, "instantnoodle") == 0 || strcmp(board, "instantnoodlep") == 0);
+}
+
+bool
+instantnoodlep_board(void)
+{
+	char board[32] = "";
+
+	return PE_parse_boot_argn("board", board, sizeof(board)) && strcmp(board, "instantnoodlep") == 0;
 }
 
 /* ---- pins ------------------------------------------------------------------------------------- */

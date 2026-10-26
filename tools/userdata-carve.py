@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Cut a partition of this port's own off the end of Android's userdata: the new GPT, made and checked here.
 
-usage: userdata-carve.py [--move] DIR GIB [NAME]
+usage: userdata-carve.py [--move | --wipe] DIR GIB [NAME]
   DIR   what was saved from the phone under Android (adb's root shell), all read only:
           gpt-head.bin             the first 8 blocks of LUN 0 (dd if=/dev/block/sda bs=4096 count=8)
           gpt-tail.bin             its last 8 blocks (... skip=BLOCKS-8 count=8)
@@ -15,6 +15,11 @@ usage: userdata-carve.py [--move] DIR GIB [NAME]
           checkpoint, and gives up -- changing nothing -- if it cannot). Without --move such a tail is
           refused. With it, the table is still only made once sb-after.bin shows the filesystem shrunk to
           exactly the size asked for: that is the kernel saying everything was moved.
+  --wipe  the owner has agreed to userdata being ERASED (Android makes a new one at its next boot, or
+          `fastboot erase userdata` first): nothing of the filesystem is read or kept, so only gpt-head.bin and
+          gpt-tail.bin are needed, userdata ends where NAME begins, and NAME takes the last GIB GiB of the
+          unit, from a 2 MB boundary. This is the way for a phone whose userdata is metadata-encrypted (the
+          superblock is not on the flash as it is, and F2FS_IOC_RESIZE_FS would be the only way to keep it).
 
 Android's userdata on this phone is a plain f2fs (no metadata encryption: its superblock lies on the
 flash as it is) that fills its partition, the last of LUN 0. Taking GIB off its end takes two steps
@@ -115,14 +120,17 @@ def check(name, head, tail, disk):
 def main():
     argv = sys.argv[1:]
     move = '--move' in argv
-    argv = [a for a in argv if a != '--move']
+    wipe = '--wipe' in argv
+    argv = [a for a in argv if a not in ('--move', '--wipe')]
+    if move and wipe:
+        sys.exit('userdata-carve.py: --move and --wipe are two ways; not both')
     if len(argv) not in (2, 3):
         sys.exit(__doc__)
     d, gib = argv[0], int(argv[1])
     name = argv[2] if len(argv) > 2 else 'darwin'
     head = open(f'{d}/gpt-head.bin', 'rb').read()
     tail = open(f'{d}/gpt-tail.bin', 'rb').read()
-    sb = open(f'{d}/userdata-meta-before.bin', 'rb').read(BS)[1024:2048]
+    sb = None if wipe else open(f'{d}/userdata-meta-before.bin', 'rb').read(BS)[1024:2048]
     if len(head) != 8 * BS or len(tail) != 8 * BS:
         sys.exit('userdata-carve.py: gpt-head.bin and gpt-tail.bin are to be 8 blocks each')
     # the backup header says where it is: the last block of the unit
@@ -145,58 +153,70 @@ def main():
         sys.exit('userdata-carve.py: no free entry after the used ones')
     slot = free[0]
 
-    # the f2fs of userdata: where its main area is, and how its segments are filled
-    magic, = struct.unpack_from('<I', sb, 0)
-    log_bs, log_bps = struct.unpack_from('<I', sb, 16)[0], struct.unpack_from('<I', sb, 20)[0]
-    block_count, = struct.unpack_from('<Q', sb, 36)
-    segs_main, = struct.unpack_from('<I', sb, 68)
-    main_blkaddr, = struct.unpack_from('<I', sb, 92)
-    if magic != 0xf2f52010 or log_bs != 12:
-        sys.exit('userdata-carve.py: userdata does not begin with a plain f2fs of 4 KB blocks')
-    per_seg = 1 << log_bps
-    part_blocks = entries[u]['last'] - entries[u]['first'] + 1
-    if block_count > part_blocks:
-        sys.exit('userdata-carve.py: the f2fs is bigger than its partition')
-    cut = gib * 2**30 // BS // per_seg            # segments taken off the end
-    new_segs = segs_main - cut
-    new_blocks = main_blkaddr + new_segs * per_seg  # what F2FS_IOC_RESIZE_FS is asked for
-    fs_blocks = block_count - cut * per_seg         # what the f2fs is then: its slack stays
-    try:
-        after = open(f'{d}/sb-after.bin', 'rb').read(BS)[1024:2048]
-    except FileNotFoundError:
-        after = None
-    if after is not None:
-        got, = struct.unpack_from('<Q', after, 36)
-        got_main, = struct.unpack_from('<I', after, 68)
-        print(f'f2fs on the phone now: {got} blocks, {got_main} segments in its main area')
-        if (got, got_main) != (fs_blocks, new_segs):
-            sys.exit(f'userdata-carve.py: expected {fs_blocks} blocks and {new_segs} segments after the shrink')
-    part_end = entries[u]['first'] + fs_blocks                                        # userdata: exactly the f2fs
-    new_start = (part_end + per_seg - 1) // per_seg * per_seg                          # 2 MB from the unit's start
-    valid = {}
-    for line in open(f'{d}/segment_info-before.txt'):
-        m = re.match(r'^(\d+)\s+(.*)$', line)
-        if m:
-            for k, e in enumerate(m[2].split()):
-                valid[int(m[1]) + k] = int(e.split('|')[1])
-    if len(valid) != segs_main:
-        sys.exit(f'userdata-carve.py: segment_info has {len(valid)} segments, the superblock {segs_main}')
-    in_tail = [s for s in range(new_segs, segs_main) if valid[s]]
-    last_used = max(s for s in valid if valid[s])
-    print(f'f2fs: {block_count} blocks, main area from block {main_blkaddr}, {segs_main} segments of {per_seg} blocks; '
-          f'the last segment holding data is {last_used}')
-    if in_tail and not move:
-        sys.exit(f'userdata-carve.py: {len(in_tail)} segments past the new end hold data; shrink with less, '
-                 f'or let the kernel move it first (--move)')
-    if in_tail:
-        moved = sum(valid[s] for s in in_tail)
-        print(f'f2fs: {len(in_tail)} segments past the new end hold {moved} blocks ({moved * BS / 2**20:.0f} MiB): '
-              f'the resize moves them (--move)')
-        if after is None:
-            print(f'\nnothing made yet: on the phone, first')
-            print(f'  /data/local/tmp/f2fs-resize /data {new_blocks}')
-            print(f'then save the first block of userdata as {d}/sb-after.bin and run this again')
-            return 0
+    if wipe:
+        per_seg = 512                                       # 2 MB, as f2fs's segments are
+        part_blocks = entries[u]['last'] - entries[u]['first'] + 1
+        new_first = (ph['last_usable'] + 1 - gib * 2**30 // BS) // per_seg * per_seg
+        part_end = new_first
+        new_start = new_first
+        fs_blocks = part_end - entries[u]['first']
+        if fs_blocks <= 0:
+            sys.exit(f'userdata-carve.py: {gib} GiB leave nothing of userdata')
+        print(f'--wipe: userdata keeps {fs_blocks * BS / 2**30:.2f} GiB and {name} takes the last {gib} GiB; '
+              f'the old filesystem is not looked at')
+    else:
+        # the f2fs of userdata: where its main area is, and how its segments are filled
+        magic, = struct.unpack_from('<I', sb, 0)
+        log_bs, log_bps = struct.unpack_from('<I', sb, 16)[0], struct.unpack_from('<I', sb, 20)[0]
+        block_count, = struct.unpack_from('<Q', sb, 36)
+        segs_main, = struct.unpack_from('<I', sb, 68)
+        main_blkaddr, = struct.unpack_from('<I', sb, 92)
+        if magic != 0xf2f52010 or log_bs != 12:
+            sys.exit('userdata-carve.py: userdata does not begin with a plain f2fs of 4 KB blocks')
+        per_seg = 1 << log_bps
+        part_blocks = entries[u]['last'] - entries[u]['first'] + 1
+        if block_count > part_blocks:
+            sys.exit('userdata-carve.py: the f2fs is bigger than its partition')
+        cut = gib * 2**30 // BS // per_seg            # segments taken off the end
+        new_segs = segs_main - cut
+        new_blocks = main_blkaddr + new_segs * per_seg  # what F2FS_IOC_RESIZE_FS is asked for
+        fs_blocks = block_count - cut * per_seg         # what the f2fs is then: its slack stays
+        try:
+            after = open(f'{d}/sb-after.bin', 'rb').read(BS)[1024:2048]
+        except FileNotFoundError:
+            after = None
+        if after is not None:
+            got, = struct.unpack_from('<Q', after, 36)
+            got_main, = struct.unpack_from('<I', after, 68)
+            print(f'f2fs on the phone now: {got} blocks, {got_main} segments in its main area')
+            if (got, got_main) != (fs_blocks, new_segs):
+                sys.exit(f'userdata-carve.py: expected {fs_blocks} blocks and {new_segs} segments after the shrink')
+        part_end = entries[u]['first'] + fs_blocks                                        # userdata: exactly the f2fs
+        new_start = (part_end + per_seg - 1) // per_seg * per_seg                          # 2 MB from the unit's start
+        valid = {}
+        for line in open(f'{d}/segment_info-before.txt'):
+            m = re.match(r'^(\d+)\s+(.*)$', line)
+            if m:
+                for k, e in enumerate(m[2].split()):
+                    valid[int(m[1]) + k] = int(e.split('|')[1])
+        if len(valid) != segs_main:
+            sys.exit(f'userdata-carve.py: segment_info has {len(valid)} segments, the superblock {segs_main}')
+        in_tail = [s for s in range(new_segs, segs_main) if valid[s]]
+        last_used = max(s for s in valid if valid[s])
+        print(f'f2fs: {block_count} blocks, main area from block {main_blkaddr}, {segs_main} segments of {per_seg} blocks; '
+              f'the last segment holding data is {last_used}')
+        if in_tail and not move:
+            sys.exit(f'userdata-carve.py: {len(in_tail)} segments past the new end hold data; shrink with less, '
+                     f'or let the kernel move it first (--move)')
+        if in_tail:
+            moved = sum(valid[s] for s in in_tail)
+            print(f'f2fs: {len(in_tail)} segments past the new end hold {moved} blocks ({moved * BS / 2**20:.0f} MiB): '
+                  f'the resize moves them (--move)')
+            if after is None:
+                print(f'\nnothing made yet: on the phone, first')
+                print(f'  /data/local/tmp/f2fs-resize /data {new_blocks}')
+                print(f'then save the first block of userdata as {d}/sb-after.bin and run this again')
+                return 0
 
     new_first = new_start
     new_last = ph['last_usable']
@@ -240,9 +260,12 @@ def main():
     open(f'{d}/gpt-tail.new', 'wb').write(new_tail)
     print(f'\nmade {d}/gpt-head.new and {d}/gpt-tail.new\n')
     print('on the phone, in this order (adb root shell):')
-    print(f'  1. /data/local/tmp/f2fs-resize /data {new_blocks}     # the filesystem first')
-    print(f'     and, with no reboot in between (the boot would grow it back), save its first block as sb-after.bin')
-    print(f'     and run this again: it checks the shrunk size and makes the table for it')
+    if wipe:
+        print('  1. nothing of the filesystem: userdata is erased afterwards (fastboot erase userdata), and Android makes a new one')
+    else:
+        print(f'  1. /data/local/tmp/f2fs-resize /data {new_blocks}     # the filesystem first')
+        print(f'     and, with no reboot in between (the boot would grow it back), save its first block as sb-after.bin')
+        print(f'     and run this again: it checks the shrunk size and makes the table for it')
     # each copy: its table before its header, so that a write cut short leaves a header whose table
     # CRC is wrong (and the other copy is used) rather than a right header over a half-written table
     tl, tn = ph['entries_lba'], (ph['count'] * ph['entry_size'] + BS - 1) // BS

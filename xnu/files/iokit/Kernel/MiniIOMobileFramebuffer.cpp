@@ -253,7 +253,18 @@ instantnoodle(void)
 	char board[32] = "";
 
 	PE_parse_boot_argn("board", board, sizeof(board));
-	return strcmp(board, "instantnoodle") == 0;
+	/* (the OnePlus 8 Pro, instantnoodlep, has the same display engine; its loader entry passes fb_push=0 fb_hz=60 until the push path is checked on it) */
+	return strcmp(board, "instantnoodle") == 0 || strcmp(board, "instantnoodlep") == 0;
+}
+
+/* The OnePlus 8 Pro only: same engine, another panel (Samsung ANA6706 behind a Pixelworks Iris chip, 1080 x 2376 as ABL leaves it). */
+static bool
+instantnoodlep(void)
+{
+	char board[32] = "";
+
+	PE_parse_boot_argn("board", board, sizeof(board));
+	return strcmp(board, "instantnoodlep") == 0;
 }
 
 /* The MDSS registers (gDPU), once: only on a display the firmware left powered, with its register clock on. */
@@ -415,6 +426,21 @@ probeDisplay(void)
 #define PUSH_TIMEOUT_MS         100                     /* six refreshes: the panel or the MDP has stopped */
 
 static TUNABLE(uint32_t, gPush, "fb_push", 2);   /* 2: two framebuffers, 1: one, 0: the firmware's autorefresh */
+/*
+ * fb_push, as the boot-arg says; on the OnePlus 8 Pro the firmware's autorefresh stays unless fb_push= is given (0 there
+ * until the push path has been checked on that panel: docs/subsystems/display.md).
+ */
+static uint32_t
+pushMode(void)
+{
+	static int pro = -1;
+	uint32_t given;
+
+	if (pro < 0) {
+		pro = instantnoodlep() && !PE_parse_boot_argn("fb_push", &given, sizeof(given));
+	}
+	return pro ? 0 : gPush;
+}
 static TUNABLE(uint32_t, gPushIrq, "fb_push_irq", 1);   /* 0: PINGPONG_0's done bit polled, the MDSS interrupt left alone */
 static uint32_t gAutorefresh;           /* the firmware's setting, back for the loader (hk_display_quiesce) */
 /*
@@ -604,7 +630,7 @@ static bool
 dsiPacket(vm_offset_t dsi, uint8_t type, const uint8_t * bytes, unsigned n)
 {
 	volatile uint8_t * buffer = (volatile uint8_t *) gDsiDma;
-	bool shortPacket = type == 0x05 || type == 0x15;
+	bool shortPacket = type == 0x05 || type == 0x15 || type == 0x07;     /* 0x07: DSC compression mode (the OnePlus 8 Pro's switch) */
 	unsigned length = shortPacket ? 4 : (4 + n + 3) & ~3u, waited;
 
 	if (n > 255 || (shortPacket && n > 2)) {
@@ -637,6 +663,43 @@ dsiPacket(vm_offset_t dsi, uint8_t type, const uint8_t * bytes, unsigned n)
 	return waited < 2000;
 }
 
+static void panelWait(unsigned ms);
+static bool dsiReady(void);
+
+/*
+ * OnePlus 8 Pro (instantnoodlep): this panel's own refresh switch, the live device tree's qcom,mdss-dsi-timing-switch-command of
+ * "qcom,mdss_dsi_oppo19811_samsung_1440_3168_dsc_cmd" for its 1080 x 2376 modes (timing@0: 60 Hz, timing@1: 120 Hz; same DSI clock,
+ * state dsi_hs_mode). Each command: type, milliseconds to wait after it, length, bytes; 0 ends. Types as the device tree has
+ * them: 0x39 DCS long write, 0x15 DCS short write with one parameter, 0x07 compression mode (DSC on). 0xf0 5a 5a / a5 a5 unlock and
+ * lock the panel's test-key registers; 0x60 is its refresh-rate select (02: 60 Hz, 22: 120 Hz); 0x2a / 0x2b the column and page
+ * address (0..1079, 0..2375). The ANA6705's k60Hz/k90Hz above are another panel's and are never sent here.
+ */
+static const uint8_t kPro60Hz[] = {
+	0x39, 0, 3, 0xf0, 0x5a, 0x5a,
+	0x07, 0, 1, 0x01,
+	0x15, 0, 2, 0x60, 0x02,
+	0x15, 0, 2, 0xba, 0x02,
+	0x15, 0, 2, 0xf7, 0x0f,
+	0x39, 0, 5, 0x2a, 0x00, 0x00, 0x04, 0x37,
+	0x39, 0, 5, 0x2b, 0x00, 0x00, 0x09, 0x47,
+	0x39, 6, 3, 0xf0, 0xa5, 0xa5,
+	0,
+};
+static const uint8_t kPro120Hz[] = {
+	0x39, 0, 3, 0xf0, 0x5a, 0x5a,
+	0x07, 0, 1, 0x01,
+	0x15, 0, 2, 0x60, 0x22,
+	0x15, 0, 2, 0xba, 0x02,
+	0x15, 0, 2, 0xf7, 0x0f,
+	0x39, 0, 5, 0x2a, 0x00, 0x00, 0x04, 0x37,
+	0x39, 0, 5, 0x2b, 0x00, 0x00, 0x09, 0x47,
+	0x15, 0, 2, 0xb9, 0x01,
+	0x15, 0, 2, 0xb0, 0x01,
+	0x39, 0, 5, 0xb9, 0x0c, 0x54, 0x00, 0x0b,
+	0x39, 7, 3, 0xf0, 0xa5, 0xa5,
+	0,
+};
+
 /*
  * No transfer in flight (pushStart()): the panel to `hz` (60 or 90) if it is not there already, INTF1's TE
  * counter to match (the firmware's setting is for 60).
@@ -644,6 +707,48 @@ dsiPacket(vm_offset_t dsi, uint8_t type, const uint8_t * bytes, unsigned n)
 static void
 panelRate(unsigned hz)
 {
+	if (instantnoodlep()) {
+		/* k60Hz/k90Hz are the ANA6705's: never to the 8 Pro's ANA6706; its own switch, from its device tree, with fb_dcs=1 */
+		if ((hz != 60 && hz != 120) || !dsiReady()) {
+			displayLog("display: panelRate(%u) skipped: %s\n", hz, hz != 60 && hz != 120 ? "this panel has 60 and 120 Hz" :
+			    "no panel packets without fb_dcs=1");
+			return;
+		}
+		vm_offset_t dsi = gDSI;
+		uint32_t ctrl = displayReg(dsi, DSI_CTRL), trig = displayReg(dsi, DSI_TRIG_CTRL), dma = displayReg(dsi, DSI_CMD_DMA_CTRL);
+		unsigned before = teRate(), sent = 0;           /* (measured first: INTF1's counter, scaled below, counts the faster rate at once) */
+		uint32_t vsync = displayReg(gDPU, INTF1_TE_VSYNC), count = vsync & 0x7ffff;
+
+		if (gTeVsync == 0 && hz > 60) {
+			gTeVsync = vsync;                       /* (the firmware's, for the loader: hk_display_quiesce) */
+		}
+		if (hz > 60) {
+			displayWrite(INTF1_TE_VSYNC, (vsync & ~0x7ffffu) | (count * 60 / hz));
+		}
+		if (before + 10 > hz && before < hz + 10) {
+			displayLog("display: panelRate(%u): TE already %u Hz, nothing sent\n", hz, before);
+			return;                                 /* (already: the panel keeps its rate from the run before) */
+		}
+		if (!(ctrl & 1) || !(ctrl & (1u << 2)) || (trig & 7) != 4) {
+			displayLog("display: DSI0 not in command mode with software-triggered DMA (ctrl %#x trig %#x); the panel stays at %u Hz\n",
+			    ctrl, trig, before);
+			return;
+		}
+		*(volatile uint32_t *)(dsi + DSI_CMD_DMA_CTRL) = dma & ~DSI_CMD_DMA_LOW_POWER;     /* "dsi_hs_mode" */
+		for (const uint8_t * c = hz == 120 ? kPro120Hz : kPro60Hz; *c != 0 && dsiPacket(dsi, c[0], c + 3, c[2]); c += 3 + c[2]) {
+			sent++;
+			if (c[1] != 0) {
+				panelWait(c[1]);
+			}
+		}
+		*(volatile uint32_t *)(dsi + DSI_CMD_DMA_CTRL) = dma;
+		if (hz == 60 && gTeVsync != 0) {
+			displayWrite(INTF1_TE_VSYNC, gTeVsync);
+		}
+		displayLog("display: %u Hz, this panel's own switch: %u commands sent (ctrl %#x trig %#x dma %#x); TE %u Hz before, %u Hz after\n",
+		    hz, sent, ctrl, trig, dma, before, teRate());
+		return;
+	}
 	if (!dsiMap()) {
 		return;
 	}
@@ -685,11 +790,22 @@ panelWait(unsigned ms)
 	}
 }
 
-/* DSI0 in command mode with software-triggered DMA, as the firmware leaves it (panelRate()) */
+/*
+ * DSI0 in command mode with software-triggered DMA, as the firmware leaves it (panelRate()).
+ * OnePlus 8 Pro: no panel packet (brightness, display off/on) goes out unless fb_dcs=1 is given. They are standard DCS commands
+ * (0x51, 0x28, 0x29), but the DMA reads its page through the display's SMMU context (here bank 5, which must not be read to check),
+ * and it is not known that the whole of cont_splash_region is mapped there, as it is on the OnePlus 8.
+ */
 static bool
 dsiReady(void)
 {
-	if (!dsiMap()) {
+	static int allowed = -1;
+	uint32_t dcs;
+
+	if (allowed < 0) {
+		allowed = !instantnoodlep() || (PE_parse_boot_argn("fb_dcs", &dcs, sizeof(dcs)) && dcs != 0);
+	}
+	if (!allowed || !dsiMap()) {
 		return false;
 	}
 	uint32_t ctrl = displayReg(gDSI, DSI_CTRL), trig = displayReg(gDSI, DSI_TRIG_CTRL);
@@ -720,7 +836,7 @@ dsiSequence(const uint8_t * c)
 static bool
 pushStart(unsigned height)
 {
-	if (!gPush || !instantnoodle() || !mapDisplay()) {
+	if (!pushMode() || !instantnoodle() || !mapDisplay()) {
 		return false;
 	}
 	uint32_t top = displayReg(gDPU, CTL0_TOP), intf = displayReg(gDPU, CTL0_INTF_ACTIVE);
@@ -764,8 +880,8 @@ pushStart(unsigned height)
 		}
 	}
 	gPushing = true;
-	if (refreshHz() == 90 || refreshHz() == 60) {
-		panelRate(refreshHz());
+	if (refreshHz() == 90 || refreshHz() == 60 || (refreshHz() == 120 && instantnoodlep())) {
+		panelRate(refreshHz());         /* (120: the OnePlus 8 Pro's panel only; its panelRate() sends that panel's own commands) */
 	}
 	displayLog("display: autorefresh %#x off after %u us; each frame is pushed through CTL0 on the panel's TE (%s)\n",
 	    gAutorefresh, waited * 100, gPushIrqLive ? "interrupt" : "polled");
@@ -1352,7 +1468,7 @@ IOMobileFramebuffer::start(IOService * provider)
 	fRowBytes = vinfo.v_rowbytes;
 	probeDisplay();
 	uint32_t hz;
-	if (instantnoodle() && gPush != 0 && !PE_parse_boot_argn("fb_hz", &hz, sizeof(hz))) {
+	if (instantnoodle() && !instantnoodlep() && pushMode() != 0 && !PE_parse_boot_argn("fb_hz", &hz, sizeof(hz))) {
 		gPanelHz = 90;                  /* (fb_hz=60: the firmware's rate) */
 	}
 	fWidth = gFBWidth ? gFBWidth : fPanelWidth;
@@ -2183,7 +2299,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 		uint32_t rowBytes = (fPanelWidth * 4 + 63) & ~63u, stride0 = 0, stride1 = 0;
 		uint64_t panelSize = round_page_64((uint64_t) rowBytes * fPanelHeight);
 
-		if (pushStart(fPanelHeight) && gPush == 2 && gPanelGpu) {
+		if (pushStart(fPanelHeight) && pushMode() == 2 && gPanelGpu) {
 			/* both inside the display's memory, apart, and the pipes reading the boot framebuffer's pitch now */
 			stride0 = displayReg(gDPU, VIG0_SRC_YSTRIDE0);
 			stride1 = displayReg(gDPU, VIG1_SRC_YSTRIDE0);
@@ -2218,7 +2334,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 			    "pipes had %#x %#x)%s\n", (uint64_t) vinfo.v_physaddr, DOUBLE_PHYS, fPanel[0] ? fPanel[0]->sid : 0,
 			    fPanel[1] ? fPanel[1]->sid : 0, rowBytes, stride0, stride1, gDouble ? "" : ": not taken, copied here");
 		}
-		if (gPushing && gPush == 2 && !gDouble) {
+		if (gPushing && pushMode() == 2 && !gDouble) {
 			size_t frame = round_page((size_t) fRowBytes * fPanelHeight);
 
 			fBuffer[0] = fBase;

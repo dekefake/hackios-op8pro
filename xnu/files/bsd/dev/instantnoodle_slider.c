@@ -260,6 +260,13 @@ instantnoodle_slider_init(void)
 	thread_t thread;
 
 	PE_parse_boot_argn("slider", &on, sizeof(on));
+	/*
+	 * The OnePlus 8 Pro (instantnoodlep) has the same sensors on the same bus: its live device tree puts
+	 * ist8801@18 and @19 on i2c@984000 (qupv3_se1_i2c: gpio4 data, gpio5 clock, as here), supplied by
+	 * pm8150a_l10 (ldoc10, 3.0 V). Its charger ICs (chgpump 0x19, bq2597x, the wireless-charge receiver) are on
+	 * i2c@994000, gpio12/13, which this driver never touches. (An earlier version of this driver stayed off the
+	 * Pro on the strength of a wrong reading of those bus names.)
+	 */
 	if (!instantnoodle_board() || on == 0) {
 		return;
 	}

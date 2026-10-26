@@ -168,12 +168,19 @@ static struct {
 	uint8_t power_bit, volume_down_bit;             /* in its status; volume_down_bit 0: a pin instead */
 } keys = { 0x09, 0x09, 0x80, 0x40 };
 
+/* The OnePlus 8 and the 8 Pro (instantnoodlep: the same PM8150, power in its power-on block, volume keys GPIO6/GPIO7 per its live device tree's gpio_keys). */
+static bool
+kona_board(const char *board)
+{
+	return strcmp(board, "instantnoodle") == 0 || strcmp(board, "instantnoodlep") == 0;
+}
+
 static void
 keys_for_board(void)
 {
 	char board[32] = "";
 
-	if (!PE_parse_boot_argn("board", board, sizeof(board)) || strcmp(board, "instantnoodle") != 0) {
+	if (!PE_parse_boot_argn("board", board, sizeof(board)) || !kona_board(board)) {
 		return;
 	}
 	pon.name = "the PM8150's power-on block";
@@ -550,6 +557,38 @@ pin_input(const struct peripheral *pin, struct button *key)
 	    c[GPIO_REG_SUPPLY - GPIO_REG_MODE] & 7, pull, pull < 4 ? "up" : pull == 4 ? "down" : "none",
 	    (c[GPIO_REG_ENABLE - GPIO_REG_MODE] & 0x80) ? "enabled" : "DISABLED", c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
 	    (status & GPIO_LEVEL) ? "high (released)" : "LOW (held)");
+	/*
+	 * The OnePlus 8 Pro's volume down (GPIO7) is left by the firmware as an enabled input with a pull-DOWN, and its
+	 * level reads high all the time: not a key. Its device tree (gpio_keys, pinctrl key_vol_down_default) wants an
+	 * input with bias-pull-up, which is what Linux's pinctrl writes at boot: the pull's register (0x42) to 0, "up,
+	 * 30 uA". That one write, announced, through the channel this system owns for the pin (hk_spmi_write answers
+	 * ENXIO for a pin owned by another system), read back, and the pin looked at again. boot-arg volume_pull=0: not.
+	 */
+	char board[32] = "";
+
+	if (PE_parse_boot_argn("board", board, sizeof(board)) && strcmp(board, "instantnoodlep") == 0 && pull == 4 && mode == 0 && (c[GPIO_REG_ENABLE - GPIO_REG_MODE] & 0x80) && pin == &pin_down) {
+		uint32_t allowed = 1;
+		int error;
+
+		PE_parse_boot_argn("volume_pull", &allowed, sizeof(allowed));
+		if (allowed) {
+			printf("buttons: next: %s's pull-down is the firmware's, the device tree has a pull-up: one write, register 0x%02x%02x <- 0\n",
+			    key->name, pin->id & 0xff, GPIO_REG_PULL);
+			error = hk_spmi_write(pin->id, GPIO_REG_PULL, 0);
+			printf("buttons: %s's pull: %s (%d)\n", key->name, error == 0 ? "written and read back" : "NOT written", error);
+			problem = spmi_read(pin, GPIO_REG_MODE, c, 8);
+			if (problem == NULL) {
+				problem = spmi_read(pin, REG_RT_STATUS, &status, 1);
+			}
+			if (problem != NULL) {
+				printf("buttons: %s: %s\n", key->name, problem);
+				return;
+			}
+			pull = c[GPIO_REG_PULL - GPIO_REG_MODE] & 7;
+			printf("buttons: %s's pin now: pull %u (%s), level %s\n", key->name, pull, pull < 4 ? "up" : pull == 4 ? "down" : "none",
+			    (status & GPIO_LEVEL) ? "high (released)" : "LOW (held)");
+		}
+	}
 	if (mode != 0 || pull >= 4 || !(c[GPIO_REG_ENABLE - GPIO_REG_MODE] & 0x80)) {
 		printf("buttons: %s's pin is not an enabled input with a pull-up. Making it one is a write to the PMIC, "
 		    "which this driver does not do: %s is left alone\n", key->name, key->name);
@@ -796,7 +835,7 @@ wake_arm(void)
 	uint32_t bank, cfg;
 	char board[32] = "";
 
-	if (!PE_parse_boot_argn("board", board, sizeof(board)) || strcmp(board, "instantnoodle") != 0 || !power.usable ||
+	if (!PE_parse_boot_argn("board", board, sizeof(board)) || !kona_board(board) || !power.usable ||
 	    (rd(arb_core + ARB_CHANNEL(pon.channel)) & ARB_CHANNEL_INTERRUPTS) == 0 ||
 	    (rd(arb_cnfg + ARB_OWNER(pon.channel)) & 7) != ARB_SYSTEM) {
 		printf("buttons: the power key's interrupt is not this system's to take: the sleep looks at the key itself\n");
@@ -1148,7 +1187,7 @@ hk_buttons_init(void)
 
 		enabled = PE_parse_boot_argn("touchscreen", &touch_screen, sizeof(touch_screen)) && touch_screen != 0;
 		/* the OnePlus 8: on by default (only reads; buttons=0 turns it off) */
-		enabled |= PE_parse_boot_argn("board", board, sizeof(board)) && strcmp(board, "instantnoodle") == 0;
+		enabled |= PE_parse_boot_argn("board", board, sizeof(board)) && kona_board(board);
 	}
 	if (!enabled) {
 		return;

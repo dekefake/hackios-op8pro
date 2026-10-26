@@ -123,7 +123,7 @@ static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20
  * controller (OnePlus's gcc-kona.c). What differs is said where it is (kona ? ... : ...), from OnePlus's
  * android_kernel_oneplus_sm8250 (gpucc-kona.c, debugcc-kona.c) and the phone's live device tree.
  */
-static bool kona;
+static bool kona, pro;                  /* pro: the OnePlus 8 Pro (instantnoodlep): the 8's SoC, its own reserved-memory layout */
 #define FW(name)                (kona ? "a650_" name : "a660_" name)    /* the phone's firmware files in fw/ */
 static uint32_t step;                   /* the one being performed */
 static uint32_t speed_bin;              /* which of the GPUs of this kind the fuses say this is (step 2) */
@@ -2738,7 +2738,9 @@ step_core_space(void)
  * (Step 21 is what tells whether the 3D core gets out of secure mode with it.) There was a
  * boot-arg adreno_zap=0 for the second and later runs of a started phone; nothing reads it now.
  */
-#define ZAP_MEMORY              (kona ? 0x8c51a000ull : 0x8b71a000ull)  /* kona dt: pil_gpu_region@8c51a000, 0x2000 */
+/* kona dt: pil_gpu_region@8c51a000, 0x2000 (the OnePlus 8's); the 8 Pro's own tree has pil_gpu_region@8e21a000, 0x2000 (alias pil_gpu_mem,
+ * the memory of qcom,kgsl-hyp, PAS id 0xd, a650_zap). The 8's address on the 8 Pro is inside its firmware's removed_region@80b00000. */
+#define ZAP_MEMORY              (kona ? (pro ? 0x8e21a000ull : 0x8c51a000ull) : 0x8b71a000ull)
 #define ZAP_MEMORY_SIZE         0x2000u
 #define SCM_PAS_MEM_SETUP       SCM_CALL(2, 2)
 #define SCM_THREE_VALUES        3
@@ -4660,6 +4662,7 @@ hk_adreno_init(void)
 	bool by_itself = false;
 
 	kona = instantnoodle_board();
+	pro = instantnoodlep_board();
 	gpu_pt = kona;
 	PE_parse_boot_argn("gpu_pt", &gpu_pt, sizeof(gpu_pt));
 	if (kona) {

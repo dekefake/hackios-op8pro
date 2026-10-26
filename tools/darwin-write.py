@@ -44,6 +44,7 @@ LAST = 30617594
 BS = 4096
 BLOCKS = LAST - FIRST + 1                               # 5242875
 PROTECTED = 1374208                                     # rootfs.apfs: 5628755968 bytes, never written
+INITIAL_END = 2042368                                   # where the boot area begins: the end of the volume and both cryptexes
 DEV = '/dev/block/by-name/darwin'
 NODE = '/dev/block/sda34'
 TMP = '/data/local/tmp/darwin-write.img'
@@ -188,7 +189,13 @@ def blocks_ok(block, count):
     if count <= 0:
         raise Refused('nothing to write (%d blocks)' % count)
     if block < PROTECTED:
-        raise Refused('block %d is inside the iOS volume (blocks 0..%d), which is never written' % (block, PROTECTED - 1))
+        # the one time the volume is laid down, on a darwin that has just been cut: DARWIN_INITIAL=yes, and only the
+        # three images of its layout (store-image.py's LAYOUT: blocks 0..2042367), never past them
+        if os.environ.get('DARWIN_INITIAL') == 'yes':
+            if block + count > INITIAL_END:
+                raise Refused('blocks %d..%d go past the iOS volume and the cryptexes (blocks 0..%d)' % (block, block + count - 1, INITIAL_END - 1))
+        else:
+            raise Refused('block %d is inside the iOS volume (blocks 0..%d), which is never written (DARWIN_INITIAL=yes lays it down once)' % (block, PROTECTED - 1))
     if block + count > BLOCKS:
         raise Refused('blocks %d..%d go past darwin\'s end (%d blocks)' % (block, block + count - 1, BLOCKS))
 

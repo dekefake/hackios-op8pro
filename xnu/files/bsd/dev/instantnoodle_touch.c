@@ -18,6 +18,12 @@
  *
  * Coordinates: the panel's own, 1080 x 2400 (device tree touchpanel,panel-coords), scaled to
  * the record's 0..65535.
+ *
+ * The OnePlus 8 Pro (board=instantnoodlep) has a Samsung S6SY791 at the same address on the same engine (SE13), with the
+ * same pins and supplies (its live device tree: i2c@a94000, reset tlmm 38, irq tlmm 39, pm8150_l13 3.008 V,
+ * pm8150a_l1 1.8 V), and reports in a 1439 x 3168 space (touchpanel,panel-coords = <0x59f 0xc60>). The sec_ts event
+ * format is assumed to be the S6SY761's until a run on that phone says otherwise: the log lines of the start-up
+ * (device id, boot status, boot-complete) and the first events are the evidence.
  */
 #include <kern/clock.h>
 #include <kern/locks.h>
@@ -435,8 +441,9 @@ instantnoodle_bcm_vote(const char *name, uint32_t x, uint32_t y)
 #define MASK_TOUCH              0x01
 #define MAX_FINGERS             10
 #define EVENT_COUNT             32
-#define PANEL_W                 1080
+#define PANEL_W                 1080            /* OnePlus 8; the 8 Pro's are in touch_thread() */
 #define PANEL_H                 2400
+static uint32_t panel_w = PANEL_W, panel_h = PANEL_H;
 
 static struct {
 	uint32_t x, y;
@@ -491,8 +498,8 @@ handle_event(const uint8_t *ev)
 	switch (state) {
 	case 1:                                         /* press */
 	case 2:                                         /* move */
-		finger[id].x = scale(x, PANEL_W);
-		finger[id].y = scale(y, PANEL_H);
+		finger[id].x = scale(x, panel_w);
+		finger[id].y = scale(y, panel_h);
 		hk_touch_post(finger[id].down ? HK_TOUCH_MOVE : HK_TOUCH_DOWN, id, finger[id].x, finger[id].y);
 		if (!finger[id].down) {
 			printf("touch: finger %u down at %u,%u\n", id, x, y);
@@ -563,7 +570,12 @@ touch_thread(void *parameter __unused, wait_result_t result __unused)
 	lck_mtx_lock(&supply_lock);
 	(void)rpmh_mapped();
 	lck_mtx_unlock(&supply_lock);
-	printf("touch: S6SY761: pins sda %u scl %u reset %u irq %u: cfg %#x %#x %#x %#x\n", bus.sda.pin, bus.scl.pin,
+	if (instantnoodlep_board()) {
+		panel_w = 1440;                         /* touchpanel,panel-coords 0x59f x 0xc60: the last column is 1439, the last row 3167 or 3168 */
+		panel_h = 3169;
+	}
+	printf("touch: %s: panel %u x %u\n", instantnoodlep_board() ? "S6SY791 (as an S6SY761)" : "S6SY761", panel_w, panel_h);
+	printf("touch: pins sda %u scl %u reset %u irq %u: cfg %#x %#x %#x %#x\n", bus.sda.pin, bus.scl.pin,
 	    PIN_RESET.pin, PIN_IRQ.pin, instantnoodle_gpio_cfg(bus.sda), instantnoodle_gpio_cfg(bus.scl),
 	    instantnoodle_gpio_cfg(PIN_RESET), instantnoodle_gpio_cfg(PIN_IRQ));
 
