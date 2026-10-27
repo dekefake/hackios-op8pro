@@ -316,6 +316,11 @@ Rules of thumb: a bare `./xl enter` or a bad arg can hang a phone; **never pass 
 
 | Boot-arg | Meaning |
 |---|---|
+| `bt` | OnePlus 8 Pro Bluetooth (QCA6390 over its UART), `instantnoodle_bt.c`: 1 a look, 2 power on, 3 HCI Reset and the ROME version over the UART, 4 + the firmware download (needs the build's `instantnoodle_btfw.h`, from `op8pro-data/bt-fw`), 5 + the packet device `/dev/hk-bt`, 6 + the kernel control `com.apple.uart.bluetooth` for iOS's bluetoothd (userland `BLUETOOTH=1`). 2-4 refuse `wifi=1`; 5-6 run beside it. |
+| `bt_after` | Seconds after the kernel starts before the `bt` thread begins (default 20; with `wifi=1` use about 45 so Wi-Fi is up first). |
+| `bt_nvm` | 1: set byte 2 of the NVM's tag 17 to 0 (115200) as btqca.c would (experiments; default leaves the file's value). |
+| `bt_skip` | Bit 0: do not download the patch; bit 1: do not download the NVM (experiments). |
+| `bt_cts` | 1: the UART engine honours the controller's RTS (default on at `bt=5` and up, off below). |
 | `wifi` | 1: bring up the Wi-Fi radio and station (stands for wifi_irq, wifi_ba, wifi_wide). |
 | `wifi_again` | DANGEROUS: reset the phone twice out of two. |
 | `wifi_ask` | Ask the service its capabilities. |

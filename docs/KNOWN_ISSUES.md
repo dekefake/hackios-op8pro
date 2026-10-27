@@ -15,7 +15,7 @@ Nothing is marked "works" merely because a driver exists: evidence is stated. Fo
 | K02 | Security | No fingerprint / biometric unlock | Unsupported | S2 | yes | yes |
 | K03 | Camera | No cameras | Unsupported | S2 | yes | works (no video) |
 | K04 | Audio | No headphones/USB-C audio, earpiece, call audio; one mic only | Unsupported / Partial | S2 | yes | partly |
-| K05 | Connectivity | No Bluetooth; Wi-Fi gaps and unverified sleep | Unsupported / Unverified | S2 | yes | yes |
+| K05 | Connectivity | Bluetooth works with gaps (name "(null)", device type blank); Wi-Fi gaps and unverified sleep | Partial / Unverified | S2 | yes | yes |
 | K06 | Telephony | No cellular, calls, SMS, voicemail | Unsupported | S1 | yes | yes |
 | K07 | Sensors | No accelerometer/gyro/compass/light/proximity/barometer | Unsupported | S2 | yes | yes |
 | K08 | Battery | Charger/shutdown paths unverified; no drain figure; no fast charging | Unverified / Unsupported | S1 | yes | partly |
@@ -72,8 +72,9 @@ No driver, `biometrickitd`/`pearld` denied, no Secure Enclave. Passcode is not s
   the amp health polarity is only checked via MANALARM/MANSTATE. Work: T08, T24. Evidence: [audio.md](subsystems/audio.md).
 
 ## K05 Wi-Fi and Bluetooth — OnePlus 8
-- **Bluetooth: Unsupported** (shares the chip; `bluetooth`/`BTServer` denied). T05.
+- **Bluetooth: works in RAM runs** (owner, 2026-10-27: discovery, pairing, A2DP audio on a JBL; `BLUETOOTH=1` image, `bt=6`). Known gaps: the local name shows "(null)"; a paired speaker's device type is blank; the Settings switch does not power the chip off; receive is polled; calls and sleep unverified. Not fixable: receiving photos from Android's "Bluetooth share" (iOS has no Object Push). T05.
 - **Wi-Fi: Partial, verified in RAM runs only** (scan, join from Settings, DHCP, Safari; WPA2, WPA2/TKIP-mixed, WPA3 SAE).
+  - **WPA3 (SAE) failed on an Android 16 hotspot (H2E, channel 11, -41 dBm) on 2026-10-27: "SAE: NO CONFIRM from the access point"; WPA2 on the same hotspot joined after one or two failed tries** (the claim below that WPA3 was verified holds for other access points only). T18.
   - Unsupported: 802.11r (iOS is told FT is absent and joins with PSK), TKIP pairwise, roaming, WPA3 other groups/password identifiers. T18.
   - **Unverified:** radio through system sleep and wake (T02), per-network private MAC address, WPA3 transition mode, firmware-crash recovery.
   - A RAM run starts with a new `/private/var`: networks are not remembered (`fw/network` joins one at start). Installed boot keeps `/private/var` but auto-join across reboots has not been checked.

@@ -21,9 +21,9 @@ Order inside each section is by priority. Update an item when you change its sta
 | T02 | Wi-Fi radio through system sleep | Built, Unverified | P0 |
 | T03 | Install the current build / keep installed bundle current | Partial | P1 |
 | T04 | Motion, light and proximity sensors (screen rotation, auto-brightness) | Not Started | P1 |
-| T05 | Bluetooth | Not Started | P1 |
+| T05 | Bluetooth | Working in RAM runs (owner-verified); gaps listed | P1 |
 | T06 | Cellular modem, telephony, SMS | Not Started | P1 |
-| T07 | OnePlus 8 cameras | Not Started | P1 |
+| T07 | OnePlus 8 cameras | Partial (power-up and bus rungs, sensor never answers) | P1 |
 | T08 | Headphones / USB-C audio | Not Started | P1 |
 | T09 | Fingerprint / biometric authentication | Not Started | P1 |
 | T10 | Metal: from experimental to usable | In Progress | P1 |
@@ -53,6 +53,8 @@ Order inside each section is by priority. Update an item when you change its sta
 | T34 | Sensors that are not sensors: NFC, UWB, Taptic edge cases | Not Started | P3 |
 | T35 | Complete (do not reopen): items that older text made look open | Complete | — |
 | T36 | iphont agent hardware validation and workflow migration | Partial / Built, Unverified | P1 |
+| T37 | UI smoothness: dropped frames, the phone feels slow | Not Started | P1 |
+| T38 | Native panel resolution (QHD+ instead of the iPhone X's) | In Progress | P1 |
 
 ---
 
@@ -96,10 +98,11 @@ Order inside each section is by priority. Update an item when you change its sta
 - **Next:** run `adsp=1` and read `kern.hackios.adsp_services` for service 400 (the previous plan's first question; result not recorded).
 - **Refs:** K07.
 
-### T05 Bluetooth — Connectivity · Not Started · P1
-- **Facts:** same chip as Wi-Fi (QCA6390 on OnePlus 8; WCN6750 on redwood). `bluetooth`, `BTServer` are in the userland DENY list. No driver, no HCI transport.
-- **Next:** HCI over the QCA6390's UART/MHI path (Linux `hci_qca`/ath11k combo); a `bluetoothd` stand-in or IOKit `IOBluetooth` stack is a large unknown.
-- **Refs:** K05.
+### T05 Bluetooth — Connectivity · Working in RAM runs · P1
+- **Verified by the owner (2026-10-27, RAM runs, OnePlus 8 Pro):** Settings > Bluetooth lists nearby devices (Classic inquiry and LE), pairing with an Android phone works, and **A2DP audio plays on a JBL Charge 2+** (YouTube in Safari). Design and findings: [subsystems/bluetooth.md](subsystems/bluetooth.md).
+- **Open:** the local name shows as "(null)" in Settings > Bluetooth (the host name is set by `init`, but Settings does not take it from there); a paired JBL's device type stays blank (the owner picks it by hand; probably an accessory database iOS downloads); the Settings switch does not power the chip off (`/dev/btpoweroff` is only noted); Bluetooth receive is polled (1 ms) and not measured under load; calls/HFP, LE audio, BLE peripherals and sleep/wake are unverified; photo receive from Android's "Bluetooth share" can never work (iOS has no Object Push); AirDrop needs the Wi-Fi side (not tried). WPA3 (SAE) joins failed in the same session with "NO CONFIRM from the access point" (T18).
+- **Files:** `xnu/files/bsd/dev/instantnoodle_bt.c`; userland `src/btboot.c`, `src/inject_bt.c`, `src/bt_scan.m`, `src/bt_test.c`, `mkjobs.py` (BLUETOOTH=1), `build.sh`.
+- **Refs:** K05; boot-args `bt`, `bt_after`, `bt_nvm`, `bt_skip`, `bt_cts` ([BOOT_ARGS.md](BOOT_ARGS.md)).
 
 ### T06 Cellular modem, telephony and SMS — Connectivity · Not Started · P1
 - **Facts:** the modem (MSS) is not started (`qcom,mss@4080000`); CommCenter (`-noncellular` variant) answers but dies on missing `AppleIPAppender` (SIGSEGV) and
@@ -107,10 +110,10 @@ Order inside each section is by priority. Update an item when you change its sta
 - **Next:** start the modem (PAS), QMI services, then IOKit drivers for the baseband path; scope is research-heavy.
 - **Refs:** K06.
 
-### T07 OnePlus 8 cameras — Camera · Not Started · P1
-- **State:** redwood has `hk_camera.c` (four sensors, ISP in userland). The OnePlus 8 has no camera driver.
-- **Next:** same method as redwood (`cam=1..5` ladder): sensors, CSIPHY/IFE, MCLK, regulators from the live device tree; `camera_device.c` formats are iPhone X names.
-- **Files:** new `instantnoodle_camera.c` (or `board` table in `hk_camera.c`), `userland/src/camera_*.c`.
+### T07 OnePlus 8 cameras — Camera · Partial · P1
+- **State:** redwood has `hk_camera.c` (four sensors, ISP in userland). The OnePlus 8 Pro has `instantnoodle_camera.c` (boot-arg `cam=1` a look, `cam=2` the power-up as Android does it, then a bus scan): the rails, GPIOs, the camera clock domain and the CCI bus work (the module's actuator and OIS answer), **but the IMX689 sensor and the module's EEPROM never answer** on the bit-banged I2C. Android's sequences and the sensor-module files are decoded (`tools/camsensor.py`; plan addenda 33, 35, 37, 38).
+- **Next:** find the line that differs from Android for the sensor and the EEPROM (not yet tried: OIS-first ordering, 400 kHz, MCLK measurement, GPIO levels while Android has the camera open); then CSIPHY/IFE and the ISP in userland; `camera_device.c` formats are iPhone X names. The owner wants this finished.
+- **Files:** `instantnoodle_camera.c`, `instantnoodle_i2c.c`, `userland/src/camera_*.c`, `tools/camsensor.py`.
 - **Refs:** K03; [input-peripherals.md](subsystems/input-peripherals.md).
 
 ### T08 Headphones / USB-C audio, earpiece — Audio · Not Started · P1
@@ -246,6 +249,12 @@ no automated test for audio, Wi-Fi join, GPU hang recovery (manual `rc.jobs.*`).
 
 ### T36 iphont agent hardware validation and workflow migration — Tooling · Partial / Built, Unverified · P1
 The Python CLI, native loader/kernel mailbox, event logging, userspace bridge, diagnostics, input scheduling and capture interface are implemented and compile. Host/C tests and real XNU QEMU queries pass; physical state/log/framebuffer capture works. The owner explicitly deferred the required RAM loader reload, so USB RPC, daemon/framework/entitlement behavior, touch/keyboard delivery, and full deployment/recovery parity remain unverified. Normal boot profiles are unchanged. Next: use the supervised RAM sequence in [TOOLKIT.md](TOOLKIT.md), then validate one operation at a time. Still unfinished: GPU queue-level introspection, delivered keyboard guarantees, orientation/sensor support, KDP/LLDB integration, high-rate compressed mirroring, userspace function symbols, service-specific regressions and complete legacy replacement. Keep all unique recovery/test/build scripts; [TOOLKIT-MIGRATION.md](TOOLKIT-MIGRATION.md) records the static inventory and deletion gates.
+
+### T37 UI smoothness — Display / performance · Not Started · P1
+- **Owner (2026-10-27):** the interface drops a lot of frames and the phone feels slow. It may just be that the build runs from RAM (the system image is a RAM disk with compressed APFS): judge again once the installed (flash) boot works. Measure first (frame times, CPU/GPU load per cluster), then act; related: T11, T23, [display.md](subsystems/display.md).
+
+### T38 Native panel resolution — Display · In Progress · P1
+- **State:** iOS runs at the iPhone X's pixel size (the userland is an iPhone10,3's). The owner wants the panel's native resolution (the OnePlus 8 Pro is 1440 x 3168, QHD+). Work in progress; see [display.md](subsystems/display.md) when it lands.
 
 ## Complete — do not reopen (older documents made these look unfinished)
 - Speakers on the OnePlus 8 (heard by the owner 2026-10-24); the alert slider; the main microphone (owner's claps); App Library grey pods (fixed 2026-10-25); iOS shadows "too large" (owner: resolved);

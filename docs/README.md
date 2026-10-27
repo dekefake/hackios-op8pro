@@ -32,6 +32,7 @@ Start with the root [README](../README.md) for the overview and the QEMU quick s
 | [gpu.md](subsystems/gpu.md) | Adreno bring-up, HKGPU, DCVS, sleep collapse, OpenGL ES, Metal status |
 | [audio.md](subsystems/audio.md) | DSP, speakers, guard, microphone |
 | [input-peripherals.md](subsystems/input-peripherals.md) | touch, keys, slider, haptics, torch, battery, cameras |
+| [bluetooth.md](subsystems/bluetooth.md) | QCA6390 Bluetooth: UART engine, firmware, `/dev/hk-bt`, the kernel control for bluetoothd, BLUETOOTH=1 userland, A2DP |
 | [wifi.md](subsystems/wifi.md) | ath11k on a compatibility layer, Apple80211, QCA6390 and WCN6750 |
 | [storage.md](subsystems/storage.md) | images, UFS through the loader, partitions, `/private/var`, APFS, HFS+ |
 | [userland.md](subsystems/userland.md) | iOS integration: init, jobs, injected libraries, DENY list |
