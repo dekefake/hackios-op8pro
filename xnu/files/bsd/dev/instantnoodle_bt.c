@@ -51,6 +51,8 @@
  *   bt=5   ... bt=4, and then the controller stays: a worker thread owns the engine and /dev/hk-bt (one H4 packet a read, one a write)
  *          takes HCI to and from the controller, in-band sleep handled; a self-test (reset, versions, buffer sizes, a hundred long events)
  *          runs through the same calls the node makes. Nothing is put back at the end: the controller stays powered for the run.
+ *   bt=6   ... bt=5, and the kernel control "com.apple.uart.bluetooth" registered: it is how BlueTool's UART transport reaches a controller;
+ *          while BlueTool is connected Broadcom's vendor commands are answered here and the rest goes to the Qualcomm controller (see ctl_*).
  *   bt=3   ... and between the engine's second look and the putting back: the engine set up as a UART, polling only (what
  *          msm_geni_serial.c's earlycon does: the engine's root generator set to 7.3728 MHz (GPLL0 even, M/N 384/15625; the old value put
  *          back), divider 2 = 115200 baud at 32x oversampling;
@@ -72,6 +74,8 @@
 #include <miscfs/devfs/devfs.h>
 #include <pexpert/pexpert.h>
 #include <sys/conf.h>
+#include <sys/kern_control.h>
+#include <sys/kpi_mbuf.h>
 #include <sys/systm.h>
 #include <sys/uio.h>
 #include <sys/instantnoodle.h>
@@ -1063,6 +1067,34 @@ ring_get(uint8_t *ring, uint32_t size, volatile uint32_t *head, volatile uint32_
 	return len < cap ? len : cap;
 }
 
+/*
+ * bt=6: the kernel control "com.apple.uart.bluetooth" that BlueTool's UART transport connects to (see ctl_* below). While BlueTool is
+ * connected the controller's packets go to its socket instead of the ring; the fake answers to Broadcom's commands (fk_ring) are
+ * queued by the socket's send callback and delivered by the worker, because the socket may not be re-entered from its own callback.
+ */
+static kern_ctl_ref ctl_ref;
+static volatile uint32_t ctl_unit_no;
+static volatile bool ctl_connected;
+static uint8_t fk_ring[4096];
+static volatile uint32_t fk_head, fk_tail;
+static uint32_t stat_ctl_drop;
+
+static bool ring_put(uint8_t *ring, uint32_t size, volatile uint32_t *head, volatile uint32_t *tail, const uint8_t *data, uint32_t len);
+
+/* a packet from the controller (or a fake one) to whoever has the transport: BlueTool's socket, else the /dev/hk-bt ring */
+static bool
+deliver(const uint8_t *pkt, uint32_t len)
+{
+	if (ctl_connected) {
+		if (ctl_enqueuedata(ctl_ref, ctl_unit_no, (void *)(uintptr_t)pkt, len, 0) != 0) {
+			stat_ctl_drop++;
+			return false;
+		}
+		return true;
+	}
+	return ring_put(rx_ring, RX_RING, &rx_head, &rx_tail, pkt, len);
+}
+
 /* the receive state machine: bytes in, whole packets out */
 static struct {
 	uint8_t pkt[MAX_PACKET + 8];
@@ -1118,7 +1150,7 @@ rx_byte(uint8_t b)
 			return;
 		}
 	}
-	if (ring_put(rx_ring, RX_RING, &rx_head, &rx_tail, rxs.pkt, rxs.have)) {
+	if (deliver(rxs.pkt, rxs.have)) {
 		stat_packets++;
 	} else {
 		stat_bad++;
@@ -1174,6 +1206,14 @@ worker(__unused void *parameter, __unused wait_result_t result)
 		rx_poll();
 		if (ring_get(tx_ring, TX_RING, &tx_head, &tx_tail, NULL, 0) != 0) {
 			tx_one();
+		}
+		if (ring_get(fk_ring, sizeof(fk_ring), &fk_head, &fk_tail, NULL, 0) != 0) {
+			static uint8_t fake[300];
+			uint32_t n = ring_get(fk_ring, sizeof(fk_ring), &fk_head, &fk_tail, fake, sizeof(fake));
+
+			if (deliver(fake, n)) {
+				stat_packets++;
+			}
 		}
 		if (stat_packets + stat_tx == before) {
 			IOSleep(1);
@@ -1270,6 +1310,190 @@ static const struct cdevsw bt_cdevsw = {
 	.d_mmap = eno_mmap, .d_strategy = eno_strat, .d_type = 0
 };
 
+/* ---- bt=6: the kernel control BlueTool's UART transport connects to ----------------------------------------- */
+
+/*
+ * BlueTool (iOS 16.5, disassembled: logs/bluetool-transport-analysis.md) opens its UART transport as a Darwin kernel-control socket
+ * (socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL), CTLIOCGINFO on the name "com.apple.uart.bluetooth", connect) and speaks H4 on it, with a
+ * private socket option (0x40484813) for the line settings. Apple's UART driver registers that control; this registers it over the same
+ * rings as /dev/hk-bt, and while BlueTool is connected its H4 stream is cut into packets, Broadcom's own vendor commands (OGF 0x3f) are
+ * answered here without touching the Qualcomm controller (Update_UART_Baud_Rate 0xfc18, Download_Minidriver 0xfc2e, Write_RAM 0xfc4c,
+ * Launch_RAM 0xfc4e, Write_BD_ADDR 0xfc01: "success"; any other vendor opcode: "unknown command", so BlueTool shows what else it wants),
+ * and every command that goes by is logged (the first 300 lines), everything else goes to the controller.
+ */
+#define CTL_NAME                "com.apple.uart.bluetooth"
+static struct {
+	uint8_t pkt[MAX_PACKET + 8];
+	uint32_t have, need;
+	int kind;                       /* 0 between packets, 1 command, 2 ACL, 3 SCO */
+	bool in_body;
+} txs;
+static uint32_t ctl_logged, stat_fake, stat_ctl_tx;
+
+static void
+ctl_log(const char *dir, const uint8_t *p, uint32_t n)
+{
+	if (ctl_logged++ >= 300) {
+		return;
+	}
+	say("bt: ctl %s %u bytes:", dir, n);
+	for (uint32_t i = 0; i < n && i < 20; i++) {
+		say(" %02x", p[i]);
+	}
+	say("%s\n", n > 20 ? " ..." : "");
+}
+
+static void
+fake_reply(uint16_t opcode, uint8_t status)
+{
+	uint8_t ev[7] = { 0x04, 0x0e, 0x04, 0x01, (uint8_t)(opcode & 0xff), (uint8_t)(opcode >> 8), status };
+
+	stat_fake++;
+	(void)ring_put(fk_ring, sizeof(fk_ring), &fk_head, &fk_tail, ev, sizeof(ev));
+}
+
+/* one whole H4 packet from BlueTool */
+static void
+ctl_packet(const uint8_t *p, uint32_t n)
+{
+	stat_ctl_tx++;
+	if (p[0] == 1) {
+		uint16_t op = (uint16_t)(p[1] | p[2] << 8);
+
+		ctl_log("->", p, n);
+		if ((op >> 10) == 0x3f) {               /* the vendor group: Broadcom's, not this controller's */
+			switch (op) {
+			case 0xfc18: case 0xfc2e: case 0xfc4c: case 0xfc4e: case 0xfc01:
+				fake_reply(op, 0);
+				break;
+			default:
+				fake_reply(op, 1);
+				break;
+			}
+			return;
+		}
+	}
+	if (!hkbt_write_packet(p, n)) {
+		say("bt: ctl: the controller's ring refuses a packet of %u bytes (type %u)\n", n, p[0]);
+	}
+}
+
+static void
+ctl_tx_byte(uint8_t b)
+{
+	if (txs.kind == 0) {
+		if (b < 1 || b > 3) {
+			if (ctl_logged++ < 300) {
+				say("bt: ctl: byte %02x outside a packet from BlueTool, dropped\n", b);
+			}
+			return;
+		}
+		txs.kind = b;
+		txs.need = b == 2 ? 4 : 3;
+		txs.pkt[0] = b;
+		txs.have = 1;
+		txs.in_body = false;
+		return;
+	}
+	txs.pkt[txs.have++] = b;
+	if (--txs.need != 0) {
+		return;
+	}
+	if (!txs.in_body) {
+		uint32_t body = txs.kind == 2 ? (txs.pkt[3] | txs.pkt[4] << 8) : txs.pkt[3];
+
+		if (txs.have + body > MAX_PACKET) {
+			txs.kind = 0;
+			return;
+		}
+		txs.in_body = true;
+		txs.need = body;
+		if (body != 0) {
+			return;
+		}
+	}
+	ctl_packet(txs.pkt, txs.have);
+	txs.kind = 0;
+}
+
+static errno_t
+ctl_connect_cb(__unused kern_ctl_ref ref, struct sockaddr_ctl *sac, __unused void **unitinfo)
+{
+	if (ctl_connected) {
+		return EBUSY;
+	}
+	bzero(&txs, sizeof(txs));
+	ctl_unit_no = sac->sc_unit;
+	ctl_connected = true;
+	say("bt: ctl: BlueTool connected to %s (unit %u)\n", CTL_NAME, sac->sc_unit);
+	return 0;
+}
+
+static errno_t
+ctl_disconnect_cb(__unused kern_ctl_ref ref, __unused u_int32_t unit, __unused void *unitinfo)
+{
+	ctl_connected = false;
+	say("bt: ctl: BlueTool disconnected (%u packets from it, %u fake answers, %u events it could not take)\n", stat_ctl_tx, stat_fake, stat_ctl_drop);
+	return 0;
+}
+
+static errno_t
+ctl_send_cb(__unused kern_ctl_ref ref, __unused u_int32_t unit, __unused void *unitinfo, mbuf_t m, __unused int flags)
+{
+	for (mbuf_t c = m; c != NULL; c = mbuf_next(c)) {
+		const uint8_t *d = mbuf_data(c);
+		size_t l = mbuf_len(c);
+
+		for (size_t i = 0; i < l; i++) {
+			ctl_tx_byte(d[i]);
+		}
+	}
+	mbuf_freem(m);
+	return 0;
+}
+
+/* the line settings BlueTool asks for (opcode 0x40484813 and any other): accepted and logged; what it reads back is zeros */
+static errno_t
+ctl_setopt_cb(__unused kern_ctl_ref ref, __unused u_int32_t unit, __unused void *unitinfo, int opt, void *data, size_t len)
+{
+	say("bt: ctl: setsockopt %#x, %zu bytes:", opt, len);
+	for (size_t i = 0; i < len && i < 24; i++) {
+		say(" %02x", ((uint8_t *)data)[i]);
+	}
+	say("\n");
+	return 0;
+}
+
+static errno_t
+ctl_getopt_cb(__unused kern_ctl_ref ref, __unused u_int32_t unit, __unused void *unitinfo, int opt, void *data, size_t *len)
+{
+	say("bt: ctl: getsockopt %#x, room for %zu bytes\n", opt, *len);
+	if (data != NULL) {
+		bzero(data, *len);
+	}
+	return 0;
+}
+
+static void
+ctl_start(void)
+{
+	struct kern_ctl_reg reg;
+	errno_t error;
+
+	bzero(&reg, sizeof(reg));
+	strlcpy(reg.ctl_name, CTL_NAME, sizeof(reg.ctl_name));
+	reg.ctl_sendsize = 64 * 1024;
+	reg.ctl_recvsize = 64 * 1024;
+	reg.ctl_connect = ctl_connect_cb;
+	reg.ctl_disconnect = ctl_disconnect_cb;
+	reg.ctl_send = ctl_send_cb;
+	reg.ctl_setopt = ctl_setopt_cb;
+	reg.ctl_getopt = ctl_getopt_cb;
+	error = ctl_register(&reg, &ctl_ref);
+	say("bt: bt=6: the kernel control %s %s (%d)\n", CTL_NAME, error == 0 ? "is registered: BlueTool's UART transport can connect" : "cannot be registered",
+	    error);
+}
+
 /* One request through the same path /dev/hk-bt takes: sent, the answer (an event) waited for and shown. */
 static bool
 selftest(const char *what, const uint8_t *cmd, uint32_t len, uint32_t expect_event_len)
@@ -1343,6 +1567,9 @@ transport_run(void)
 		say("bt: /dev/hk-bt: one HCI packet (H4: a type byte, then the packet) a read and a write\n");
 	} else {
 		say("bt: /dev/hk-bt cannot be made\n");
+	}
+	if (level >= 6) {
+		ctl_start();
 	}
 }
 #endif
@@ -1454,9 +1681,10 @@ instantnoodlep_bt_init(void)
 	if (!instantnoodlep_board() || !PE_parse_boot_argn("bt", &level, sizeof(level)) || level == 0) {
 		return;
 	}
-	if (level > 5) {
-		say("bt: the driver does bt=1 (a look), bt=2 (power on), bt=3 (HCI_Reset and the version request), bt=4 (firmware), bt=5 (packet device) so far\n");
-		level = 5;
+	if (level > 6) {
+		say("bt: the driver does bt=1 (a look), bt=2 (power on), bt=3 (HCI_Reset and the version request), bt=4 (firmware), bt=5 (packet device), "
+		    "bt=6 (and BlueTool's kernel control) so far\n");
+		level = 6;
 	}
 	if (kernel_thread_start(bt_thread, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
