@@ -48,6 +48,9 @@
  *          htbtfw20.tlv and htnv20.bin into a generated header, instantnoodle_btfw.h, that only the build's copy of this directory has;
  *          without it bt=4 says so and stops. Boot-args for experiments: bt_nvm=1 (set the NVM's baud byte 2 to 0), bt_skip=1|2|3 (no
  *          patch / no NVM), bt_cts=1 (the engine honours the controller's RTS).
+ *   bt=5   ... bt=4, and then the controller stays: a worker thread owns the engine and /dev/hk-bt (one H4 packet a read, one a write)
+ *          takes HCI to and from the controller, in-band sleep handled; a self-test (reset, versions, buffer sizes, a hundred long events)
+ *          runs through the same calls the node makes. Nothing is put back at the end: the controller stays powered for the run.
  *   bt=3   ... and between the engine's second look and the putting back: the engine set up as a UART, polling only (what
  *          msm_geni_serial.c's earlycon does: the engine's root generator set to 7.3728 MHz (GPLL0 even, M/N 384/15625; the old value put
  *          back), divider 2 = 115200 baud at 32x oversampling;
@@ -66,8 +69,11 @@
 #include <kern/thread.h>
 #include <libkern/libkern.h>
 #include <mach/mach_types.h>
+#include <miscfs/devfs/devfs.h>
 #include <pexpert/pexpert.h>
+#include <sys/conf.h>
 #include <sys/systm.h>
+#include <sys/uio.h>
 #include <sys/instantnoodle.h>
 
 extern kern_return_t thread_terminate(thread_t thread);
@@ -486,7 +492,7 @@ uart_setup(void)
 	wr(SE_GENI_RX_PACKING_CFG1, 0);
 	wr(SE_UART_LOOPBACK_CFG, 0);
 	{
-		uint32_t cts = 0;
+		uint32_t cts = level >= 5;      /* (bt=5, the transport: the controller's flow control is honoured) */
 
 		(void)PE_parse_boot_argn("bt_cts", &cts, sizeof(cts));
 		wr(SE_UART_TX_TRANS_CFG, cts != 0 ? 0 : UART_CTS_MASK);     /* bt_cts=1: the controller's RTS (our CTS pin) holds our transmit back */
@@ -709,6 +715,7 @@ send_raw(const uint8_t *pkt, uint32_t n)
 }
 
 static bool ibs_on;
+static bool kept;               /* bt=5: the controller, the engine and its clocks stay as they are at the end of the thread */
 
 /*
  * In-band sleep, the host's side (hci_qca.c qca_enqueue/HCI_IBS_TX_WAKING): before data goes to a controller that may be asleep, the host
@@ -901,7 +908,7 @@ listen_ack(uint32_t ms, const char *when)
 
 static uint8_t nvm_copy[sizeof(btfw_nvm)];
 
-static void
+static bool
 firmware(void)
 {
 	/* the patch's download mode (byte 14 of the file): 3 = only the last segment is acknowledged (btqca.c qca_tlv_check_data) */
@@ -935,20 +942,20 @@ firmware(void)
 		    instantnoodle_gpio_level(PIN_CTS) ? 1u : 0u);
 	}
 	if (!read_version("before the firmware")) {
-		return;
+		return false;
 	}
 	(void)PE_parse_boot_argn("bt_skip", &skip, sizeof(skip));
 	{
 		if (skip & 1) {
 			say("bt: bt_skip=%u: the patch is not downloaded\n", skip);
 		} else if (!download("the patch", btfw_patch, sizeof(btfw_patch), patch_acks, 8)) {
-			return;
+			return false;
 		}
 		IOSleep(10);
 		if (skip & 2) {
 			say("bt: bt_skip=%u: the NVM is not downloaded\n", skip);
 		} else if (!download("the NVM", nvm_copy, sizeof(nvm_copy), true, 0)) {
-			return;
+			return false;
 		}
 	}
 	/*
@@ -968,19 +975,375 @@ firmware(void)
 	if (!(skip & 2)) {
 		say("bt: next: the host to 3.2 Mbaud\n");
 		if (!uart_baud(3200000, 64, 375, 1)) {
-			return;
+			return false;
 		}
 		uart_drain();
 		listen_ack(3000, "at 3.2 Mbaud");
 	}
 	ibs_on = true;
 	if (!hci_simple(0x0c03, "HCI_Reset")) {
-		return;
+		return false;
 	}
 	IOSleep(100);
 	read_version("after the firmware");
 	hci_simple(0x1001, "HCI_Read_Local_Version_Information");
 	hci_simple(0x1009, "HCI_Read_BD_ADDR (the address is the controller's own: not recorded)");
+	return true;
+}
+#endif
+
+/* ---- bt=5: the controller as a packet device (/dev/hk-bt) ------------------------------------------------ */
+
+#ifdef HAVE_BTFW
+/*
+ * What the rest of iOS is to get from this file: HCI packets in the H4 framing (a type byte, then the packet: 01 command, 02 ACL data
+ * from and to the host, 03 SCO data, 04 event), whole, one per read() and one per write() of /dev/hk-bt. Underneath, one worker
+ * thread owns the engine: it polls the receive FIFO, cuts the byte stream into packets (the in-band sleep bytes 0xfc/0xfd/0xfe are
+ * the controller's own signalling and are taken out between packets only, as hci_qca.c does), answers a wake-up (0xfd) with 0xfc,
+ * and sends what the host wrote -- after a wake-up of its own (0xfd, its 0xfc) the first time. The host never sends 0xfe (sleep), so the
+ * controller's receiver stays awake. The engine's receive side runs with the controller's flow control (RFR follows the FIFO's
+ * watermark: no "RFR open"), because a poll every millisecond cannot keep up with 3.2 Mbaud by itself (16 bytes fill the FIFO in 50 us).
+ *
+ * The packets between the worker and the readers are in two rings of 16-bit length + bytes; one producer, one consumer each.
+ */
+#define RX_RING                 (32 * 1024)
+#define TX_RING                 (16 * 1024)
+#define MAX_PACKET              1200
+static uint8_t rx_ring[RX_RING], tx_ring[TX_RING];
+static volatile uint32_t rx_head, rx_tail, tx_head, tx_tail;    /* head: written by the producer, tail: by the consumer */
+static bool awake, got_wake_ack, node_open;
+static uint32_t stat_packets, stat_bad, stat_tx, stat_wakes;
+
+static inline uint32_t
+ld(volatile uint32_t *p)
+{
+	return __atomic_load_n(p, __ATOMIC_ACQUIRE);
+}
+
+static inline void
+st(volatile uint32_t *p, uint32_t v)
+{
+	__atomic_store_n(p, v, __ATOMIC_RELEASE);
+}
+
+static bool
+ring_put(uint8_t *ring, uint32_t size, volatile uint32_t *head, volatile uint32_t *tail, const uint8_t *data, uint32_t len)
+{
+	uint32_t h = *head, t = ld(tail), used = (h - t + size) % size;
+
+	if (used + len + 2 >= size) {
+		return false;
+	}
+	ring[h] = len & 0xff;
+	ring[(h + 1) % size] = len >> 8;
+	for (uint32_t i = 0; i < len; i++) {
+		ring[(h + 2 + i) % size] = data[i];
+	}
+	st(head, (h + 2 + len) % size);
+	return true;
+}
+
+/* the next packet's length (0: none), and, with buf, its bytes taken */
+static uint32_t
+ring_get(uint8_t *ring, uint32_t size, volatile uint32_t *head, volatile uint32_t *tail, uint8_t *buf, uint32_t cap)
+{
+	uint32_t t = *tail, h = ld(head), len;
+
+	if (t == h) {
+		return 0;
+	}
+	len = ring[t] | ring[(t + 1) % size] << 8;
+	if (buf == NULL) {
+		return len;
+	}
+	for (uint32_t i = 0; i < len && i < cap; i++) {
+		buf[i] = ring[(t + 2 + i) % size];
+	}
+	st(tail, (t + 2 + len) % size);
+	return len < cap ? len : cap;
+}
+
+/* the receive state machine: bytes in, whole packets out */
+static struct {
+	uint8_t pkt[MAX_PACKET + 8];
+	uint32_t have, need;            /* need: bytes still to come for the header, then the body */
+	int kind;                       /* 0 between packets, 4 event, 2 ACL, 3 SCO */
+	bool in_body;
+} rxs;
+
+static void
+rx_byte(uint8_t b)
+{
+	if (rxs.kind == 0) {
+		static const uint8_t ack = 0xfc;
+
+		switch (b) {
+		case 0xfc:
+			got_wake_ack = true;
+			return;
+		case 0xfd:                      /* the controller wants to send: answered */
+			send_raw(&ack, 1);
+			stat_wakes++;
+			return;
+		case 0xfe:                      /* its sleep indication: nothing to answer */
+			return;
+		case 0x04: rxs.need = 2; break;
+		case 0x02: rxs.need = 4; break;
+		case 0x03: rxs.need = 3; break;
+		default:
+			stat_bad++;
+			return;
+		}
+		rxs.kind = b;
+		rxs.pkt[0] = b;
+		rxs.have = 1;
+		rxs.in_body = false;
+		return;
+	}
+	rxs.pkt[rxs.have++] = b;
+	if (--rxs.need != 0) {
+		return;
+	}
+	if (!rxs.in_body) {
+		uint32_t body = rxs.kind == 4 ? rxs.pkt[2] : rxs.kind == 2 ? (rxs.pkt[3] | rxs.pkt[4] << 8) : rxs.pkt[3];
+
+		if (rxs.have + body > MAX_PACKET) {
+			stat_bad++;
+			rxs.kind = 0;
+			return;
+		}
+		rxs.in_body = true;
+		rxs.need = body;
+		if (body != 0) {
+			return;
+		}
+	}
+	if (ring_put(rx_ring, RX_RING, &rx_head, &rx_tail, rxs.pkt, rxs.have)) {
+		stat_packets++;
+	} else {
+		stat_bad++;
+	}
+	rxs.kind = 0;
+}
+
+static void
+rx_poll(void)
+{
+	uint32_t wc = rse(SE_GENI_RX_FIFO_STATUS) & RX_FIFO_WC_MASK;
+
+	while (wc-- != 0) {
+		rx_byte(rse(SE_GENI_RX_FIFOn) & 0xff);
+	}
+}
+
+static void
+tx_one(void)
+{
+	static uint8_t pkt[MAX_PACKET + 8];
+	uint32_t len = ring_get(tx_ring, TX_RING, &tx_head, &tx_tail, pkt, sizeof(pkt));
+
+	if (len == 0) {
+		return;
+	}
+	if (!awake) {
+		static const uint8_t wake = 0xfd;
+
+		for (int ask = 0; ask < 3 && !got_wake_ack; ask++) {
+			send_raw(&wake, 1);
+			for (int t = 0; t < 100 && !got_wake_ack; t++) {
+				rx_poll();
+				IOSleep(1);
+			}
+		}
+		if (!got_wake_ack) {
+			say("bt: the controller does not answer a wake-up: the packet goes out anyway\n");
+		}
+		awake = true;
+	}
+	if (send_raw(pkt, len)) {
+		stat_tx++;
+	}
+}
+
+static void
+worker(__unused void *parameter, __unused wait_result_t result)
+{
+	for (;;) {
+		uint32_t before = stat_packets + stat_tx;
+
+		rx_poll();
+		if (ring_get(tx_ring, TX_RING, &tx_head, &tx_tail, NULL, 0) != 0) {
+			tx_one();
+		}
+		if (stat_packets + stat_tx == before) {
+			IOSleep(1);
+		}
+	}
+}
+
+/* the host's side (here and in /dev/hk-bt): false: the ring is full or the packet is not a command or ACL/SCO data */
+static bool
+hkbt_write_packet(const uint8_t *pkt, uint32_t len)
+{
+	uint32_t want;
+
+	if (len < 4 || len > MAX_PACKET) {
+		return false;
+	}
+	switch (pkt[0]) {
+	case 0x01: want = 4 + pkt[3]; break;
+	case 0x02: want = 5 + (pkt[3] | pkt[4] << 8); break;
+	case 0x03: want = 4 + pkt[3]; break;
+	default: return false;
+	}
+	return want == len && ring_put(tx_ring, TX_RING, &tx_head, &tx_tail, pkt, len);
+}
+
+/* a packet within ms milliseconds: its length (0: none), bytes in buf (up to cap) */
+static uint32_t
+hkbt_read_packet(uint8_t *buf, uint32_t cap, uint32_t ms)
+{
+	for (uint32_t t = 0; t <= ms; t++) {
+		uint32_t n = ring_get(rx_ring, RX_RING, &rx_head, &rx_tail, buf, cap);
+
+		if (n != 0) {
+			return n;
+		}
+		delay_for_interval(1, NSEC_PER_MSEC);
+	}
+	return 0;
+}
+
+static int
+bt_open(__unused dev_t dev, __unused int flags, __unused int type, __unused struct proc *p)
+{
+	static uint8_t scrap[MAX_PACKET + 8];
+
+	if (node_open) {
+		return EBUSY;
+	}
+	node_open = true;
+	while (hkbt_read_packet(scrap, sizeof(scrap), 0) != 0) {       /* (what came before this open is not for it) */
+	}
+	return 0;
+}
+
+static int
+bt_close(__unused dev_t dev, __unused int flags, __unused int type, __unused struct proc *p)
+{
+	node_open = false;
+	return 0;
+}
+
+/* one packet a read; the answer is 0 bytes when none came in two seconds (the caller asks again) */
+static int
+bt_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
+{
+	static uint8_t pkt[MAX_PACKET + 8];
+	uint32_t n = hkbt_read_packet(pkt, sizeof(pkt), 2000);
+
+	if (n == 0) {
+		return 0;
+	}
+	return uiomove((caddr_t)pkt, (int)MIN((user_ssize_t)n, uio_resid(uio)), uio);
+}
+
+static int
+bt_write(__unused dev_t dev, struct uio *uio, __unused int ioflag)
+{
+	uint8_t pkt[MAX_PACKET + 8];
+	user_ssize_t n = uio_resid(uio);
+	int error;
+
+	if (n < 4 || n > MAX_PACKET) {
+		return EINVAL;
+	}
+	if ((error = uiomove((caddr_t)pkt, (int)n, uio)) != 0) {
+		return error;
+	}
+	return hkbt_write_packet(pkt, (uint32_t)n) ? 0 : EINVAL;
+}
+
+static const struct cdevsw bt_cdevsw = {
+	.d_open = bt_open, .d_close = bt_close, .d_read = bt_read, .d_write = bt_write,
+	.d_ioctl = eno_ioctl, .d_stop = eno_stop, .d_reset = eno_reset, .d_select = eno_select,
+	.d_mmap = eno_mmap, .d_strategy = eno_strat, .d_type = 0
+};
+
+/* One request through the same path /dev/hk-bt takes: sent, the answer (an event) waited for and shown. */
+static bool
+selftest(const char *what, const uint8_t *cmd, uint32_t len, uint32_t expect_event_len)
+{
+	static uint8_t ev[MAX_PACKET + 8];
+	uint32_t n;
+
+	if (!hkbt_write_packet(cmd, len)) {
+		say("bt: %s: the packet is refused\n", what);
+		return false;
+	}
+	n = hkbt_read_packet(ev, sizeof(ev), 1500);
+	if (n == 0) {
+		say("bt: %s: no answer\n", what);
+		return false;
+	}
+	say("bt: %s: %u bytes:", what, n);
+	for (uint32_t i = 0; i < n && i < 20; i++) {
+		say(" %02x", ev[i]);
+	}
+	say("%s\n", n > 20 ? " ..." : "");
+	return n >= 7 && ev[0] == 4 && ev[1] == 0x0e && (expect_event_len == 0 || n == expect_event_len) && ev[6] == 0;
+}
+
+static void
+transport_run(void)
+{
+	static const uint8_t reset[] = { 0x01, 0x03, 0x0c, 0x00 }, version[] = { 0x01, 0x01, 0x10, 0x00 }, bufsize[] = { 0x01, 0x05, 0x10, 0x00 },
+	    lebuf[] = { 0x01, 0x02, 0x20, 0x00 }, commands[] = { 0x01, 0x02, 0x10, 0x00 }, features[] = { 0x01, 0x03, 0x10, 0x00 };
+	thread_t thread;
+	unsigned good = 0, tries = 0, ok = 0, bad_before;
+	int major;
+
+	say("bt: bt=5: the controller as a packet device: the worker starts, the engine's receiver without 'RFR open' (the controller's flow control)\n");
+	/* the receive command again, now with the watermark deciding RFR (the S command is cancelled, then started without UART_PARAM_RFR_OPEN) */
+	wr(SE_GENI_S_CMD_CTRL_REG, 4);
+	IOSleep(10);
+	wr(SE_GENI_S_IRQ_CLEAR, 0xffffffff);
+	uart_drain();
+	wr(SE_GENI_S_CMD0, UART_START_READ << OPCODE_SHIFT);
+	awake = false;
+	got_wake_ack = false;
+	if (kernel_thread_start(worker, NULL, &thread) != KERN_SUCCESS) {
+		say("bt: the worker thread cannot be started\n");
+		return;
+	}
+	thread_deallocate(thread);
+	major = cdevsw_add(-1, &bt_cdevsw);
+	if (major >= 0 && devfs_make_node(makedev(major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, "hk-bt") != NULL) {
+		say("bt: /dev/hk-bt: one HCI packet (H4: a type byte, then the packet) a read and a write\n");
+	} else {
+		say("bt: /dev/hk-bt cannot be made\n");
+	}
+	/* the self-test, before iOS has the node: the same calls it will make */
+	tries++; good += selftest("HCI_Reset", reset, sizeof(reset), 7);
+	tries++; good += selftest("Read_Local_Version", version, sizeof(version), 15);
+	tries++; good += selftest("Read_Buffer_Size", bufsize, sizeof(bufsize), 14);
+	tries++; good += selftest("LE_Read_Buffer_Size", lebuf, sizeof(lebuf), 10);
+	tries++; good += selftest("Read_Local_Supported_Features", features, sizeof(features), 15);
+	tries++; good += selftest("Read_Local_Supported_Commands (a long event)", commands, sizeof(commands), 71);
+	/* a hundred long events back to back: the flow control and the polling are tested by the length every one has to have */
+	bad_before = stat_bad;
+	for (unsigned i = 0; i < 100; i++) {
+		static uint8_t ev[MAX_PACKET + 8];
+
+		if (hkbt_write_packet(commands, sizeof(commands)) && hkbt_read_packet(ev, sizeof(ev), 1500) == 71 && ev[0] == 4 && ev[1] == 0x0e) {
+			ok++;
+		}
+	}
+	say("bt: 100 x Read_Local_Supported_Commands: %u whole 71-byte events, %u bytes taken out of the stream as not a packet's\n", ok,
+	    stat_bad - bad_before);
+	tries++; good += ok == 100;
+	say("bt: bt=5: %u of %u tests good; %u packets received, %u sent, %u wake-ups answered, %u bad bytes\n", good, tries, stat_packets, stat_tx,
+	    stat_wakes, stat_bad);
 }
 #endif
 
@@ -1009,7 +1372,11 @@ hci_talk(void)
 #ifdef HAVE_BTFW
 		if (uart_baud(115200, 384, 15625, 4)) {         /* (the sweep's "57600" entry: 115200 real, see above) */
 			IOSleep(5);
-			firmware();
+			if (firmware() && level >= 5) {
+				kept = true;
+				transport_run();
+				return;                 /* (the engine, the clocks and the rate stay as they are: the worker thread owns them now) */
+			}
 		}
 #else
 		say("bt: bt=4: this build has no firmware header (instantnoodle_btfw.h): nothing downloaded\n");
@@ -1069,7 +1436,9 @@ bt_thread(__unused void *parameter, __unused wait_result_t result)
 					show_engine();
 				}
 			}
-			power_down();
+			if (!kept) {
+				power_down();
+			}
 			show_pins();
 		}
 	}
@@ -1085,9 +1454,9 @@ instantnoodlep_bt_init(void)
 	if (!instantnoodlep_board() || !PE_parse_boot_argn("bt", &level, sizeof(level)) || level == 0) {
 		return;
 	}
-	if (level > 4) {
-		say("bt: the driver does bt=1 (a look), bt=2 (power on), bt=3 (HCI_Reset and the version request) and bt=4 (firmware) so far\n");
-		level = 4;
+	if (level > 5) {
+		say("bt: the driver does bt=1 (a look), bt=2 (power on), bt=3 (HCI_Reset and the version request), bt=4 (firmware), bt=5 (packet device) so far\n");
+		level = 5;
 	}
 	if (kernel_thread_start(bt_thread, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
