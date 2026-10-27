@@ -348,6 +348,223 @@ probeModeRegisters(void)
 	displayLog("display: --- end of mode registers ---\n");
 }
 
+/*
+ * fb_dsc=1 (OnePlus 8 Pro): the DSC parameter set of a panel mode, worked out from the device tree's qcom,mdss-dsc-* numbers by the
+ * VESA DSC 1.1 rate-control rules, checked against what the firmware left in the encoders, and the first write to them.
+ *
+ * Register layout of an SDE DSC encoder (MDP + 0x81000, 0x81400; read from the firmware's own FHD+ values, fb_probe=2):
+ *   +0x00 mode (3 = split panel + multiplex, command mode)   +0x04 enc: (initial_lines+1)<<20 | (slice_width+2)%3 <<18 | bpp(6.4)<<8 |
+ *   block_pred<<7 | line_buf_depth<<3 | convert_rgb<<1       +0x08 pic width<<16 | height    +0x0c slice width<<16 | height
+ *   +0x10 chunk size<<16   +0x14 initial_dec_delay<<16 | initial_xmit_delay   +0x18 initial scale   +0x1c scale decrement interval
+ *   +0x20 scale increment interval   +0x24 first line bpg offset   +0x28 nfl_bpg_offset<<16 | slice_bpg_offset
+ *   +0x2c initial_offset<<16 | final_offset   +0x30 flatness (det thresh<<10 | max qp<<5 | min qp)   +0x34 rc model size
+ *   +0x38 rc (edge factor | limit0<<4 | limit1<<9 | target hi<<14 | target lo<<18)   +0x3c 14 buffer thresholds (in 64ths: the
+ *   PPS's own numbers)   +0x74 15 min qp   +0xb0 15 max qp   +0xec 15 bpg offsets (6 bit).
+ * The FHD+ set below reproduces all 74 words the firmware wrote (checked on the phone); the 10 bpc range tables are the VESA table's and
+ * are NOT yet checked against anything; first_line_bpg_offset 12 is the firmware's (the 1.1 formula would say 16).
+ */
+#define DSC_WORDS 74            /* +0x00 .. +0x124 */
+#define DSC_FIRST_TABLE 15
+
+struct DSCMode {
+	const char * name;
+	uint32_t bpc, bpp, picW, picH, sliceW, sliceH;
+	bool tablesKnown;
+};
+
+static const int8_t kDscBuf[14] = {14, 28, 42, 56, 70, 84, 98, 105, 112, 119, 121, 123, 125, 126};
+static const int8_t kDscMin8[15] = {0, 0, 1, 1, 3, 3, 3, 3, 3, 3, 5, 5, 5, 7, 13};
+static const int8_t kDscMax8[15] = {4, 4, 5, 6, 7, 7, 7, 8, 9, 10, 11, 12, 13, 13, 15};
+static const int8_t kDscMin10[15] = {0, 4, 5, 5, 7, 7, 7, 7, 7, 7, 9, 9, 9, 11, 17};
+static const int8_t kDscMax10[15] = {8, 8, 9, 10, 11, 11, 11, 12, 13, 14, 15, 16, 17, 17, 19};
+static const int8_t kDscBpg[15] = {2, 0, 0, -2, -4, -6, -8, -8, -8, -10, -10, -12, -12, -12, -12};
+
+/* The encoder words of a mode; the PPS fields come out of the same numbers (dscPps). */
+struct DSCParams {
+	uint32_t words[DSC_WORDS];
+	uint32_t initialXmit, initialDec, initialScale, decInterval, incInterval, firstLine, nfl, sliceBpg, initialOffset, finalOffset, rcModel,
+	    chunk, minQpFlat, maxQpFlat, flatThresh, lineBuf, initialLines;
+	const int8_t * minQp, * maxQp;
+};
+
+static void
+dscDerive(const DSCMode * m, DSCParams * d)
+{
+	uint32_t bpp16 = m->bpp * 16, groupsPerLine = (m->sliceW + 2) / 3, muxWord = 48;
+	uint32_t groupsTotal = groupsPerLine * m->sliceH, rbsMin, hrd, finalScale, extra, sliceBits;
+
+	d->rcModel = 8192;
+	d->initialXmit = 512;
+	d->initialOffset = 6144;
+	d->firstLine = 12;
+	d->chunk = (m->sliceW * m->bpp + 7) / 8;
+	d->initialScale = 8 * d->rcModel / (d->rcModel - d->initialOffset);
+	d->decInterval = groupsPerLine / (d->initialScale - 8);
+	extra = 3 * (muxWord + (4 * m->bpc + 4) - 2);
+	sliceBits = 8 * d->chunk * m->sliceH;
+	while (extra > 0 && ((sliceBits - extra) % muxWord) != 0) {
+		extra--;
+	}
+	d->nfl = (d->firstLine * 2048 + (m->sliceH - 2)) / (m->sliceH - 1);
+	d->sliceBpg = (2048 * (d->rcModel - d->initialOffset + extra) + groupsTotal - 1) / groupsTotal;
+	d->finalOffset = d->rcModel - ((d->initialXmit * bpp16 + 8) >> 4) + extra;
+	finalScale = 8 * d->rcModel / (d->rcModel - d->finalOffset);
+	d->incInterval = 2048 * d->finalOffset / ((finalScale - 9) * (d->nfl + d->sliceBpg));
+	rbsMin = d->rcModel - d->initialOffset + d->initialXmit * m->bpp + groupsPerLine * d->firstLine;
+	hrd = (rbsMin + m->bpp - 1) / m->bpp;
+	d->initialDec = hrd - d->initialXmit;
+	d->initialLines = (hrd + m->sliceW - 1) / m->sliceW;
+	d->lineBuf = m->bpc + 1;
+	d->minQpFlat = m->bpc == 8 ? 3 : 7;
+	d->maxQpFlat = m->bpc == 8 ? 12 : 16;
+	d->flatThresh = 2u << (m->bpc - 8);
+	d->minQp = m->bpc == 8 ? kDscMin8 : kDscMin10;
+	d->maxQp = m->bpc == 8 ? kDscMax8 : kDscMax10;
+
+	uint32_t * w = d->words;
+
+	bzero(w, sizeof(d->words));
+	w[0] = 3;
+	w[1] = ((d->initialLines + 1) << 20) | (((m->sliceW + 2) % 3) << 18) | (bpp16 << 8) | (1u << 7) | (d->lineBuf << 3) | (1u << 1);
+	w[2] = (m->picW << 16) | m->picH;
+	w[3] = (m->sliceW << 16) | m->sliceH;
+	w[4] = d->chunk << 16;
+	w[5] = (d->initialDec << 16) | d->initialXmit;
+	w[6] = d->initialScale;
+	w[7] = d->decInterval;
+	w[8] = d->incInterval;
+	w[9] = d->firstLine;
+	w[10] = (d->nfl << 16) | d->sliceBpg;
+	w[11] = (d->initialOffset << 16) | d->finalOffset;
+	w[12] = (d->flatThresh << 10) | (d->maxQpFlat << 5) | d->minQpFlat;
+	w[13] = d->rcModel;
+	w[14] = 6 | (11 << 4) | (11 << 9) | (3 << 14) | (3 << 18);
+	for (unsigned i = 0; i < 14; i++) {
+		w[DSC_FIRST_TABLE + i] = (uint32_t) kDscBuf[i];
+	}
+	for (unsigned i = 0; i < 15; i++) {
+		w[DSC_FIRST_TABLE + 14 + i] = (uint32_t) d->minQp[i];
+		w[DSC_FIRST_TABLE + 29 + i] = (uint32_t) d->maxQp[i];
+		w[DSC_FIRST_TABLE + 44 + i] = ((uint32_t) kDscBpg[i] & 0x3f);
+	}
+}
+
+/* The 128-byte picture parameter set (DSC 1.1, VESA) the panel is sent (DSI type 0x0a) for these numbers. */
+static void
+dscPps(const DSCMode * m, const DSCParams * d, uint8_t * b)
+{
+	uint32_t bpp16 = m->bpp * 16;
+
+	bzero(b, 128);
+	b[0] = 0x11;
+	b[3] = (uint8_t) ((m->bpc << 4) | d->lineBuf);
+	b[4] = (uint8_t) ((1 << 5) | (1 << 4) | ((bpp16 >> 8) & 3));
+	b[5] = (uint8_t) bpp16;
+	b[6] = (uint8_t) (m->picH >> 8), b[7] = (uint8_t) m->picH;
+	b[8] = (uint8_t) (m->picW >> 8), b[9] = (uint8_t) m->picW;
+	b[10] = (uint8_t) (m->sliceH >> 8), b[11] = (uint8_t) m->sliceH;
+	b[12] = (uint8_t) (m->sliceW >> 8), b[13] = (uint8_t) m->sliceW;
+	b[14] = (uint8_t) (d->chunk >> 8), b[15] = (uint8_t) d->chunk;
+	b[16] = (uint8_t) (d->initialXmit >> 8), b[17] = (uint8_t) d->initialXmit;
+	b[18] = (uint8_t) (d->initialDec >> 8), b[19] = (uint8_t) d->initialDec;
+	b[21] = (uint8_t) d->initialScale;
+	b[22] = (uint8_t) (d->incInterval >> 8), b[23] = (uint8_t) d->incInterval;
+	b[24] = (uint8_t) (d->decInterval >> 8), b[25] = (uint8_t) d->decInterval;
+	b[27] = (uint8_t) d->firstLine;
+	b[28] = (uint8_t) (d->nfl >> 8), b[29] = (uint8_t) d->nfl;
+	b[30] = (uint8_t) (d->sliceBpg >> 8), b[31] = (uint8_t) d->sliceBpg;
+	b[32] = (uint8_t) (d->initialOffset >> 8), b[33] = (uint8_t) d->initialOffset;
+	b[34] = (uint8_t) (d->finalOffset >> 8), b[35] = (uint8_t) d->finalOffset;
+	b[36] = (uint8_t) d->minQpFlat;
+	b[37] = (uint8_t) d->maxQpFlat;
+	b[38] = (uint8_t) (d->rcModel >> 8), b[39] = (uint8_t) d->rcModel;
+	b[40] = 6;
+	b[41] = 11;
+	b[42] = 11;
+	b[43] = (3 << 4) | 3;
+	for (unsigned i = 0; i < 14; i++) {
+		b[44 + i] = (uint8_t) kDscBuf[i];
+	}
+	for (unsigned i = 0; i < 15; i++) {
+		uint16_t r = (uint16_t) ((d->minQp[i] << 11) | (d->maxQp[i] << 6) | ((uint32_t) kDscBpg[i] & 0x3f));
+
+		b[58 + 2 * i] = (uint8_t) (r >> 8);
+		b[59 + 2 * i] = (uint8_t) r;
+	}
+}
+
+static void
+dscLogMode(const DSCMode * m, const DSCParams * d)
+{
+	uint8_t pps[128];
+
+	displayLog("display: dsc %s: %ux%u slice %ux%u %u bpc %u bpp%s: initial dec/xmit %u/%u lines %u scale %u dec %u inc %u first-line %u "
+	    "nfl %u slice-bpg %u offsets %u/%u chunk %u\n", m->name, m->picW, m->picH, m->sliceW, m->sliceH, m->bpc, m->bpp,
+	    m->tablesKnown ? "" : " (range tables unverified)", d->initialDec, d->initialXmit, d->initialLines, d->initialScale, d->decInterval,
+	    d->incInterval, d->firstLine, d->nfl, d->sliceBpg, d->initialOffset, d->finalOffset, d->chunk);
+	displayLog("display: dsc %s: enc %#x slice %#x chunk %#x delay %#x bpg %#x offsets %#x flat %#x\n", m->name, d->words[1], d->words[3],
+	    d->words[4], d->words[5], d->words[10], d->words[11], d->words[12]);
+	dscPps(m, d, pps);
+	for (unsigned i = 0; i < 128; i += 16) {
+		displayLog("display: dsc %s: pps+%u: %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n", m->name, i,
+		    pps[i], pps[i + 1], pps[i + 2], pps[i + 3], pps[i + 4], pps[i + 5], pps[i + 6], pps[i + 7],
+		    pps[i + 8], pps[i + 9], pps[i + 10], pps[i + 11], pps[i + 12], pps[i + 13], pps[i + 14], pps[i + 15]);
+	}
+}
+
+static void
+dscStep(void)
+{
+	uint32_t on = 0;
+	static const DSCMode fhd = {"fhd60", 8, 8, 1080, 2376, 540, 72, true};
+	static const DSCMode qhd120 = {"qhd120", 10, 8, 1440, 3168, 720, 96, false};
+	static const DSCMode qhd60 = {"qhd60", 10, 10, 1440, 3168, 720, 16, false};
+	DSCParams d;
+	unsigned bad = 0;
+
+	PE_parse_boot_argn("fb_dsc", &on, sizeof(on));
+	if (!on || !instantnoodlep() || !mapDisplay()) {
+		return;
+	}
+	dscDerive(&fhd, &d);
+	dscLogMode(&fhd, &d);
+	for (unsigned e = 0; e < 2; e++) {
+		for (unsigned i = 0; i < DSC_WORDS; i++) {
+			uint32_t have = displayReg(gDPU, 0x81000 + e * 0x400 + 4 * i);
+
+			if (have != d.words[i]) {
+				if (bad++ < 12) {
+					displayLog("display: dsc check: DSC%u word %u (+%#x): firmware %#x, derived %#x\n", e, i, 4 * i, have, d.words[i]);
+				}
+			}
+		}
+	}
+	displayLog("display: dsc check: derived FHD+ set vs both encoders: %u of %u words differ\n", bad, 2 * DSC_WORDS);
+	if (bad == 0 && on >= 2) {
+		/* The write step: the derived FHD+ values (equal to what is there) into both encoders, read back. */
+		unsigned back = 0;
+
+		for (unsigned e = 0; e < 2; e++) {
+			for (unsigned i = 1; i < DSC_WORDS; i++) {
+				*(volatile uint32_t *)(gDPU + 0x81000 + e * 0x400 + 4 * i) = d.words[i];
+			}
+		}
+		__asm__ volatile ("dsb osh" ::: "memory");
+		for (unsigned e = 0; e < 2; e++) {
+			for (unsigned i = 0; i < DSC_WORDS; i++) {
+				back += displayReg(gDPU, 0x81000 + e * 0x400 + 4 * i) != d.words[i];
+			}
+		}
+		displayLog("display: dsc write: %u words rewritten per encoder, %u differ on read-back\n", DSC_WORDS - 1, back);
+	} else if (on >= 2) {
+		displayLog("display: dsc write: not done, the derived set does not match the firmware's\n");
+	}
+	dscDerive(&qhd120, &d);
+	dscLogMode(&qhd120, &d);
+	dscDerive(&qhd60, &d);
+	dscLogMode(&qhd60, &d);
+}
+
 static void
 probeDisplay(void)
 {
@@ -1514,6 +1731,7 @@ IOMobileFramebuffer::start(IOService * provider)
 	fPanelHeight = vinfo.v_height;
 	fRowBytes = vinfo.v_rowbytes;
 	probeDisplay();
+	dscStep();
 	uint32_t hz;
 	if (instantnoodle() && !instantnoodlep() && pushMode() != 0 && !PE_parse_boot_argn("fb_hz", &hz, sizeof(hz))) {
 		gPanelHz = 90;                  /* (fb_hz=60: the firmware's rate) */
