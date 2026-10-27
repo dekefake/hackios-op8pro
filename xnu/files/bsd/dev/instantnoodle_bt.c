@@ -146,12 +146,18 @@ static bool
 clocks_run(bool say_it)
 {
 	uint32_t m = rd(gcc17, HALT_M_AHB), s = rd(gcc17, HALT_S_AHB), e = rd(gcc17, HALT_S6), vote = rd(gcc52, GCC_VOTE);
-	bool run = !(m & CBCR_OFF) && !(s & CBCR_OFF) && !(e & CBCR_OFF);
+	/*
+	 * The slave AHB clock has hardware clock gating (gcc-kona.c: hwcg_reg 0x17008, hwcg_bit 1): once voted it still reads "off"
+	 * (bit 31) while nothing uses it and wakes by itself at the first access to the wrapper, as Linux relies on. So: voted and
+	 * gated counts as running. (The first run read 0x80000002 after the vote and called the clocks "not coming on".)
+	 */
+	bool s_ok = !(s & CBCR_OFF) || ((s & 2u) && (vote & VOTE_S_AHB));
+	bool run = !(m & CBCR_OFF) && s_ok && !(e & CBCR_OFF);
 
 	if (say_it) {
 		say("bt: GCC: wrapper 0 master AHB clock %#010x (%s), slave AHB clock %#010x (%s), engine 6 clock %#010x (%s); vote register "
 		    "%#010x (the three bits: %u%u%u); engine 6's root generator cmd %#010x cfg %#010x\n", m, (m & CBCR_OFF) ? "off" : "running",
-		    s, (s & CBCR_OFF) ? "off" : "running", e, (e & CBCR_OFF) ? "off" : "running", vote, (vote & VOTE_M_AHB) ? 1u : 0u,
+		    s, (s & CBCR_OFF) ? ((s & 2u) && (vote & VOTE_S_AHB) ? "gated, wakes on use" : "off") : "running", e, (e & CBCR_OFF) ? "off" : "running", vote, (vote & VOTE_M_AHB) ? 1u : 0u,
 		    (vote & VOTE_S_AHB) ? 1u : 0u, (vote & VOTE_S6) ? 1u : 0u, rd(gcc17, RCG_S6), rd(gcc17, RCG_S6 + 4));
 	}
 	return run;
