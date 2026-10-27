@@ -408,6 +408,7 @@ Rules of thumb: a bare `./xl enter` or a bad arg can hang a phone; **never pass 
 | Boot-arg | Meaning |
 |---|---|
 | `fb_hz` | 60: switch the OnePlus panel back from 90 Hz. |
+| `fb_probe=2` | OnePlus 8/8 Pro: besides `fb_probe=1`'s dump, a read-only raw dump of DSI0's controller (0xae94000), its D-PHY and PLL (+0x400, +0x900), both DSC encoders, INTF1's timing registers and the display clock controller, to the loader log (`display: DSI0+0x..:` lines). Owner-run 2026-10-27, no crash. |
 | `fbwidth`, `fbheight` | The size iOS renders at (default 1125 x 2436, the iPhone X), GPU-scaled to the panel with `fb_push=2`. OnePlus 8 Pro: `fbwidth=1320 fbheight=2868` (iPhone 16 Pro Max size, 3x; about 1.25% stretch to QHD+ 1440 x 3168, 2% to the FHD+ panel mode now driven; status bar needs `libhackios-ui`). |
 | `fb_subtype=N` | Overrides the DT `/product artwork-device-subtype` (iPhone X: 2436). It changes UIKit's whole layout class; not needed with `libhackios-ui`. |
 | `fb_probe` | 1: dump the OnePlus 8 display pipeline. |

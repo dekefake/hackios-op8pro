@@ -310,6 +310,44 @@ mapDisplay(void)
 	return true;
 }
 
+/* Raw words of a mapped block, eight to a line: "display: NAME+offset: w w w ..." (read-only). */
+static void
+displayDumpWords(const char * name, vm_offset_t base, unsigned from, unsigned to)
+{
+	for (unsigned o = from; o < to; o += 32) {
+		displayLog("display: %s+%#x: %08x %08x %08x %08x %08x %08x %08x %08x\n", name, o,
+		    displayReg(base, o), displayReg(base, o + 4), displayReg(base, o + 8), displayReg(base, o + 12),
+		    displayReg(base, o + 16), displayReg(base, o + 20), displayReg(base, o + 24), displayReg(base, o + 28));
+	}
+}
+
+/*
+ * fb_probe=2: what the firmware leaves of everything a QHD+ mode would change, for the next step (docs/TODO.md T38). Reads only:
+ * DSI0's controller (0xae94000) and its D-PHY/PLL (+0x400 .. +0xbc0, which holds the PLL at +0x900), both DSC encoders (MDP + 0x81000,
+ * 0x81400), INTF1's timing registers (MDP + 0x6b800), and the display clock controller (the clocks of the pixel/byte/DSI branches).
+ * All of these are in blocks the firmware has running and that the probe or the DCS path above already touch.
+ */
+static void
+probeModeRegisters(void)
+{
+	vm_offset_t dsi = ml_io_map(0x0ae94000, 0x1000), cc = ml_io_map(0x0af00000, 0x4000);
+
+	displayLog("display: --- mode registers (fb_probe=2, read only) ---\n");
+	if (dsi != 0) {
+		displayDumpWords("DSI0", dsi, 0, 0x240);
+		displayDumpWords("DSI0-PHY", dsi, 0x400, 0x600);
+		displayDumpWords("DSI0-PLL", dsi, 0x900, 0xbc0);
+	}
+	displayDumpWords("DSC0", gDPU, 0x81000, 0x81140);
+	displayDumpWords("DSC1", gDPU, 0x81400, 0x81540);
+	displayDumpWords("INTF1", gDPU, 0x6b800, 0x6b900);
+	if (cc != 0) {
+		displayDumpWords("DISPCC", cc, 0, 0x100);
+		displayDumpWords("DISPCC", cc, 0x2000, 0x2200);
+	}
+	displayLog("display: --- end of mode registers ---\n");
+}
+
 static void
 probeDisplay(void)
 {
@@ -321,6 +359,9 @@ probeDisplay(void)
 	}
 	displayLog("display: boot framebuffer pa %#llx %ux%u rowbytes %u\n", vinfo.v_physaddr, vinfo.v_width, vinfo.v_height,
 	    vinfo.v_rowbytes);
+	if (probe >= 2) {
+		probeModeRegisters();
+	}
 	/* MDP top (MDSS + 0x1000): INTF_SEL, INTR_EN/STATUS, INTR2_EN/STATUS, VSYNC_SEL */
 	displayLog("display: HW %#x mdss-intr %#x INTF_SEL %#x INTR en %#x st %#x INTR2 en %#x st %#x VSYNC_SEL %#x\n",
 	    displayReg(gDPU, 0), displayReg(gDPU, 0x10), displayReg(gDPU, 0x1004), displayReg(gDPU, 0x1010),
