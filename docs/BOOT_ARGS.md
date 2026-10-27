@@ -408,6 +408,8 @@ Rules of thumb: a bare `./xl enter` or a bad arg can hang a phone; **never pass 
 | Boot-arg | Meaning |
 |---|---|
 | `fb_hz` | 60: switch the OnePlus panel back from 90 Hz. |
+| `fbwidth`, `fbheight` | The size iOS renders at (default 1125 x 2436, the iPhone X), GPU-scaled to the panel with `fb_push=2`. OnePlus 8 Pro: `fbwidth=1320 fbheight=2868` (iPhone 16 Pro Max size, 3x; about 1.25% stretch to QHD+ 1440 x 3168, 2% to the FHD+ panel mode now driven; status bar needs `libhackios-ui`). |
+| `fb_subtype=N` | Overrides the DT `/product artwork-device-subtype` (iPhone X: 2436). It changes UIKit's whole layout class; not needed with `libhackios-ui`. |
 | `fb_probe` | 1: dump the OnePlus 8 display pipeline. |
 | `metal` | 1 Metal driver for test programs; 2 whole system (with metal_profile=1). |
 

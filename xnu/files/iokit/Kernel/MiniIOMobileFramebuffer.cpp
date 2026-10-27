@@ -131,6 +131,12 @@ static TUNABLE(uint32_t, gFBHeight, "fbheight", kFBDefaultHeight);
 #define kFBPointsHigh           812
 #define kFBDefaultScale         3
 static TUNABLE(uint32_t, gFBScale, "fbscale", 0);
+/*
+ * Boot-arg fb_subtype=N: the device tree's "artwork-device-subtype" (/product), what MobileGestalt's ArtworkDeviceSubType answers and what
+ * UIKit chooses the status bar's layout class by (2436 for the iPhone X: Split1125; 2340 for the iPhone 12 mini: Split1080). With a display
+ * of another size than the iPhone X's the status bar draws a pink fallback ("rdar:45025538") unless this agrees with fbwidth/fbheight.
+ */
+static TUNABLE(uint32_t, gFBSubtype, "fb_subtype", 0);
 /* Boot-arg fbtrace=N: log the first N calls of every selector (default 3). */
 static TUNABLE(uint32_t, gFBTrace, "fbtrace", 3);
 
@@ -1487,6 +1493,17 @@ IOMobileFramebuffer::start(IOService * provider)
 				node->setProperty(places[i][1], &scale, sizeof(scale));
 				node->release();
 			}
+		}
+	}
+	if (gFBSubtype != 0) {
+		IORegistryEntry * node = IORegistryEntry::fromPath("/product", gIODTPlane);
+
+		if (node != NULL) {
+			uint32_t subtype = gFBSubtype;
+
+			node->setProperty("artwork-device-subtype", &subtype, sizeof(subtype));
+			node->release();
+			IOLog("MiniIOMobileFramebuffer: artwork-device-subtype %u (fb_subtype)\n", subtype);
 		}
 	}
 	fColumn = IONewZero(uint32_t, fPanelWidth);
