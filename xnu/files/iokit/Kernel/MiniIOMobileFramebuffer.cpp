@@ -1097,6 +1097,251 @@ dsiSequence(const uint8_t * c)
 
 
 /* Autorefresh off, the transfer it may be in the middle of finished (Linux dpu_hw_intf_disable_autorefresh). */
+/*
+ * fb_qhd=1 (OnePlus 8 Pro, needs fb_dcs=1): a THROWAWAY attempt at the panel's 60 Hz QHD+ mode (timing@3 of the live device tree: same DSI
+ * clock and PHY timings as FHD+, so no PLL change; DSC 10 bpc 10 bpp, slices 720 x 16), before iOS has the screen: the panel's own switch
+ * and the DSC packet, then every block of the pipeline resized (both DSC encoders, DSI0's stream word count/total, both planes, both
+ * mixers, INTF1's tear-check lines), a test pattern in a 1440 x 3168 buffer at DOUBLE_PHYS (grayscale ramps, a checkerboard, a mark at the
+ * split between the two halves), held for fb_qhd_secs (20), then put back: the saved registers written back and the FHD+ switch and PPS
+ * sent again. What the screen did in between is what the owner reports. Nothing here is verified; the 10 bpc DSC tables are the VESA's.
+ *
+ * The DSI0 stream (MDP_STREAM0 +0x58 / +0x5c): word count = bytes in a packet + 1 (two slices of chunk bytes), total = bytes per line / 3 and
+ * lines: the firmware's FHD+ values 0x0439 / 0x0168, 0x0948 are 1081, 360 and 2376; QHD+ 10 bpp is 1801, 600 and 3168.
+ */
+#define QHD_W 1440
+#define QHD_H 3168
+
+static const uint8_t kPro60HzQhd[] = {
+	0x39, 0, 3, 0xf0, 0x5a, 0x5a,
+	0x07, 0, 1, 0x01,
+	0x15, 0, 2, 0x60, 0x00,
+	0x15, 0, 2, 0xba, 0x03,
+	0x15, 0, 2, 0xf7, 0x0f,
+	0x39, 0, 5, 0x2a, 0x00, 0x00, 0x05, 0x9f,
+	0x39, 0, 5, 0x2b, 0x00, 0x00, 0x0c, 0x5f,
+	0x39, 8, 3, 0xf0, 0xa5, 0xa5,
+	0,
+};
+
+/* The panel's switch in the device tree's order; after the compression-mode packet the DSC picture parameters (type 0x0a). */
+static bool
+qhdSend(const uint8_t * c, const uint8_t * pps)
+{
+	unsigned sent = 0;
+
+	for (; *c != 0; c += 3 + c[2]) {
+		if (!dsiPacket(gDSI, c[0], c + 3, c[2])) {
+			displayLog("display: qhd: DSI packet %u (type %#x) did not complete\n", sent, c[0]);
+			return false;
+		}
+		sent++;
+		if (c[1] != 0) {
+			panelWait(c[1]);
+		}
+		if (c[0] == 0x07) {
+			if (!dsiPacket(gDSI, 0x0a, pps, 128)) {
+				displayLog("display: qhd: the PPS packet did not complete\n");
+				return false;
+			}
+			sent++;
+		}
+	}
+	displayLog("display: qhd: %u packets sent\n", sent);
+	return true;
+}
+
+struct QhdSaved {
+	uint32_t vig[2][6], lm[2], intf[3], dsi[2], addr[2];
+	uint32_t dsc[2][DSC_WORDS];
+};
+
+static const unsigned kVigRegs[6] = {0x00, 0x04, 0x08, 0x0c, 0x10, 0x24};
+static const unsigned kIntfRegs[3] = {0x6ba94, 0x6baa0, 0x6baa4};
+
+static void
+qhdSave(QhdSaved * v)
+{
+	for (unsigned i = 0; i < 2; i++) {
+		for (unsigned r = 0; r < 6; r++) {
+			v->vig[i][r] = displayReg(gDPU, 0x5000 + i * 0x2000 + kVigRegs[r]);
+		}
+		v->lm[i] = displayReg(gDPU, 0x45004 + i * 0x1000);
+		v->addr[i] = displayReg(gDPU, 0x5014 + i * 0x2000);
+		for (unsigned w = 0; w < DSC_WORDS; w++) {
+			v->dsc[i][w] = displayReg(gDPU, 0x81000 + i * 0x400 + 4 * w);
+		}
+	}
+	for (unsigned r = 0; r < 3; r++) {
+		v->intf[r] = displayReg(gDPU, kIntfRegs[r]);
+	}
+	v->dsi[0] = displayReg(gDSI, 0x58);
+	v->dsi[1] = displayReg(gDSI, 0x5c);
+}
+
+static void
+qhdRestore(const QhdSaved * v)
+{
+	for (unsigned i = 0; i < 2; i++) {
+		for (unsigned r = 0; r < 6; r++) {
+			displayWrite(0x5000 + i * 0x2000 + kVigRegs[r], v->vig[i][r]);
+		}
+		displayWrite(0x45004 + i * 0x1000, v->lm[i]);
+		displayWrite(0x5014 + i * 0x2000, v->addr[i]);
+		for (unsigned w = 1; w < DSC_WORDS; w++) {
+			displayWrite(0x81000 + i * 0x400 + 4 * w, v->dsc[i][w]);
+		}
+	}
+	for (unsigned r = 0; r < 3; r++) {
+		displayWrite(kIntfRegs[r], v->intf[r]);
+	}
+	*(volatile uint32_t *)(gDSI + 0x58) = v->dsi[0];
+	*(volatile uint32_t *)(gDSI + 0x5c) = v->dsi[1];
+	__asm__ volatile ("dsb sy" ::: "memory");
+}
+
+static void
+qhdPattern(volatile uint32_t * px)
+{
+	for (unsigned y = 0; y < QHD_H; y++) {
+		for (unsigned x = 0; x < QHD_W; x++) {
+			uint32_t v;
+
+			if (x < 4 || x >= QHD_W - 4 || y < 4 || y >= QHD_H - 4) {
+				v = 255;
+			} else if (x >= 718 && x < 722) {
+				v = 128;                                        /* the split between the two DSC halves */
+			} else if (x >= 20 && x < 120 && y >= 20 && y < 120) {
+				v = 255;                                        /* a mark top left (orientation) */
+			} else if (x >= QHD_W - 120 && x < QHD_W - 20 && y >= QHD_H - 120 && y < QHD_H - 20) {
+				v = 96;                                         /* a dimmer mark bottom right */
+			} else if (y < 1056) {
+				v = x * 255 / (QHD_W - 1);                      /* ramp left to right */
+			} else if (y < 2112) {
+				v = (y - 1056) * 255 / 1055;                    /* ramp top to bottom */
+			} else {
+				v = (((x / 96) + ((y - 2112) / 96)) & 1) ? 255 : 0;     /* checkerboard, 96 px cells */
+			}
+			px[(size_t) y * QHD_W + x] = 0xff000000u | (v << 16) | (v << 8) | v;
+		}
+	}
+}
+
+static void
+qhdTry(void)
+{
+	uint32_t on = 0, secs = 20;
+	static const DSCMode fhd = {"fhd60", 8, 8, 1080, 2376, 540, 72, true};
+	static const DSCMode qhd60 = {"qhd60", 10, 10, 1440, 3168, 720, 16, false};
+	DSCParams dFhd, dQhd;
+	uint8_t ppsFhd[128], ppsQhd[128];
+	static QhdSaved saved;
+
+	PE_parse_boot_argn("fb_qhd", &on, sizeof(on));
+	PE_parse_boot_argn("fb_qhd_secs", &secs, sizeof(secs));
+	if (!on || !instantnoodlep() || !mapDisplay() || !dsiReady()) {
+		return;
+	}
+	uint32_t top = displayReg(gDPU, CTL0_TOP), intf = displayReg(gDPU, CTL0_INTF_ACTIVE), te = displayReg(gDPU, INTF1_TE_EN);
+
+	if (!(top & CTL_TOP_CMD_MODE) || intf != 0x2 || displayReg(gDPU, VIG0_SRC0_ADDR) != vinfo.v_physaddr || !(te & 1) ||
+	    displayReg(gDPU, 0x45004) != 0x0948021c || displayReg(gDPU, 0x81008) != 0x04380948) {
+		displayLog("display: qhd: not the FHD+ command-mode pipeline expected; not attempted\n");
+		return;
+	}
+	uint64_t bytes = (uint64_t) QHD_W * QHD_H * 4;
+	IOMemoryDescriptor * memory = vinfo.v_physaddr + 0x1000 <= DOUBLE_PHYS && DOUBLE_PHYS + bytes <= 0x9e300000ull ?
+	    IOMemoryDescriptor::withPhysicalAddress((IOPhysicalAddress) DOUBLE_PHYS, bytes, kIODirectionInOut) : NULL;
+	IOMemoryMap * map = memory != NULL ? memory->map(kIOMapWriteCombineCache) : NULL;
+
+	OSSafeReleaseNULL(memory);
+	if (map == NULL) {
+		displayLog("display: qhd: the 1440 x 3168 buffer could not be mapped; not attempted\n");
+		return;
+	}
+	dscDerive(&fhd, &dFhd);
+	dscDerive(&qhd60, &dQhd);
+	dscPps(&fhd, &dFhd, ppsFhd);
+	dscPps(&qhd60, &dQhd, ppsQhd);
+	qhdPattern((volatile uint32_t *) map->getVirtualAddress());
+	__asm__ volatile ("dsb sy" ::: "memory");
+	displayLog("display: qhd: THROWAWAY ATTEMPT begins (pattern drawn, %u s hold)\n", secs);
+
+	qhdSave(&saved);
+	uint32_t autorefresh = displayReg(gDPU, INTF1_AUTOREFRESH), vsync = displayReg(gDPU, INTF1_TE_VSYNC), dma = displayReg(gDSI, DSI_CMD_DMA_CTRL);
+	unsigned waited;
+
+	displayWrite(INTF1_TE_VSYNC, vsync & ~INTF1_TE_EXTERNAL);
+	displayWrite(INTF1_AUTOREFRESH, autorefresh & ~(1u << 31));
+	__asm__ volatile ("dsb sy" ::: "memory");
+	for (waited = 0; waited < 5000; waited++) {
+		uint32_t line = displayReg(gDPU, INTF1_TE_LINE) & 0xffff;
+
+		if (line == 0 || line >= 2376) {
+			break;
+		}
+		IODelay(100);
+	}
+	displayWrite(INTF1_TE_VSYNC, vsync);
+	if (waited == 5000) {
+		displayLog("display: qhd: the autorefresh frame did not finish; autorefresh back on, not attempted\n");
+		displayWrite(INTF1_AUTOREFRESH, autorefresh);
+		OSSafeReleaseNULL(map);
+		return;
+	}
+	/* the panel first, then the pipeline */
+	*(volatile uint32_t *)(gDSI + DSI_CMD_DMA_CTRL) = dma & ~DSI_CMD_DMA_LOW_POWER;     /* "dsi_hs_mode" */
+	bool ok = qhdSend(kPro60HzQhd, ppsQhd);
+
+	*(volatile uint32_t *)(gDSI + DSI_CMD_DMA_CTRL) = dma;
+	if (ok) {
+		for (unsigned e = 0; e < 2; e++) {
+			for (unsigned w = 1; w < DSC_WORDS; w++) {
+				displayWrite(0x81000 + e * 0x400 + 4 * w, dQhd.words[w]);
+			}
+			displayWrite(0x5000 + e * 0x2000, ((uint32_t) QHD_H << 16) | (QHD_W / 2));           /* source size */
+			displayWrite(0x5000 + e * 0x2000 + 0x08, e * (QHD_W / 2));                           /* source x (the right half starts at 720) */
+			displayWrite(0x5000 + e * 0x2000 + 0x0c, ((uint32_t) QHD_H << 16) | (QHD_W / 2));    /* output size */
+			displayWrite(0x5000 + e * 0x2000 + 0x10, e * (QHD_W / 2));                           /* output x */
+			displayWrite(0x5000 + e * 0x2000 + 0x24, QHD_W * 4);                                 /* pitch */
+			displayWrite(0x45004 + e * 0x1000, ((uint32_t) QHD_H << 16) | (QHD_W / 2));          /* mixer output */
+			displayWrite(0x5014 + e * 0x2000, (uint32_t) DOUBLE_PHYS);
+		}
+		displayWrite(kIntfRegs[0], QHD_H);
+		displayWrite(kIntfRegs[1], QHD_H);
+		displayWrite(kIntfRegs[2], QHD_H + 1);
+		*(volatile uint32_t *)(gDSI + 0x58) = ((2 * dQhd.chunk + 1) << 16) | 0x39;
+		*(volatile uint32_t *)(gDSI + 0x5c) = ((uint32_t) QHD_H << 16) | (2 * dQhd.chunk / 3);
+		__asm__ volatile ("dsb sy" ::: "memory");
+		displayLog("display: qhd: pipeline written (stream %#x %#x); pushing the pattern\n", displayReg(gDSI, 0x58), displayReg(gDSI, 0x5c));
+		for (unsigned t = 0; t < secs * 2; t++) {
+			displayWrite(MDP_INTR_CLEAR, MDP_INTR_PP0_DONE);
+			displayWrite(CTL0_FLUSH, CTL_FLUSH_FRAME);
+			displayWrite(CTL0_START, 1);
+			__asm__ volatile ("dsb sy" ::: "memory");
+			IODelay(500000);
+			if (t < 4 || (t % 10) == 0) {
+				displayLog("display: qhd: t+%u ms: mdp intr %#x, dsi intr %#x, intf1 line %#x frame %u, ctl flush %#x\n", t * 500,
+				    displayReg(gDPU, MDP_INTR_STATUS), displayReg(gDSI, DSI_INTR_CTRL), displayReg(gDPU, INTF1_TE_LINE),
+				    displayReg(gDPU, 0x6b8ac), displayReg(gDPU, CTL0_FLUSH));
+			}
+		}
+	}
+	/* and back */
+	displayLog("display: qhd: putting FHD+ back\n");
+	*(volatile uint32_t *)(gDSI + DSI_CMD_DMA_CTRL) = dma & ~DSI_CMD_DMA_LOW_POWER;
+	qhdSend(kPro60Hz, ppsFhd);
+	*(volatile uint32_t *)(gDSI + DSI_CMD_DMA_CTRL) = dma;
+	qhdRestore(&saved);
+	displayWrite(MDP_INTR_CLEAR, MDP_INTR_PP0_DONE);
+	displayWrite(CTL0_FLUSH, CTL_FLUSH_FRAME);
+	displayWrite(CTL0_START, 1);
+	__asm__ volatile ("dsb sy" ::: "memory");
+	IODelay(100000);
+	displayWrite(INTF1_AUTOREFRESH, autorefresh);
+	OSSafeReleaseNULL(map);
+	displayLog("display: qhd: done; FHD+ registers back (intf1 line %#x frame %u)\n", displayReg(gDPU, INTF1_TE_LINE), displayReg(gDPU, 0x6b8ac));
+}
+
 static bool
 pushStart(unsigned height)
 {
@@ -1732,6 +1977,7 @@ IOMobileFramebuffer::start(IOService * provider)
 	fRowBytes = vinfo.v_rowbytes;
 	probeDisplay();
 	dscStep();
+	qhdTry();
 	uint32_t hz;
 	if (instantnoodle() && !instantnoodlep() && pushMode() != 0 && !PE_parse_boot_argn("fb_hz", &hz, sizeof(hz))) {
 		gPanelHz = 90;                  /* (fb_hz=60: the firmware's rate) */
