@@ -224,6 +224,8 @@ static const struct cdevsw touch_cdevsw = {
 	.d_mmap = eno_mmap, .d_strategy = eno_strat, .d_type = 0
 };
 
+extern void instantnoodlep_bt_init(void);
+
 void
 hk_input_init(void)
 {
@@ -248,4 +250,5 @@ hk_input_init(void)
 	hk_adreno_init();
 	hk_wifi_init();
 	hk_adsp_init();
+	instantnoodlep_bt_init();       /* the OnePlus 8 Pro's Bluetooth controller (bsd/dev/instantnoodle_bt.c, bt=1/2) */
 }

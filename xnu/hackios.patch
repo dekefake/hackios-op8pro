@@ -82,7 +82,7 @@ diff --git a/bsd/conf/files b/bsd/conf/files
 index 44274016a4cf..be89ffb15144 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -109,6 +109,50 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
+@@ -109,6 +109,51 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
  bsd/dev/unix_startup.c			standard
  
  bsd/dev/monotonic.c optional monotonic
@@ -96,6 +96,7 @@ index 44274016a4cf..be89ffb15144 100644
 +bsd/dev/instantnoodle_speaker.c	standard
 +bsd/dev/instantnoodle_slider.c	standard
 +bsd/dev/instantnoodle_camera.c	standard
++bsd/dev/instantnoodle_bt.c	standard
 +bsd/dev/instantnoodle_wifi.c	standard
 +bsd/dev/hk_battery.c	standard
 +bsd/dev/hk_ufs.c	standard
