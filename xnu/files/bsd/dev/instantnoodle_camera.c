@@ -194,10 +194,11 @@ static const struct sensor {
 	unsigned vdig_mv;
 	const char *custom;                     /* the device tree's cam_v_custom1 (RPMh's name), or none */
 	unsigned custom_mv;
+	unsigned vaf_pin;                       /* GPIO of the module's VAF (OIS, actuator), 0: none */
 	struct instantnoodle_pin sda, scl;
 } sensors[] = {
-	{ "IMX689", 0x1a, 0x0689, 0, { W, 145 }, { { W, 156 }, { S, 26 } }, 2, "ldof1", 1104, "smpa5", 2040, { N, 101 }, { N, 102 } },
-	{ "IMX586", 0x10, 0x0586, 1, { W, 144 }, { { W, 159 }, { W, 159 } }, 1, "ldof2", 1100, NULL, 0, { N, 103 }, { N, 104 } },
+	{ "IMX689", 0x1a, 0x0689, 0, { W, 145 }, { { W, 156 }, { S, 26 } }, 2, "ldof1", 1104, "smpa5", 2040, 93, { N, 101 }, { N, 102 } },
+	{ "IMX586", 0x10, 0x0586, 1, { W, 144 }, { { W, 159 }, { W, 159 } }, 1, "ldof2", 1100, NULL, 0, 0, { N, 103 }, { N, 104 } },
 };
 #undef W
 #undef S
@@ -205,7 +206,7 @@ static const struct sensor {
 
 static const struct sensor *sensor;
 static struct instantnoodle_i2c bus;
-static bool did_vote, did_gcc, did_gdsc, did_mclk, did_vio, did_vdig, did_custom;
+static bool did_vote, did_gcc, did_gdsc, did_mclk, did_vio, did_vdig, did_custom, did_vaf, did_bob;
 static uint32_t gcc_found;
 
 static void
@@ -225,26 +226,30 @@ power_up(void)
 	const struct sensor *s = sensor;
 	uint32_t ahb;
 
-	say("camera: cam=2: the %s: reset low, then I/O supply, analog, digital, clocks, reset high\n", s->name);
+	/*
+	 * Android's own sequence for this sensor, out of its module file (tools/camsensor.py, "Parameter Parser V2.0.0"):
+	 * IMX689: VANA, CUSTOM_REG1, VDIG, VIO, MCLK (19.2 MHz), RESET high, each followed by 1 ms (CUSTOM_REG1 by none);
+	 * and the pinctrl "cam_default" state first (GPIO 26 output high). The module's OIS and actuator share its bus and
+	 * are powered too (their nodes: the VAF pin, GPIO 93, and pm8009 ldo5 at 2.8 V; the actuator's BOB is Android's).
+	 */
+	say("camera: cam=2: the %s, Android's own order: the pins' default state, VANA, custom, VDIG, VIO, VAF, clocks, MCLK, reset high\n", s->name);
 	instantnoodle_gpio_output(s->reset, false, INSTANTNOODLE_PULL_DOWN, 2);
-	IOSleep(1);
-	say("camera: next: RPMh ldof7 (I/O) 1800 mV on\n");
-	did_vio = instantnoodle_supply("ldof7", 1800, true);
-	if (!did_vio) {
-		say("camera: RPMh did not take the I/O supply's vote\n");
-		return false;
-	}
+	/*
+	 * GPIO 26 (the device tree's custom GPIO, "CAM_VANA_2"): its pinctrl state says output-high, but the camera driver then requests
+	 * it from its gpio-req-tbl with flags 0 = output, initially LOW, and no step of the IMX689's sequence raises it: it is LOW while
+	 * the sensor runs (cam_sensor_util.c, cam_sensor_util_request_gpio_table). The first runs here drove it high.
+	 */
 	for (unsigned i = 0; i < s->vanas; i++) {
-		say("camera: next: the analog supply's switch, pin %u, high\n", s->vana[i].pin);
-		instantnoodle_gpio_output(s->vana[i], true, INSTANTNOODLE_PULL_NONE, 2);
+		if (s->vana[i].pin == 26) {
+			say("camera: next: pin 26 (CAM_VANA_2) LOW, as Android's request table leaves it\n");
+			instantnoodle_gpio_output(s->vana[i], false, INSTANTNOODLE_PULL_NONE, 2);
+		}
 	}
-	IOSleep(2);
-	say("camera: next: RPMh %s (digital) %u mV on\n", s->vdig, s->vdig_mv);
-	did_vdig = instantnoodle_supply(s->vdig, s->vdig_mv, true);
-	if (!did_vdig) {
-		say("camera: RPMh did not take the digital supply's vote\n");
-		return false;
-	}
+	say("camera: next: VANA: the BOB (RPMh bobc1, the device tree's cam_vana: 3.008 V at the least) and the analog switch, pin %u, high\n", s->vana[0].pin);
+	did_bob = instantnoodle_supply("bobc1", 3008, true);
+	say("camera: the BOB vote: %s\n", did_bob ? "taken" : "NOT taken by RPMh");
+	instantnoodle_gpio_output(s->vana[0], true, INSTANTNOODLE_PULL_NONE, 2);
+	IOSleep(1);
 	if (s->custom != NULL) {
 		say("camera: next: RPMh %s (the device tree's cam_v_custom1) %u mV on\n", s->custom, s->custom_mv);
 		did_custom = instantnoodle_supply(s->custom, s->custom_mv, true);
@@ -253,7 +258,26 @@ power_up(void)
 			return false;
 		}
 	}
-	IOSleep(2);
+	say("camera: next: VDIG: RPMh %s %u mV on\n", s->vdig, s->vdig_mv);
+	did_vdig = instantnoodle_supply(s->vdig, s->vdig_mv, true);
+	if (!did_vdig) {
+		say("camera: RPMh did not take the digital supply's vote\n");
+		return false;
+	}
+	IOSleep(1);
+	say("camera: next: VIO: RPMh ldof7 1800 mV on\n");
+	did_vio = instantnoodle_supply("ldof7", 1800, true);
+	if (!did_vio) {
+		say("camera: RPMh did not take the I/O supply's vote\n");
+		return false;
+	}
+	IOSleep(1);
+	if (s->vaf_pin != 0) {
+		say("camera: next: VAF: RPMh ldof5 2800 mV on, pin %u high (the OIS' and the actuator's supply)\n", s->vaf_pin);
+		did_vaf = instantnoodle_supply("ldof5", 2800, true);
+		instantnoodle_gpio_output((struct instantnoodle_pin){ INSTANTNOODLE_TLMM_NORTH, s->vaf_pin }, true, INSTANTNOODLE_PULL_NONE, 2);
+		IOSleep(2);
+	}
 	say("camera: next: RPMh mmcx.lvl at level %u\n", MMCX_LEVEL);
 	did_vote = instantnoodle_rail_level("mmcx.lvl", MMCX_LEVEL);
 	if (!did_vote) {
@@ -275,8 +299,6 @@ power_up(void)
 	if (!camcc) {
 		camcc = (volatile uint32_t *)ml_io_map(CAMCC_PHYS, CAMCC_SIZE);
 	}
-	say("camera: the camcc answers: titan_top %#010x\n", camcc_rd(TITAN_TOP_GDSCR));
-	show_camcc();
 	say("camera: next: the titan_top power domain on\n");
 	camcc[TITAN_TOP_GDSCR / 4] = camcc_rd(TITAN_TOP_GDSCR) & ~1u;
 	did_gdsc = true;
@@ -288,13 +310,13 @@ power_up(void)
 	camcc[MCLK_CBCR(s->mclk) / 4] = camcc_rd(MCLK_CBCR(s->mclk)) | 1u;
 	did_mclk = true;
 	camcc_poll(MCLK_CBCR(s->mclk), CBCR_OFF, 0, "the MCLK's branch");
-	instantnoodle_gpio_function((struct instantnoodle_pin){ INSTANTNOODLE_TLMM_NORTH, 94 + s->mclk }, 1, INSTANTNOODLE_PULL_NONE, 4);
+	instantnoodle_gpio_function((struct instantnoodle_pin){ INSTANTNOODLE_TLMM_NORTH, 94 + s->mclk }, 1, INSTANTNOODLE_PULL_NONE, 2);
 	say("camera: MCLK%u: branch %#010x, root generator cmd %#010x cfg %#010x\n", s->mclk, camcc_rd(MCLK_CBCR(s->mclk)),
 	    camcc_rd(MCLK_RCG(s->mclk)), camcc_rd(MCLK_RCG(s->mclk) + 4));
-	IOSleep(2);
+	IOSleep(1);
 	say("camera: next: reset high\n");
 	instantnoodle_gpio_output(s->reset, true, INSTANTNOODLE_PULL_NONE, 2);
-	IOSleep(10);
+	IOSleep(15);
 	return true;
 }
 
@@ -370,6 +392,13 @@ power_down(void)
 		if (restore && did_vote) {
 			(void)instantnoodle_rail_level("mmcx.lvl", 0);
 		}
+	}
+	if (did_bob) {
+		(void)instantnoodle_supply("bobc1", 0, false);   /* (only this vote: the display and Android's own are the BOB's other users) */
+	}
+	if (did_vaf) {
+		instantnoodle_gpio_output((struct instantnoodle_pin){ INSTANTNOODLE_TLMM_NORTH, s->vaf_pin }, false, INSTANTNOODLE_PULL_DOWN, 2);
+		(void)instantnoodle_supply("ldof5", 0, false);
 	}
 	if (did_custom) {
 		(void)instantnoodle_supply(s->custom, 0, false);   /* (smpa5 is shared with the Wi-Fi radio's RF rail: this gives back only this vote) */

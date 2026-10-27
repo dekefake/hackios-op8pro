@@ -6,7 +6,16 @@ fw-camera/ and never in the repository; so is what this makes of it).
 
 usage: camsensor.py MODULE.bin OUT.tab     (camsensor.py MODULE.bin -   lists the tables only)
 
-The module file is a "QTI Chromatix Header" / "Parameter Parser V3.0.1" file: after the header a
+Two versions are read. "Parameter Parser V2.0.0" (the OnePlus 8 Pro's, /odm/lib64/camera): the same structure with
+64-bit words -- the table of entry points at 0xa0 as (type, offset, size) triples of 64 bits, the symbols 72 bytes
+{ id, name[32], kind, parent, offset, size }, the sensor driver's structure of 64-bit fields (4: the sensor's name symbol,
+5: slave address, 6/7: address and data bytes of the id read, 8: id address, 9: id, 10: mask, 15/16 and 17/18: count and
+symbol of the power-up and power-down sequences), register settings of 80 bytes. For V2 this prints and writes the
+identity, the power sequences (types are Qualcomm's cam_sensor_power_seq_type: 0 MCLK, 1 VANA, 2 VDIG, 3 VIO, 4 VAF, 5 VAF_PWDM,
+6 CUSTOM_REG1, 7 CUSTOM_REG2, 8 RESET, 9 STANDBY, 10 CUSTOM_GPIO1, 11 CUSTOM_GPIO2; value: 1 on, 0 off, MCLK's in Hz) and
+the register tables, and NO modes (the 408-byte resolution elements are not decoded yet).
+
+The V3.0.1 format: a "QTI Chromatix Header" / "Parameter Parser V3.0.1" file: after the header a
 table of entry points (offset, size) -- the first is a table of symbols, the second the data the
 symbols point into. A symbol is { id, name[32], kind, ?, parent, offset, size } (56 bytes); the
 sensor driver's data is a C structure at the start of the data, its strings and arrays given by
@@ -55,6 +64,8 @@ def main():
     if len(sys.argv) < 3:
         sys.exit(__doc__)
     data = open(sys.argv[1], 'rb').read()
+    if data.startswith(b'QTI Chromatix Header') and b'Parameter Parser V2.0.0' in data[:0x60]:
+        return main_v2(data)
     if not data.startswith(b'QTI Chromatix Header') or b'Parameter Parser V3.0.1' not in data[:0x60]:
         sys.exit('camsensor.py: not a module file of the kind known here')
     syms, order, pool = symbols(data)
@@ -151,6 +162,91 @@ def regsetting(data, pool, syms, value, sid):
          delay_sid) = struct.unpack_from('<10I', data, pool + ref + 40 * k)
         values = struct.unpack('<%dI' % (len(value(data_sid)) // 4), value(data_sid))
         delay = struct.unpack('<I', value(delay_sid))[0] if has_delay else 0
+        for v in values[:max(count, 1)]:
+            writes.append((address, v, address_bytes, data_bytes, operation, delay))
+    return writes
+
+
+TYPES2 = {0: 'MCLK', 1: 'VANA', 2: 'VDIG', 3: 'VIO', 4: 'VAF', 5: 'VAF_PWDM', 6: 'CUSTOM_REG1', 7: 'CUSTOM_REG2', 8: 'RESET',
+          9: 'STANDBY', 10: 'CUSTOM_GPIO1', 11: 'CUSTOM_GPIO2'}
+
+
+def main_v2(data):
+    """Parameter Parser V2.0.0: 64-bit words (see the top of this file)."""
+    entries = struct.unpack_from('<9Q', data, 0xa0)
+    table, pool = entries[1], entries[4]
+    syms, order, at = {}, [], table
+    while at + 0x48 <= pool:
+        sid = struct.unpack_from('<Q', data, at)[0]
+        name = data[at + 8:at + 0x28].split(b'\0')[0].decode('latin1')
+        _, _, ref, size = struct.unpack_from('<4Q', data, at + 0x28)
+        syms[sid] = (name, ref, size)
+        order.append(sid)
+        at += 0x48
+
+    def value(sid):
+        _, ref, size = syms[sid]
+        return data[pool + ref:pool + ref + size]
+
+    def words(sid):
+        v = value(sid)
+        return struct.unpack('<%dQ' % (len(v) // 8), v)
+
+    first = next((x for x in order if syms[x][0] == 'sensorDriverData'), order[0])
+    driver = struct.unpack('<%dQ' % (syms[first][2] // 8), value(first))
+    name = value(driver[4]).split(b'\0')[0].decode('latin1')
+    slave, address_bytes, data_bytes, id_address, chip_id, id_mask = driver[5:11]
+    power = {}
+    for label, (count, sid) in (('pwrup', driver[15:17]), ('pwrdn', driver[17:19])):
+        w = words(sid)
+        power[label] = [w[i:i + 3] for i in range(0, min(len(w), 3 * count), 3)]
+    print(f'camsensor.py (V2.0.0): sensor {name}, slave {slave:#x} (8-bit), id {chip_id:#x} at {id_address:#x} '
+          f'({address_bytes}/{data_bytes} bytes, mask {id_mask:#x})')
+    for label in ('pwrup', 'pwrdn'):
+        print(f'  {label}: ' + ' '.join(f'{TYPES2.get(t, t)}={v}+{d}ms' for t, v, d in power[label]))
+    roles = {'regToRealGain': ['on', 'off', 'holdon', 'holdoff'], 'initSettings': ['init'], 'testPatternData': ['tpgoff', 'tpgon']}
+    tables, after, used = [], '', {}
+    for sid in order:
+        nm = syms[sid][0]
+        if nm != 'regSetting':
+            if nm not in ('slaveAddr', 'registerData', 'delayUs'):
+                after = nm
+            continue
+        names = roles.get(after, [])
+        n = used.get(after, 0)
+        used[after] = n + 1
+        if n < len(names):
+            tables.append((names[n], regsetting_v2(data, pool, syms, value, sid)))
+    for nm, writes in tables:
+        print(f'  {nm}: {len(writes)} writes: ' + ' '.join(f'{a:x}={v:x}' + (f'+{d}us' if d else '') for a, v, _, _, _, d in writes[:10]) +
+              (' ...' if len(writes) > 10 else ''))
+    if sys.argv[2] == '-':
+        return
+    out = bytearray(b'RWCTAB02')
+    out += struct.pack('<8I', slave, address_bytes, data_bytes, id_address, chip_id, id_mask, 0, 0)    # no modes (V2: not decoded)
+    for label in ('pwrup', 'pwrdn'):
+        out += label.encode().ljust(8, b'\0') + struct.pack('<I', len(power[label]))
+        for t, v, d in power[label]:
+            out += struct.pack('<HHBBBBI', t, v // 1000 if t == 0 else v, 0, 0, 0, 0, d * 1000)
+    out += struct.pack('<I', len(tables))
+    for nm, writes in tables:
+        out += nm.encode().ljust(8, b'\0') + struct.pack('<I', len(writes))
+        for a, v, ab, db, op, d in writes:
+            out += struct.pack('<HHBBBBI', a, v, ab, db, op, 0, d)
+    open(sys.argv[2], 'wb').write(out)
+    print(f'camsensor.py: {sys.argv[2]}: {len(out)} bytes')
+
+
+def regsetting_v2(data, pool, syms, value, sid):
+    """V2's array of register settings: 80 bytes each, ten 64-bit words (the V3 layout's fields)."""
+    _, ref, size = syms[sid]
+    writes = []
+    for k in range(size // 80):
+        (has_slave, slave_sid, address, count, data_sid, address_bytes, data_bytes, operation, has_delay,
+         delay_sid) = struct.unpack_from('<10Q', data, pool + ref + 80 * k)
+        raw = value(data_sid)
+        values = struct.unpack('<%dQ' % (len(raw) // 8), raw)
+        delay = struct.unpack('<Q', value(delay_sid))[0] if has_delay else 0
         for v in values[:max(count, 1)]:
             writes.append((address, v, address_bytes, data_bytes, operation, delay))
     return writes
