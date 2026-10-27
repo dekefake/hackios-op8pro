@@ -1101,6 +1101,38 @@ static uint32_t stat_ctl_drop;
 
 static bool ring_put(uint8_t *ring, uint32_t size, volatile uint32_t *head, volatile uint32_t *tail, const uint8_t *data, uint32_t len);
 
+static uint32_t acl_logged;
+
+/* the first 80 ACL packets either way: the connection handle, the L2CAP channel, and for the signalling channel (1 classic, 5 LE) the command: what the other side asks for */
+static void
+acl_log(const char *dir, const uint8_t *p, uint32_t n)
+{
+	static uint32_t conn_logged;
+	uint32_t cid;
+
+	if (n < 9) {
+		return;
+	}
+	cid = p[7] | p[8] << 8;
+	/* the first 80 packets of any kind, and then every L2CAP connection request/response (code 2, 3: the PSM says which service) up to 300 */
+	if (acl_logged++ >= 80 && !((cid == 1 || cid == 5) && n >= 13 && (p[9] == 2 || p[9] == 3) && conn_logged++ < 300)) {
+		return;
+	}
+
+	say("bt: acl %s handle %03x len %u cid %u", dir, (p[1] | p[2] << 8) & 0xfff, p[3] | p[4] << 8, cid);
+	if ((cid == 1 || cid == 5) && n >= 13) {
+		say(" signalling code %02x id %02x", p[9], p[10]);
+		for (uint32_t i = 13; i < n && i < 21; i++) {
+			say(" %02x", p[i]);
+		}
+	} else {
+		for (uint32_t i = 9; i < n && i < 17; i++) {
+			say(" %02x", p[i]);
+		}
+	}
+	say("\n");
+}
+
 static uint32_t stat_ev[256], stat_le[32], stat_acl_in, stat_ev_logged;
 static uint16_t cmds_seen[24];
 static uint32_t cmds_seen_n;
@@ -1113,8 +1145,8 @@ deliver(const uint8_t *pkt, uint32_t len)
 		stat_ev[pkt[1]]++;
 		if (pkt[1] == 0x3e && len >= 4) {
 			stat_le[pkt[3] & 0x1f]++;
-		} else if (stat_ev_logged++ < 200) {
-			/* (what the controller says, other than advertising reports: the code, the length, the first bytes) */
+		} else if (pkt[1] != 0x0e && pkt[1] != 0x13 && stat_ev_logged++ < 400) {
+			/* (what the controller says, other than advertising reports and command completes: the code, the length, the first bytes) */
 			say("bt: ev %02x len %u:", pkt[1], pkt[2]);
 			for (uint32_t i = 3; i < len && i < 15; i++) {
 				say(" %02x", pkt[i]);
@@ -1123,6 +1155,7 @@ deliver(const uint8_t *pkt, uint32_t len)
 		}
 	} else if (pkt[0] == 2) {
 		stat_acl_in++;
+		acl_log("in", pkt, len);
 	}
 	if (ctl_connected) {
 		if (ctl_enqueuedata(ctl_ref, ctl_unit_no, (void *)(uintptr_t)pkt, len, 0) != 0) {
@@ -1456,6 +1489,9 @@ static void
 ctl_packet(const uint8_t *p, uint32_t n)
 {
 	stat_ctl_tx++;
+	if (p[0] == 2) {
+		acl_log("out", p, n);
+	}
 	if (p[0] == 1) {
 		uint16_t op = (uint16_t)(p[1] | p[2] << 8);
 
@@ -1758,9 +1794,17 @@ bt_thread(__unused void *parameter, __unused wait_result_t result)
 	show_pins();
 	show_engine();
 	if (level >= 2) {
-		if (PE_parse_boot_argn("wifi", &wifi, sizeof(wifi)) && wifi != 0) {
-			say("bt: bt=2 is refused with wifi= on: the rails and the vote register are the Wi-Fi driver's then\n");
+		if (PE_parse_boot_argn("wifi", &wifi, sizeof(wifi)) && wifi != 0 && level < 5) {
+			say("bt: bt=2..4 are refused with wifi= on: the rails and the vote register are the Wi-Fi driver's then\n");
 		} else {
+			if (wifi != 0) {
+				/*
+				 * bt=5 and up with wifi=1: the two drivers share the chip's four rails (the same votes, to the same requester: nothing
+				 * here ever turns them off) and bit-wise the clock vote register 0x52008 (Wi-Fi's bits 0-5, this engine's 6, 7 and 16, each
+				 * by read-modify-write); BT_EN and WLAN_EN are separate pins. Use bt_after=45 or so, so that Wi-Fi's bring-up is over first.
+				 */
+				say("bt: Wi-Fi is on too (wifi=%u): the rails are voted again with the same values, the vote register by bits\n", wifi);
+			}
 			bt_state = level >= 5 ? "starting" : "off";
 			if (power_up()) {
 				show_engine();
