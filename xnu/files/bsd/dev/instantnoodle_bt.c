@@ -1317,13 +1317,7 @@ transport_run(void)
 		return;
 	}
 	thread_deallocate(thread);
-	major = cdevsw_add(-1, &bt_cdevsw);
-	if (major >= 0 && devfs_make_node(makedev(major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, "hk-bt") != NULL) {
-		say("bt: /dev/hk-bt: one HCI packet (H4: a type byte, then the packet) a read and a write\n");
-	} else {
-		say("bt: /dev/hk-bt cannot be made\n");
-	}
-	/* the self-test, before iOS has the node: the same calls it will make */
+	/* the self-test, before iOS has the node (two readers of one ring take each other's answers): the same calls it will make */
 	tries++; good += selftest("HCI_Reset", reset, sizeof(reset), 7);
 	tries++; good += selftest("Read_Local_Version", version, sizeof(version), 15);
 	tries++; good += selftest("Read_Buffer_Size", bufsize, sizeof(bufsize), 14);
@@ -1344,6 +1338,12 @@ transport_run(void)
 	tries++; good += ok == 100;
 	say("bt: bt=5: %u of %u tests good; %u packets received, %u sent, %u wake-ups answered, %u bad bytes\n", good, tries, stat_packets, stat_tx,
 	    stat_wakes, stat_bad);
+	major = cdevsw_add(-1, &bt_cdevsw);
+	if (major >= 0 && devfs_make_node(makedev(major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, "hk-bt") != NULL) {
+		say("bt: /dev/hk-bt: one HCI packet (H4: a type byte, then the packet) a read and a write\n");
+	} else {
+		say("bt: /dev/hk-bt cannot be made\n");
+	}
 }
 #endif
 
