@@ -76,6 +76,7 @@
 #include <sys/conf.h>
 #include <sys/kern_control.h>
 #include <sys/kpi_mbuf.h>
+#include <sys/sysctl.h>
 #include <sys/systm.h>
 #include <sys/uio.h>
 #include <sys/instantnoodle.h>
@@ -193,6 +194,25 @@ say(const char *format, ...)
 
 static volatile uint32_t *gcc17, *gcc52, *se;
 static uint32_t level;
+
+/*
+ * What iOS's side asks about the controller: the sysctl kern.hackios.bt ("state off|starting|up|FAILED"), read by the boot helper that stands in
+ * for BlueTool (userland src/btboot.c: its "boot" script waits for "up"), and /dev/btpoweroff, which that helper holds open while the
+ * controller is to be off (BlueTool's own node name). Holding it is only noted for now: the controller stays powered for the run.
+ */
+static const char *bt_state = "off";
+
+static int
+bt_state_sysctl(__unused struct sysctl_oid *oid, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	char text[64];
+
+	snprintf(text, sizeof(text), "state %s", bt_state);
+	return SYSCTL_OUT(req, text, strlen(text) + 1);
+}
+SYSCTL_DECL(_kern_hackios);
+SYSCTL_PROC(_kern_hackios, OID_AUTO, bt, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, bt_state_sysctl, "A",
+    "the Bluetooth controller: state off, starting, up or FAILED");
 
 static uint32_t
 rd(volatile uint32_t *page, uint32_t offset)
@@ -1310,6 +1330,27 @@ static const struct cdevsw bt_cdevsw = {
 	.d_mmap = eno_mmap, .d_strategy = eno_strat, .d_type = 0
 };
 
+/* /dev/btpoweroff: opened = the host wants the controller off (the boot helper's "deepsleep"); noted only, the controller stays on for the run */
+static int
+poweroff_open(__unused dev_t dev, __unused int flags, __unused int type, __unused struct proc *p)
+{
+	say("bt: /dev/btpoweroff opened: power off asked for (not acted on: the controller stays up for this run)\n");
+	return 0;
+}
+
+static int
+poweroff_close(__unused dev_t dev, __unused int flags, __unused int type, __unused struct proc *p)
+{
+	say("bt: /dev/btpoweroff closed: power on asked for\n");
+	return 0;
+}
+
+static const struct cdevsw poweroff_cdevsw = {
+	.d_open = poweroff_open, .d_close = poweroff_close, .d_read = eno_rdwrt, .d_write = eno_rdwrt,
+	.d_ioctl = eno_ioctl, .d_stop = eno_stop, .d_reset = eno_reset, .d_select = eno_select,
+	.d_mmap = eno_mmap, .d_strategy = eno_strat, .d_type = 0
+};
+
 /* ---- bt=6: the kernel control BlueTool's UART transport connects to ----------------------------------------- */
 
 /*
@@ -1482,6 +1523,7 @@ ctl_start(void)
 
 	bzero(&reg, sizeof(reg));
 	strlcpy(reg.ctl_name, CTL_NAME, sizeof(reg.ctl_name));
+	reg.ctl_flags = CTL_FLAG_REG_SOCK_STREAM;       /* bluetoothd's POSIX transport opens it as a SOCK_STREAM socket (connect said EPROTOTYPE otherwise) */
 	reg.ctl_sendsize = 64 * 1024;
 	reg.ctl_recvsize = 64 * 1024;
 	reg.ctl_connect = ctl_connect_cb;
@@ -1570,7 +1612,12 @@ transport_run(void)
 	}
 	if (level >= 6) {
 		ctl_start();
+		major = cdevsw_add(-1, &poweroff_cdevsw);
+		if (major >= 0) {
+			(void)devfs_make_node(makedev(major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, "btpoweroff");
+		}
 	}
+	bt_state = good == tries ? "up" : "FAILED";
 }
 #endif
 
@@ -1656,12 +1703,16 @@ bt_thread(__unused void *parameter, __unused wait_result_t result)
 		if (PE_parse_boot_argn("wifi", &wifi, sizeof(wifi)) && wifi != 0) {
 			say("bt: bt=2 is refused with wifi= on: the rails and the vote register are the Wi-Fi driver's then\n");
 		} else {
+			bt_state = level >= 5 ? "starting" : "off";
 			if (power_up()) {
 				show_engine();
 				if (level >= 3) {
 					hci_talk();
 					show_engine();
 				}
+			}
+			if (level >= 5 && !kept) {
+				bt_state = "FAILED";            /* (the controller was not brought up: the boot helper stops waiting) */
 			}
 			if (!kept) {
 				power_down();
@@ -1685,6 +1736,9 @@ instantnoodlep_bt_init(void)
 		say("bt: the driver does bt=1 (a look), bt=2 (power on), bt=3 (HCI_Reset and the version request), bt=4 (firmware), bt=5 (packet device), "
 		    "bt=6 (and BlueTool's kernel control) so far\n");
 		level = 6;
+	}
+	if (level >= 5) {
+		bt_state = "starting";          /* (the boot helper waits for "up" from here on, not for the thread's own start) */
 	}
 	if (kernel_thread_start(bt_thread, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
