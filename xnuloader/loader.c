@@ -3854,6 +3854,24 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		dt_prop_u32(&w, "camera-rear", 1);
 		dt_end(&w);
 	}
+	/*
+	 * bluetoothd looks for a "bluetooth" service in the device tree and reads its local-mac-address ("Unable to match
+	 * bluetooth service in device tree ... No bluetooth on this device" without): the node is here so that it goes
+	 * on to BlueTool. The address is a locally administered one of ours (the phone's own is the radio's, and the
+	 * controller behind it is not driven yet: this only lets iOS look for it).
+	 */
+	{
+		/* (which name and which place bluetoothd matches is not known: both names, here and at the root of the tree) */
+		static const char *const names[] = { "bluetooth", "marconi-bt" };
+
+		for (int n = 0; n < 2; n++) {
+			dt_begin(&w, names[n]);
+			dt_prop_str(&w, "device_type", "bluetooth");
+			dt_prop_str(&w, "compatible", "bluetooth,marconi");
+			dt_prop(&w, "local-mac-address", bluetooth_address, sizeof(bluetooth_address));
+			dt_end(&w);
+		}
+	}
 	dt_begin(&w, "gic");
 	dt_prop_str(&w, "device_type", "interrupt-controller");
 	dt_prop_str(&w, "compatible", "arm,gic-v3");
@@ -3872,6 +3890,14 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	}
 	dt_end(&w);
 
+	for (int n = 0; n < 2; n++) {
+		static const char *const names[] = { "bluetooth", "marconi-bt" };
+
+		dt_begin(&w, names[n]);
+		dt_prop_str(&w, "device_type", "bluetooth");
+		dt_prop(&w, "local-mac-address", bluetooth_address, sizeof(bluetooth_address));
+		dt_end(&w);
+	}
 	dt_end(&w);
 
 	uint32_t dt_len = (uint32_t)(w.cur - w.base);
