@@ -1101,10 +1101,29 @@ static uint32_t stat_ctl_drop;
 
 static bool ring_put(uint8_t *ring, uint32_t size, volatile uint32_t *head, volatile uint32_t *tail, const uint8_t *data, uint32_t len);
 
+static uint32_t stat_ev[256], stat_le[32], stat_acl_in, stat_ev_logged;
+static uint16_t cmds_seen[24];
+static uint32_t cmds_seen_n;
+
 /* a packet from the controller (or a fake one) to whoever has the transport: BlueTool's socket, else the /dev/hk-bt ring */
 static bool
 deliver(const uint8_t *pkt, uint32_t len)
 {
+	if (pkt[0] == 4 && len >= 3) {
+		stat_ev[pkt[1]]++;
+		if (pkt[1] == 0x3e && len >= 4) {
+			stat_le[pkt[3] & 0x1f]++;
+		} else if (stat_ev_logged++ < 200) {
+			/* (what the controller says, other than advertising reports: the code, the length, the first bytes) */
+			say("bt: ev %02x len %u:", pkt[1], pkt[2]);
+			for (uint32_t i = 3; i < len && i < 15; i++) {
+				say(" %02x", pkt[i]);
+			}
+			say("\n");
+		}
+	} else if (pkt[0] == 2) {
+		stat_acl_in++;
+	}
 	if (ctl_connected) {
 		if (ctl_enqueuedata(ctl_ref, ctl_unit_no, (void *)(uintptr_t)pkt, len, 0) != 0) {
 			stat_ctl_drop++;
@@ -1217,12 +1236,48 @@ tx_one(void)
 	}
 }
 
+/* every 5 s, when anything changed: how many events of each kind (and LE sub-event) the controller has sent, ACL packets, wake-ups, drops */
+static void
+summary(void)
+{
+	static uint64_t last_ns;
+	static uint32_t last_total;
+	uint64_t ns;
+	uint32_t total = stat_packets + stat_tx + stat_wakes;
+	char line[200];
+	int n;
+
+	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
+	if (ns - last_ns < 5 * NSEC_PER_SEC) {
+		return;
+	}
+	last_ns = ns;
+	if (total == last_total) {
+		return;
+	}
+	last_total = total;
+	n = snprintf(line, sizeof(line), "bt: stats: events");
+	for (unsigned i = 0; i < 256 && n < (int)sizeof(line) - 12; i++) {
+		if (stat_ev[i] != 0) {
+			n += snprintf(line + n, sizeof(line) - (size_t)n, " %02x:%u", i, stat_ev[i]);
+		}
+	}
+	n += snprintf(line + n, sizeof(line) - (size_t)n, "; LE");
+	for (unsigned i = 0; i < 32 && n < (int)sizeof(line) - 12; i++) {
+		if (stat_le[i] != 0) {
+			n += snprintf(line + n, sizeof(line) - (size_t)n, " %02x:%u", i, stat_le[i]);
+		}
+	}
+	say("%s; ACL in %u, tx %u, wake-ups %u, dropped %u, bad %u\n", line, stat_acl_in, stat_tx, stat_wakes, stat_ctl_drop, stat_bad);
+}
+
 static void
 worker(__unused void *parameter, __unused wait_result_t result)
 {
 	for (;;) {
 		uint32_t before = stat_packets + stat_tx;
 
+		summary();
 		rx_poll();
 		if (ring_get(tx_ring, TX_RING, &tx_head, &tx_tail, NULL, 0) != 0) {
 			tx_one();
@@ -1375,6 +1430,9 @@ static void
 ctl_log(const char *dir, const uint8_t *p, uint32_t n)
 {
 	if (ctl_logged++ >= 300) {
+		if (ctl_logged < 1500 && n >= 3) {      /* (after the first 300 lines: the opcode alone) */
+			say("bt: ctl %s op %02x%02x\n", dir, p[2], p[1]);
+		}
 		return;
 	}
 	say("bt: ctl %s %u bytes:", dir, n);
