@@ -78,6 +78,7 @@
 #include <pexpert/pexpert.h>
 #include <vm/memory_types.h>
 #include <sys/systm.h>
+#include <sys/instantnoodle.h>
 #include <sys/conf.h>
 #include <sys/uio.h>
 #include <miscfs/devfs/devfs.h>
@@ -4215,11 +4216,17 @@ camera_thread(__unused void *parameter, __unused wait_result_t result)
 	thread_terminate(current_thread());
 }
 
+extern void instantnoodlep_camera_init(void);   /* bsd/dev/instantnoodle_camera.c: the OnePlus 8 Pro's own */
+
 void
 hk_camera_init(void)
 {
 	thread_t thread;
 
+	if (instantnoodlep_board()) {
+		instantnoodlep_camera_init();   /* (this file's driver is the POCO X5 Pro's: other registers, other parts) */
+		return;
+	}
 	if (!PE_parse_boot_argn("cam", &level, sizeof(level)) || level == 0) {
 		return;
 	}

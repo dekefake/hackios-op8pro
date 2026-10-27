@@ -221,7 +221,7 @@ rpmh_entry(const char *name, const uint8_t **aux, unsigned *aux_length)
 	if (db == NULL || db->magic[0] != 0xdb || db->magic[1] != 0x30 || db->magic[2] != 0x03 || db->magic[3] != 0x0c) {
 		return 0;
 	}
-	strlcpy(id, name, sizeof(id));
+	strncpy(id, name, sizeof(id));       /* (8 bytes with no terminator when the name has 8 characters: "mmcx.lvl"; strlcpy cut it to 7) */
 	for (unsigned s = 0; s < 8; s++) {
 		const struct cmd_db_slave *slave = &db->slave[s];
 		const struct cmd_db_entry *entry = (const struct cmd_db_entry *)(db->data + slave->header_offset);

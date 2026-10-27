@@ -44,6 +44,7 @@ struct instantnoodle_i2c {
 };
 int instantnoodle_i2c_write(struct instantnoodle_i2c *bus, uint8_t addr, const uint8_t *bytes, unsigned n);
 int instantnoodle_i2c_read(struct instantnoodle_i2c *bus, uint8_t addr, uint8_t reg, uint8_t *buf, unsigned n);
+int instantnoodle_i2c_read16(struct instantnoodle_i2c *bus, uint8_t addr, uint16_t reg, uint8_t *buf, unsigned n);   /* a register with a 16-bit address */
 void instantnoodle_i2c_recover(struct instantnoodle_i2c *bus);     /* nine clocks and a stop: a target holding SDA lets go */
 
 void instantnoodle_battery_init(void);  /* the bq27541 fuel gauge (bsd/dev/instantnoodle_battery.c) */

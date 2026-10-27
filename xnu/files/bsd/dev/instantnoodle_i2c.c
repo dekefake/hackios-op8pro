@@ -323,3 +323,33 @@ instantnoodle_i2c_read(struct instantnoodle_i2c *b, uint8_t addr, uint8_t reg, u
 	}
 	return err;
 }
+
+/* A register of 16 bits (the camera sensors'): the same transfer with the address's two bytes. */
+int
+instantnoodle_i2c_read16(struct instantnoodle_i2c *b, uint8_t addr, uint16_t reg, uint8_t *buf, unsigned n)
+{
+	int err;
+
+	bus_lock(b);
+	bb_start(b);
+	err = bb_tx(b, (uint8_t)(addr << 1));
+	if (err == 0) {
+		err = bb_tx(b, (uint8_t)(reg >> 8));
+	}
+	if (err == 0) {
+		err = bb_tx(b, (uint8_t)reg);
+	}
+	if (err == 0) {
+		bb_start(b);                    /* repeated start */
+		err = bb_tx(b, (uint8_t)(addr << 1 | 1));
+	}
+	for (unsigned i = 0; i < n && err == 0; i++) {
+		buf[i] = bb_rx(b, i + 1 < n);
+	}
+	bb_stop(b);
+	lck_mtx_unlock(b->lock);
+	if (err) {
+		b->errors++;
+	}
+	return err;
+}
