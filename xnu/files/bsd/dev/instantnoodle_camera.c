@@ -321,6 +321,24 @@ power_up(void)
 }
 
 static void
+scan_bus(const char *when)
+{
+	char list[160] = "";
+	unsigned seen = 0;
+
+	for (unsigned a = 0x08; a <= 0x77; a++) {
+		uint8_t one;
+
+		if (instantnoodle_i2c_read16(&bus, (uint8_t)a, 0, &one, 1) == 0) {
+			seen++;
+			snprintf(list + strlen(list), sizeof(list) - strlen(list), " %#04x", a);
+		}
+		instantnoodle_i2c_recover(&bus);
+	}
+	say("camera: addresses answering on this bus (7-bit), %s:%s%s\n", when, seen ? list : " none", seen > 12 ? " (so many: the bus is stuck)" : "");
+}
+
+static void
 read_id(void)
 {
 	const struct sensor *s = sensor;
@@ -332,21 +350,15 @@ read_id(void)
 	bus.pull = INSTANTNOODLE_PULL_UP;
 	say("camera: the CCI's pins before the transfer: data (pin %u) %u, clock (pin %u) %u\n", s->sda.pin, instantnoodle_gpio_level(s->sda) ? 1u : 0u,
 	    s->scl.pin, instantnoodle_gpio_level(s->scl) ? 1u : 0u);
-	{
-		char list[160] = "";
-		unsigned seen = 0;
-
-		for (unsigned a = 0x08; a <= 0x77; a++) {
-			uint8_t one;
-
-			if (instantnoodle_i2c_read16(&bus, (uint8_t)a, 0, &one, 1) == 0) {
-				seen++;
-				snprintf(list + strlen(list), sizeof(list) - strlen(list), " %#04x", a);
-			}
-			instantnoodle_i2c_recover(&bus);
-		}
-		say("camera: addresses answering on this bus (7-bit):%s%s\n", seen ? list : " none", seen > 12 ? " (so many: the bus is stuck)" : "");
-	}
+	scan_bus("15 ms after reset high");
+	IOSleep(100);
+	scan_bus("115 ms");
+	say("camera: next: a reset pulse with MCLK running\\n");
+	instantnoodle_gpio_output(s->reset, false, INSTANTNOODLE_PULL_DOWN, 2);
+	IOSleep(5);
+	instantnoodle_gpio_output(s->reset, true, INSTANTNOODLE_PULL_NONE, 2);
+	IOSleep(30);
+	scan_bus("30 ms after the pulse");
 	for (int tries = 0; tries < 3; tries++) {
 		int err = instantnoodle_i2c_read16(&bus, s->address, 0x0016, id, 2);
 
