@@ -10,8 +10,8 @@ Status (2026-10-26):
 |---|---|---|
 | join from Settings, DHCP, Safari | verified on the phone (55-90 Mbit/s) | verified on the phone (RAM-only runs, 2026-10-25) |
 | networks joined so far | not recorded in detail (README: "join from Settings, Safari over Wi-Fi"); not re-checked since the OnePlus work | WPA2 hotspot (5 GHz ch 44), WPA2 "mixed" mesh with TKIP group cipher, WPA3-only hotspot (SAE by hash-to-element, PMF) |
-| sleep/wake with the radio on | not applicable (no system sleep) | built (`hk_power_will_sleep`), **not tried on the phone** |
-| auto-join across reboots | not checked | impossible in RAM-only runs (`/private/var` is new every boot); needs a run with `var_store=1 ufs_write=1` |
+| sleep/wake with the radio on | not applicable (no system sleep) | tried 2026-10-29 with `syssleep=1`: after the first wake the firmware crashes (RDDM) and the driver is taken down (K45) |
+| auto-join across reboots / when a saved network comes into range | not checked | **does not work (2026-10-29)**: /private/var is persistent now, the saved network is heard, wifid never sends ASSOCIATE; KNOWN_ISSUES K44 has every variant tried and the unanswered questions |
 | 802.11r (FT) | not done | not done (iOS is told the card has no FT) |
 
 ## Layers

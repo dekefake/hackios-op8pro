@@ -1,0 +1,46 @@
+#!/bin/bash
+# ubuild OUTDIR [TARGET...]   compile userland programs on this Mac in the kernel-builder container (aarch64 Linux: cross clang + ld64 + the iPhoneOS 16.5 SDK)
+#   UBUILD_WS=hk-ws: the volume to take xnu-deps from (default hk-ws-cam)
+#   TARGET: net_test, media (libhackios-media.dylib: inject_media.c camera_device.c camera_isp.c), camera_test, camera_avtest, torch_test, record_test, vt_test, sb (libhackios-sb.dylib: inject_sb.c), ui (libhackios-ui.dylib: inject_ui.c)   (default: media camera_test)
+#   Streams userland/src in (the repo share is slow under Docker, never bind-mount it); uses the xnu-deps/host/bin tools and the iPhoneOS16.5 SDK from the volumes
+#   hk-ws-cam (read-only) and theos. The command lines are build.sh's $DYN ones. The `media' result of an unchanged tree is byte-identical to userland/obj's.
+# This builds the programs only: put them into an image by repacking it (7z x -o DIR root.apfs; copy over DIR/hackios/bin or lib; tools/apfs/mkapfs.py -z --plain fw -o NEW.apfs hackios=DIR).
+set -e
+cd "$(dirname "$(readlink -f "$0")")/../.."
+. tools/macdev/env.sh
+out=$1; shift
+[ -n "$out" ] || { sed -n 2,6p "$0"; exit 1; }
+mkdir -p "$out"; out=$(cd "$out" && pwd)
+targets=${*:-media camera_test}
+cat > /tmp/ubuild-inner.sh <<'IN'
+#!/bin/bash
+set -e
+mkdir -p /b && tar -xf - -C /b && cd /b/userland && mkdir -p obj
+export THEOS=/opt/theos HACKIOS_ROOT=/ws XNUDEPS=/ws/xnu-deps XNU_SDK_VERSION=16.5 XNU_CLANG_DIR=/usr/bin
+export PATH=/ws/xnu-deps/host/bin:$PATH
+DYN="xnu-clang -arch arm64 -isysroot /opt/theos/sdks/iPhoneOS16.5.sdk -O1"
+for t in "$@"; do
+	case $t in
+	media) $DYN -O2 -dynamiclib -install_name /hackios/lib/libhackios-media.dylib -framework CoreFoundation -framework CoreMedia -framework CoreVideo -framework IOSurface -lobjc -o obj/libhackios-media.dylib src/inject_media.c src/camera_device.c src/camera_isp.c ;;
+	sb) $DYN -dynamiclib -install_name /hackios/lib/libhackios-sb.dylib -framework CoreFoundation -framework CoreGraphics -framework IOKit -lobjc -o obj/libhackios-sb.dylib src/inject_sb.c ;;
+	ui) $DYN -O2 -dynamiclib -install_name /hackios/lib/libhackios-ui.dylib -lobjc -o obj/libhackios-ui.dylib src/inject_ui.c ;;
+	cell) $DYN -O2 -o obj/hk_cell src/hk_cell.c ;;
+	net_test) $DYN -fobjc-arc -framework Foundation -framework SystemConfiguration -o obj/net_test src/net_test.m ;;
+	time) $DYN -O2 -o obj/hk_time src/hk_time.c ;;
+	sysctl) $DYN -O2 -o obj/hk_sysctl src/hk_sysctl.c ;;
+	logcfg) $DYN -O2 -o obj/hk_logcfg src/hk_logcfg.c ;;
+	buddy) $DYN -O2 -framework CoreFoundation -o obj/hk_buddy src/hk_buddy.c ;;
+	wifijoin) $DYN -O2 -framework CoreFoundation -o obj/hk_wifijoin src/hk_wifijoin.c ;;
+	camera_test) $DYN -O2 -o obj/camera_test src/camera_test.c src/camera_isp.c ;;
+	camera_avtest) $DYN -fobjc-arc -framework Foundation -framework AVFoundation -o obj/camera_avtest src/camera_avtest.m ;;
+	torch_test) $DYN -framework CoreFoundation -framework AVFoundation -lobjc -o obj/torch_test src/torch_test.c ;;
+	vt_test) $DYN -framework CoreFoundation -framework CoreMedia -framework CoreVideo -framework VideoToolbox -o obj/vt_test src/vt_test.c ;;
+	record_test) $DYN -framework CoreFoundation -framework AVFoundation -lobjc -o obj/record_test src/record_test.c ;;
+	*) echo "unknown target $t"; exit 1 ;;
+	esac
+done
+cp obj/* /out/
+IN
+chmod +x /tmp/ubuild-inner.sh
+COPYFILE_DISABLE=1 tar -cf - userland/src | docker run --rm -i -v ${UBUILD_WS:-hk-ws-cam}:/ws:ro -v theos:/opt/theos:ro -v /tmp/ubuild-inner.sh:/inner.sh:ro -v "$out":/out hackios-kernel-builder /inner.sh $targets
+ls -l "$out"

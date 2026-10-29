@@ -235,6 +235,38 @@ covered only the plugged stretch), the empty-battery shutdown, the charger limit
 charging port (1500 mA), shutdown with the cable in and off-mode charging, the menu entries and the cable-out
 wait, a listening test of the first sound after an unpark.
 
+## Measuring the drain asleep (2026-10-27)
+
+The owner saw about 8% of the battery go in one hour of sleep (about 360 mAh, an average near 360 mA: far more than
+a sleeping SoC with working low-power states needs). Until then no figure existed: the battery thread (every 5 s)
+does not run while the system sleeps, so nothing read the gauge across a sleep.
+
+- **Meter** (`hk_power.c` `meter_close()`, gauge read from `instantnoodle_battery.c` `instantnoodle_battery_meter()`):
+  the gauge's remaining charge is read as the other cores are about to go (end of `hk_power_will_sleep()`) and as they
+  are back (start of `hk_power_did_wake()`). Each sleep prints `power: meter: asleep S s: A -> B mAh, N uAh drawn = M mA on
+  average; the gauge's own average ... mA, mV; cable out|IN`. Awake stretches of 20 s or more print the same;
+  `sysctl kern.hackios.power_meter` has the running totals awake and asleep, cable-out intervals only. **Nothing is read
+  during the sleep**: the bit-banged I2C's delays use the clock that is frozen then. The gauge counts whole mAh: a
+  figure needs minutes (1 mAh in 5 minutes is 12 mA); the totals average this out.
+- **A cable in hides the drain.** With the USB cable in, the gauge shows the charger's current as well (500 mA from a
+  computer's port: more than a sleeping phone takes, so the cell charges). Every interval with the cable in at either
+  end is counted apart ("IN (no drain figure)"). A drain run needs the cable out: the owner unplugs it when the bench
+  asks (`bench: WAITING FOR THE CABLE TO COME OUT`) and plugs it in again at the end; the log is read afterwards.
+- **Bench** (`drain_bench=1`, boot-args in [../BOOT_ARGS.md](../BOOT_ARGS.md)): a kernel thread waits for iOS, for the
+  cable to come out, looks at the awake drain for 30 s, then asks for the system's sleep the way `IOPMSleepSystem()` does
+  (`hk_power_request_sleep()` in `GenericARMPE.cpp`, `IOPMrootDomain::sleepSystem()`), and, if iOS keeps the phone awake
+  with the panel dark for 60 s, asks again. With `sleep_max=S` each sleep is at most S seconds. Example (2 sleeps of 4 minutes):
+
+```sh
+XL_WHO=pwr XL_KERNEL=out/kernel/mach.development.bcm2837.pwr1 XL_RAMDISK=userland/root-bt8.apfs \
+XL_CMDLINE="cpus=8 cpufreq=1 bootcpu=7 haptic=5 torch=3 gpu=1 adsp=1 sound=4 sound_amps=1 sleep_max=240 drain_bench=1 drain_count=2" \
+tools/macdev/phone-run logs/pwr-drain1 840 'bench:|power: meter|sleep:|battery:'
+```
+
+  Per-subsystem runs repeat it with one boot-arg changed (`gpu=0`, `adsp=0`, `haptic=0`, `torch=0`, `sound=0`,
+  `gpu_sleep=0`, `bt=...`, `wifi=1`) and compare the asleep mA of the meter's lines.
+- **Status: built (kernel `pwr1`), not yet run on the phone.** No before/after number exists yet.
+
 ## What the SoC sleeps in, and what it cannot yet
 
 | State | Status |

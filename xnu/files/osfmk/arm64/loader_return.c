@@ -68,6 +68,7 @@ char     loader_log[LOADER_LOG_SIZE];
 uint32_t loader_log_len;
 static bool     loader_return_entered;
 static bool     loader_power_off;        /* iOS shut down, not restarted: reason 3 for the loader (flashboot.c) */
+static bool     loader_restart;          /* iOS restarted: reason 4 (a standalone boot's loader resets; any other reason leaves it on its USB link) */
 
 /* One L1 table and one L2 table are enough to map a single 2 MB block. */
 static uint64_t loader_l1[512] __attribute__((aligned(4096)));
@@ -406,7 +407,9 @@ loader_return(void)
 	 */
 	psci_smp_stop_others();
 #endif
+	loader_log_puts("lr: others stopped\n");
 	hk_ufs_quiesce();          /* this kernel's requests to the storage done, UEFI's list as it was, for the log */
+	loader_log_puts("lr: storage done\n");
 	hk_adreno_quiesce();       /* the GPU block, if it was started, has tables in memory that is about to be reused */
 	hk_wifi_quiesce();         /* the Wi-Fi DSP, if it still runs (a panic), is not left to itself */
 	hk_adsp_quiesce();         /* nor the audio DSP */
@@ -415,7 +418,9 @@ loader_return(void)
 	hk_torch_quiesce();        /* the flashlight off, if it was lit */
 	hk_camera_quiesce();       /* the camera powered down, if it was powered up */
 	hk_mic_quiesce();          /* (what the microphones' path did, said again: it happens in the log's middle) */
+	loader_log_puts("lr: drivers quiesced, display next\n");
 	hk_display_quiesce();      /* the panel refreshing from the boot framebuffer again, for the loader's text */
+	loader_log_puts("lr: display done\n");
 	/*
 	 * A panic's text is first collected in the panic buffer and only later
 	 * flushed to the console; if the console itself is what failed, that
@@ -432,7 +437,8 @@ loader_return(void)
 			loader_log_putc(*c);
 		}
 	}
-	loader_jump(loader_power_off ? 3 : 0, 0);
+	loader_log_puts("lr: jumping to the loader\n");
+	loader_jump(loader_power_off ? 3 : loader_restart ? 4 : 0, 0);
 }
 
 /* The way back for a system that was shut down (halt_all_cpus): reason 3, the installed loader switches off */
@@ -441,6 +447,51 @@ loader_return_power_off(void)
 {
 	loader_power_off = true;
 	loader_return();
+}
+
+/* The way back for a restart (halt_all_cpus(TRUE)): reason 4 */
+void
+loader_return_restart(void)
+{
+	loader_restart = true;
+	loader_return();
+}
+
+/*
+ * hk_fast_halt=1 (a standalone boot): iOS's shutdown or restart (reboot(2), bsd/kern/kern_shutdown.c reboot_kernel) goes straight back to the loader the way the timed end of
+ * a run does (loader_return_timer): the var store and the data volume synced from here, the GPU and the DSPs stopped, then the loader switches off or resets. XNU's own
+ * sequence -- stop the processes, sync, unmount every file system -- stalled on the HFS data volume (the unmount wrote about a thousand blocks and then stopped, 2026-10-28);
+ * HFS+ is journaled, so a volume synced and not unmounted is consistent the next time. A panic keeps its own path.
+ */
+void
+hk_reboot_fast(int howto)
+{
+	static uint32_t asked, once;
+
+	if ((howto & 0x800 /* RB_PANIC */) != 0) {
+		return;
+	}
+	if (!asked) {
+		asked = 1;
+		if (PE_parse_boot_argn("hk_fast_halt", &once, sizeof(once)) && once == 1) {
+			asked = 2;
+		}
+	}
+	if (asked != 2) {
+		return;
+	}
+	asked = 3;
+	loader_log_puts("lr: shutdown: the data volume synced, then the way back\n");
+	hk_var_save_on_return();
+	hk_data_sync_on_return();
+	hk_adreno_stop();
+	hk_wifi_stop();
+	hk_adsp_stop();
+	if ((howto & 0x08 /* RB_HALT */) != 0) {
+		loader_return_power_off();
+	} else {
+		loader_return_restart();
+	}
 }
 
 /* Bring-up aid: stop here if the loader asked for checkpoint n. */

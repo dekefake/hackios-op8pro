@@ -121,3 +121,30 @@ against `tools/apfs/apfs.py` and `apfsck` by hashing every entry of the volume a
 
 [../INSTALL.md](../INSTALL.md) for installing and the boot guard; [../BUILD.md](../BUILD.md) for the image recipes;
 [../research/boot-chain-and-recovery.md](../research/boot-chain-and-recovery.md) for partition-safety history.
+
+
+## The OnePlus 8 Pro's own UFS backend (`ufs_8pro=1`, verified 2026-10-27)
+
+The 8 Pro's UEFI has no UFS driver (UFSDxe asserts when it re-initialises the controller ABL used), so the loader serves no storage there. The kernel does it
+itself, in `bsd/dev/instantnoodle_ufs.c`, behind `hk_ufs.c` (a synthetic loader page made from the GPT, so the device nodes and the partition arithmetic are the
+loader-page path's own): **read only**, the whitelist (`u8_refusal`) has no write.
+- The controller (0x1d84000, UFSHCI 3.0, hardware 4.0.2) is adopted as ABL left it: enabled, link up, list running. Nothing is reset; the kernel stops the list,
+  points it at one of its own (slot 0 only), starts it, and puts ABL's list back at the end (`hk_ufs_quiesce`).
+- **DMA needs the apps SMMU**: the controller's stream is 0xe0, and with sCR0.USFCFG an unmatched stream faults (every earlier attempt ended in IS bit 17,
+  a bus fatal error, with the descriptor never fetched, whatever the memory). The hypervisor takes a single-stream match register for 0xe0 pointing at a
+  context number, never a bypass type nor a masked entry. A context of ours (context 6, 3-level tables as the camera's, `sctlr 0x127`) maps the 8 KB of list and
+  command descriptor and the 1 MB data buffer at IOVA 0x40000000, page by page; the controller is given IOVAs.
+- The first command reports NOT READY (ASC 04 ASCQ 02): START STOP UNIT, power condition ACTIVE to the device unit (0xd0) and START to LUN 0, then it is ready.
+- Measured: LUN 0 has 61753344 blocks of 4 KiB; `super` begins with liblp's geometry at 4096 ("gDla"); 256 MB read in 305 ms (about 840 MB/s). Partitions of LUN 0 (blocks of 4 KiB):
+  `userdata` 4133800..61753338 is the last one (219.8 GiB). The GPT has 23 partitions; only LUN 0 is read.
+- Not done: writes (the port's own partition only, whitelisted), other logical units, boot from the partition (the loader does not read it: the kernel's `ufs_8pro` path is what
+  would serve `root_apfs=ufs_darwin` after the carve), concurrency beyond one command (slot 0), interrupts (polled).
+
+### Writes and the standalone boot (OnePlus 8 Pro, 2026-10-28; built, not yet verified on the phone)
+- `ufs_write=1` with `ufs_8pro=1`: the backend's WRITE(10) path. `instantnoodle_ufs_write()` writes whole 4 KiB blocks with FUA, then reads them back and compares; `u8_refusal()` is the one gate: WRITE(10) only to LUN 0, FUA
+  and nothing else in the CDB, W set only on it, and only inside the window `instantnoodle_ufs_write_window()` gave (darwin from `UFS_WRITE_FIRST` = block 2042368 on, after hk_ufs.c checked that the partition is named
+  `darwin`, has an APFS container's type GUID and a size the var store and a data volume fit in). The iOS volume, the cryptexes and every other partition cannot be written. `hk_data=1 var_data=hfs var_data_format=1 var_store=1`
+  then work as on the OnePlus 8: the HFS+ data volume from darwin block 3145728 (`/dev/hk_data`), formatted by init the first time, mounted on `/private/var`.
+- The boot image that starts iOS without a computer: `tools/macdev/lbuild` (the loader, in the container), `tools/macdev/mk-standalone KERNEL OUT.img` (the working RAM image's UEFI + a payload: the loader, the kernel, the small image
+  `userland/root-sa1.apfs`, the resident boot volume `userland/flashboot.apfs`, the profile's boot-args with `root_apfs=ufs_darwin` and the persistence ones). Test with `fastboot boot`, flash with the owner's OK.
+- A bundle that came with the image runs once; when iOS shuts down (the kernel returns with reason 3) the loader now **switches the phone off** (`power_off()`); before, `run_kernel(); reboot();` started iOS again.

@@ -41,6 +41,8 @@
 #include <sys/hk_input.h>
 #include <sys/hk_net.h>
 #include <sys/hk_sta.h>
+
+extern bool hk_sta_scan_wait(unsigned ms);
 #include <sys/sockio.h>
 #include <sys/systm.h>
 
@@ -305,6 +307,11 @@ give_network(const struct apple80211req *request, const struct hk_sta_bss *bss)
 
 /* ---- get ---------------------------------------------------------------------------------------------- */
 
+/* The regulatory domain wifid asks for (COUNTRY_CODE, 51: three bytes, the letters and a zero) and sets from its own idea of where the phone is: without an answer
+ * it logs "cannot get countryCode" and never starts an auto-join pass (so a saved network is not joined at boot, nor when one comes into range). Kept, not applied
+ * to the radio: ath11k uses its own domain. France until iOS says otherwise. */
+static char country_code[4] = "FR";
+
 static int
 get(struct apple80211req *request)
 {
@@ -341,6 +348,8 @@ get(struct apple80211req *request)
 		}
 		return give(request, bits, sizeof(bits));
 	}
+	case 51:
+		return give(request, country_code, sizeof(country_code));
 	case 19: {                              /* the radio's power: one radio. Until the driver is up it counts as on: it */
 		struct {                        /* is being brought up, and iOS asks this once, early */
 			uint32_t version, radios, state[4];
@@ -627,6 +636,34 @@ set(const struct apple80211req *request, char *said, size_t said_size)
 	}
 	case 10:
 		return set_scan(request, said, said_size);
+	case 383: {                             /* (4104 bytes: wifid's auto-join scan, which asks for several names at once: the framework logs "AUTO-JOIN: Scan FAILED" when it is refused) a scan of every channel; its content is not read */
+		struct hk_sta_scan everything;
+
+		bzero(&everything, sizeof(everything));
+		if (!hk_sta_present()) {
+			return EBUSY;
+		}
+		snprintf(said, said_size, " (a scan for several names: a scan of every channel)");
+		lck_mtx_lock(&apple80211_lock);
+		result_next = 0;
+		lck_mtx_unlock(&apple80211_lock);
+		return hk_sta_ask_scan(&everything);
+	}
+	case 365:                               /* set with a value and no data, and a 136-byte one (419): not known; taken */
+	case 419:
+		return 0;
+	case 51: {                              /* the country code */
+		char asked[4] = "";
+		int error;
+
+		if (request->req_len < 2 || request->req_len > sizeof(asked) || (error = copyin(request->req_data, asked, request->req_len)) != 0) {
+			return request->req_len < 2 || request->req_len > sizeof(asked) ? EINVAL : error;
+		}
+		asked[3] = 0;
+		memcpy(country_code, asked, sizeof(country_code));
+		snprintf(said, said_size, " (country %.2s)", country_code);
+		return 0;
+	}
 	default:
 		return EOPNOTSUPP;
 	}
@@ -659,7 +696,7 @@ hk_apple80211_event(enum hk_sta_event event, int status)
 
 	if (said < 200) {
 		said++;
-		printf("apple80211: the station says: %s, %d\n", event == HK_STA_POWER ? "power" : event == HK_STA_SCAN_DONE ?
+		hk_wifi_tell("apple80211: the station says: %s, %d\n", event == HK_STA_POWER ? "power" : event == HK_STA_SCAN_DONE ?
 		    "a scan is over" : event == HK_STA_JOIN_DONE ? "a join is over" : "the link", status);
 	}
 	switch (event) {
@@ -774,6 +811,8 @@ hk_apple80211_summary(void)
 	}
 }
 
+extern int hk_wifi_tell(const char *format, ...) __printflike(1, 2);
+
 /* An Apple80211 request for the radio's interface, from the process that is running now. */
 errno_t
 hk_apple80211_ioctl(u_long command, void *data)
@@ -792,11 +831,11 @@ hk_apple80211_ioctl(u_long command, void *data)
 	times = note(request, is_set, error);
 	/* (a kind of request that is repeated for ever -- a scan's results, the network joined -- is said 40 times) */
 	if (times <= 40) {
-		printf("apple80211: %s %s %d (%s), value %d, %u bytes%s: %s", who, is_set ? "sets" : "gets", request->req_type,
+		((is_set || error != 0) ? hk_wifi_tell : printf)("apple80211: %s %s %d (%s), value %d, %u bytes%s: %s", who, is_set ? "sets" : "gets", request->req_type,
 		    type_name(request->req_type), request->req_val, request->req_len, what, error == 0 ? "answered\n" : error ==
 		    EOPNOTSUPP ? "REFUSED\n" : "");
 		if (error != 0 && error != EOPNOTSUPP) {
-			printf("error %d\n", error);
+			hk_wifi_tell("apple80211: error %d\n", error);
 		}
 	}
 	return error;

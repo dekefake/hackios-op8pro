@@ -1,0 +1,18 @@
+#!/bin/bash
+# lbuild [OUT.efi]   (LOADER_DEFS=-DSCREEN_QUIET: a loader that never writes its log on the screen)   build the loader (xnuloader/loader.c) in the kernel-builder container (clang + lld-link there, not on this Mac); default out/loader-8pro.efi
+set -e
+cd "$(dirname "$(readlink -f "$0")")/../.."
+. tools/macdev/env.sh
+out=${1:-out/loader-8pro.efi}; mkdir -p "$(dirname $out)"; d=$(cd "$(dirname $out)" && pwd)
+cat > /tmp/lbuild-inner.sh <<'IN'
+#!/bin/bash
+set -e
+mkdir -p /b && tar -xf - -C /b 2>/dev/null; cd /b/xnuloader
+[ -f owner_key.h ] || OWNER_KEY_H= python3 ../common/flash/ownerkey.py unpin > /dev/null
+python3 ../common/flash/darwinid.py header "" darwin_identity.h
+clang --target=aarch64-unknown-windows $LOADER_DEFS -ffreestanding -fno-builtin -fno-stack-protector -fshort-wchar -mgeneral-regs-only -O1 -Wall -Wextra -Wno-unused-parameter -c loader.c -o loader.obj 2>&1 | grep -E "error" | head
+lld-link /subsystem:efi_application /entry:efi_main /nodefaultlib /base:0xA1000000 /out:/out/$OUTNAME loader.obj
+IN
+chmod +x /tmp/lbuild-inner.sh
+COPYFILE_DISABLE=1 tar -cf - xnuloader common/flash xnu/files/bsd/sys/iphont.h | docker run --rm -i -e OUTNAME=$(basename $out) -e LOADER_DEFS="$LOADER_DEFS" -v /tmp/lbuild-inner.sh:/inner.sh:ro -v "$d":/out hackios-kernel-builder /inner.sh
+ls -l $out

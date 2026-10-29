@@ -31,10 +31,10 @@ index 4d20855..3c3b17b 100644
  
  _Entry:
 diff --git a/Silicon/Silicium/SiliciumPkg/Library/BootManagerLib/BootManager.c b/Silicon/Silicium/SiliciumPkg/Library/BootManagerLib/BootManager.c
-index 9b18ddb..f5bff32 100644
+index 9b18ddb1..1f3078dd 100644
 --- a/Silicon/Silicium/SiliciumPkg/Library/BootManagerLib/BootManager.c
 +++ b/Silicon/Silicium/SiliciumPkg/Library/BootManagerLib/BootManager.c
-@@ -1,241 +1,245 @@
+@@ -1,241 +1,252 @@
 -/**
 -  Copyright (C) DuoWoA authors. All rights reserved.
 -  Copyright (C) Microsoft Corporation. All rights reserved.
@@ -301,6 +301,7 @@ index 9b18ddb..f5bff32 100644
 +
 +#include "BootManager.h"
 +#include "XnuLoader.h"
++#include "HackiosMenu.h"
 +
 +//
 +// Global Variables
@@ -437,7 +438,13 @@ index 9b18ddb..f5bff32 100644
 +    return;
 +  }
 +
-+  // Get Boot Manager Load Option
++  // The port's own menu (HackiosMenu.c): ours first, the platform's entries below, 3 times the size, centred; the boot then goes on to the XNU loader
++  Status = HackiosBootMenu ();
++  if (!EFI_ERROR (Status)) {
++    return;
++  }
++
++  // No menu could be drawn: the firmware's own
 +  Status = MsBootOptionsLibGetBootManagerMenu (&LoadOption, NULL);
 +  if (EFI_ERROR (Status)) {
 +    DEBUG ((EFI_D_ERROR, "%a: Failed to get Boot Manager Load Option! Status = %r", __FUNCTION__, Status));
@@ -522,10 +529,10 @@ index 9b18ddb..f5bff32 100644
 +  DeviceBootManagerBdsEntry ();
 +}
 diff --git a/Silicon/Silicium/SiliciumPkg/Library/BootManagerLib/BootManagerLib.inf b/Silicon/Silicium/SiliciumPkg/Library/BootManagerLib/BootManagerLib.inf
-index 2310dc6..12a5a5d 100644
+index 2310dc61..b1ff0ad4 100644
 --- a/Silicon/Silicium/SiliciumPkg/Library/BootManagerLib/BootManagerLib.inf
 +++ b/Silicon/Silicium/SiliciumPkg/Library/BootManagerLib/BootManagerLib.inf
-@@ -1,50 +1,55 @@
+@@ -1,50 +1,58 @@
 -##
 -#  Copyright (C) Microsoft Corporation. All rights reserved.
 -#  SPDX-License-Identifier: BSD-2-Clause-Patent
@@ -593,6 +600,7 @@ index 2310dc6..12a5a5d 100644
 +[Sources]
 +  BootManager.c
 +  XnuLoader.c
++  HackiosMenu.c
 +  KeyCallback.c
 +
 +[Packages]
@@ -610,6 +618,8 @@ index 2310dc6..12a5a5d 100644
 +  DeviceBootManagerLib
 +  UefiRuntimeServicesTableLib
 +  UefiBootServicesTableLib
++  UefiBootManagerLib
++  UefiLib
 +  SecureBootHandlerLib
 +  MemoryAllocationLib
 +  MsBootOptionsLib

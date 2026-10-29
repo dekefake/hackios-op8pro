@@ -16,7 +16,7 @@
 #
 # usage: common/setup.sh            clone hackios-xnu-userland into this tree (or update it) and
 #                                   check the host for the tools the build needs
-#   USERLAND_URL=...   where to clone from (default: github.com/oosexgang/hackios-xnu-userland)
+#   USERLAND_URL=...   where to clone from (default: github.com/oosexgang/hackios-xnu-userland, OOSEX GANG's userland repository)
 #   USERLAND_REF=...   branch or tag (default: main)
 set -e
 cd "$(dirname "$(readlink -f "$0")")/.."

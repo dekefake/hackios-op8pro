@@ -1,0 +1,19 @@
+#!/bin/bash
+# phone-run OUT SECS PATTERN [XL env as usual]   one xl run, start to end, on this Mac (xl's own wait returns early here), under the phone lock.
+#   OUT.live  every distinct log line matching the egrep PATTERN, collected while the kernel runs (the loader's retained log loses its middle)
+#   OUT.log   the loader's final log (first 256 KB and last 1 MB of the kernel's console)
+#   example:  XL_KERNEL=out/kernel/mach.development.bcm2837.TAG XL_RAMDISK=userland/root-bt8.apfs XL_CMDLINE="cpus=8 bootcpu=7 ..." tools/macdev/phone-run logs/mytest 60 'display:'
+cd "$(dirname "$(readlink -f "$0")")/../.."
+. tools/macdev/env.sh
+out=$1; secs=$2; pat=$3
+exec tools/macdev/phone "${XL_WHO:-phone-run}" bash -c '
+out=$1; secs=$2; pat=$3
+XL_SECS=$secs ./xl run > $out.xl 2>&1 &
+sleep 4; : > $out.live; end=$(( $(date +%s) + secs + 60 ))
+while [ $(date +%s) -lt $end ]; do
+	fastboot oem log >/dev/null 2>&1 && fastboot get_staged /tmp/pr-$$.raw >/dev/null 2>&1 && tr -d "\0" < /tmp/pr-$$.raw | grep -aE -- "$pat" | while IFS= read -r l; do grep -qxF -- "$l" $out.live || echo "$l" >> $out.live; done
+	case "$(fastboot getvar result 2>&1 | head -1)" in *returned*|*hung*|*no-such*) break ;; esac
+done
+wait; fastboot oem log >/dev/null 2>&1 && fastboot get_staged $out.log >/dev/null 2>&1; tr -d "\0" < $out.log > $out.log.t && mv $out.log.t $out.log
+echo "phone-run: result: $(fastboot getvar result 2>&1 | head -1); $out.live $out.log"
+' _ "$out" "$secs" "$pat"

@@ -9,5 +9,9 @@ git clone https://github.com/Project-Silicium/Mu-Silicium.git $MU
 git -C $MU checkout -q "$(cat BASE)"
 git -C $MU submodule update --init --recursive
 git -C $MU apply --whitespace=nowarn "$PWD/mu-silicium.patch"
+# The OnePlus 8 Pro uses the OnePlus 8's driver set unchanged (files/Binaries/instantnoodlep/README.md); its README is overlaid below.
+mkdir -p $MU/Binaries/instantnoodlep
+cp -r files/Binaries/instantnoodle/. $MU/Binaries/instantnoodlep/
 cp -r files/. $MU/
+[ -e $MU/Resources/DTBs/instantnoodlep.dtb ] || echo "uefi/apply.sh: for the OnePlus 8 Pro run: uefi/mk-instantnoodlep-dtb.py BOOT_B.img $MU/Resources/DTBs/instantnoodlep.dtb (docs/devices/instantnoodlep.md)"
 echo "uefi/apply.sh: done; next: uefi/README.md"

@@ -49,3 +49,4 @@ screenshots in [images/](images/).
 ## Documentation rules
 Which file to update for which change is in [../AGENTS.md](../AGENTS.md#keeping-documentation-current). Status vocabulary: *verified on phone*, *built (QEMU/host-tested)*, *unverified*; tags in research pages: *observed*, *source*, *inferred*, *hypothesis*.
 The sibling directories next to the workspace (`ios-instantnoodle/`, `ios-topaz/`, `unixnu/`, `UniXNU-instantnoodle/`, `uefi-instantnoodle/`, `hackios-ref/`) are other or abandoned projects and snapshots, **not** part of this documentation.
+- Cellular on the OnePlus 8 Pro (external X55): [research/modem-sdx55.md](research/modem-sdx55.md); status in [TODO.md](TODO.md) T06/T47 and [HANDOFF.md](HANDOFF.md) section 0.

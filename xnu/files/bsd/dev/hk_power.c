@@ -36,6 +36,7 @@
  * program running, the panel asleep and the memory at its floor.
  */
 #include <kern/clock.h>
+#include <kern/thread.h>
 #include <libkern/libkern.h>
 #include <mach/mach_types.h>
 #include <machine/machine_routines.h>
@@ -188,6 +189,7 @@ hk_power_sleep_supported(void)
 
 	if (!decided) {
 		decided = true;
+		/* on the OnePlus 8 only: the 8 Pro ("instantnoodlep") has not been given system sleep by default, because the second sleep of a run hangs or returns to the loader (2026-10-29: the first sleep passes, Wi-Fi does not come back, the modem link is lost); syssleep=1 asks for it */
 		sleep_enabled = PE_parse_boot_argn("board", board, sizeof(board)) && strcmp(board, "instantnoodle") == 0;
 		PE_parse_boot_argn("syssleep", &sleep_enabled, sizeof(sleep_enabled));
 		PE_parse_boot_argn("sleep_max", &sleep_max, sizeof(sleep_max));
@@ -209,16 +211,207 @@ hk_power_set_wake(uint64_t seconds_from_now)
 	sleep_wake_at = seconds_from_now != 0 ? (uint64_t)now + seconds_from_now : 0;
 }
 
+/*
+ * The PMIC's real-time clock (PM8150 slave 0, peripheral 0x60, the Linux pm8xxx-rtc register layout of "qcom,pm8941-rtc": the four bytes of the seconds at 0x48, least
+ * significant first: reading the first latches the rest; 0x46 bit 7 says it counts): the phone's clock, as Android keeps it, for the time at boot. 0: not readable.
+ */
+uint32_t hk_rtc_seconds(void);
+
+uint32_t
+hk_rtc_seconds(void)
+{
+	uint8_t ctrl = 0, a[4], b[4];
+
+	if (hk_spmi_read(0x060, 0x46, &ctrl, 1) != 0 || !(ctrl & 0x80)) {
+		return 0;
+	}
+	for (unsigned tries = 0; tries < 4; tries++) {
+		if (hk_spmi_read(0x060, 0x48, a, 4) != 0 || hk_spmi_read(0x060, 0x48, b, 4) != 0) {
+			return 0;
+		}
+		if (memcmp(a, b, 4) == 0) {
+			return (uint32_t)a[0] | (uint32_t)a[1] << 8 | (uint32_t)a[2] << 16 | (uint32_t)a[3] << 24;
+		}
+	}
+	return 0;
+}
+
+static int
+sysctl_rtc_seconds(__unused struct sysctl_oid *oid, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	int seconds = (int)hk_rtc_seconds();
+
+	return SYSCTL_OUT(req, &seconds, sizeof(seconds));
+}
+SYSCTL_PROC(_kern_hackios, OID_AUTO, rtc_seconds, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, NULL, 0, sysctl_rtc_seconds, "I",
+    "the PMIC's real-time clock in seconds (it counts through power-off but is not the date: the date is kept by userland/src/hk_time.c)");
+
 static int
 cable_in(void)
 {
 	uint8_t usbin = 0;
 	char board[32] = "";
 
-	if (!PE_parse_boot_argn("board", board, sizeof(board)) || strcmp(board, "instantnoodle") != 0) {
+	if (!PE_parse_boot_argn("board", board, sizeof(board)) || (strcmp(board, "instantnoodle") != 0 && strcmp(board, "instantnoodlep") != 0)) {
 		return -1;              /* (the PMIC's arbiter is the OnePlus 8's: nothing at that address in QEMU) */
 	}
 	return hk_spmi_read(PM8150B_USBIN, USBIN_RT_STS, &usbin, 1) == 0 ? (usbin & USBIN_PLUGIN) != 0 : -1;
+}
+
+/*
+ * The power meter: what a sleep costs, read from the battery's gauge (bsd/dev/instantnoodle_battery.c) as the system
+ * goes to sleep and as it comes back. The gauge counts the cell's charge in mAh, so a figure needs minutes of sleep
+ * to mean anything (1 mAh is 12 mA over 5 minutes); `kern.hackios.power_meter` adds every interval up. Nothing is
+ * read during the sleep itself (the I2C bus's delays use the clock that is frozen then). An interval with the
+ * charger in at either end is counted apart, not as a drain: the charger's current is in the gauge's.
+ *   power: meter: asleep|awake S s: A -> B mAh, N uAh drawn = M mA on average; the gauge's own average at its end, mV, cable
+ * Awake intervals under 20 s are only added up.
+ */
+extern bool instantnoodle_battery_meter(int *charge_uah, int *avg_ma, int *mv, int *external);
+
+static struct {
+	bool ok;
+	int uah, ma, mv, ext;
+	uint64_t hw;
+} meter_mark;
+static struct {
+	uint64_t ms[2];                 /* [0] awake, [1] asleep: milliseconds with the cable out */
+	int64_t uah[2];                 /* drawn from the cell in them (less than 0: it took charge) */
+	uint32_t n[2], cable[2];        /* intervals counted, intervals not counted (a charger in) */
+} meter_sum;
+
+static void
+meter_close(int state)                  /* the interval that ends now: 0 awake, 1 asleep */
+{
+	int uah, ma, mv, ext;
+	uint64_t hw = ml_get_hwclock(), freq = __builtin_arm_rsr64("CNTFRQ_EL0");
+	bool ok = instantnoodle_battery_meter(&uah, &ma, &mv, &ext);
+
+	if (ok && meter_mark.ok && freq != 0) {
+		uint64_t ms = (hw - meter_mark.hw) * 1000 / freq;
+		int64_t drawn = (int64_t)meter_mark.uah - uah;
+		bool plugged = ext || meter_mark.ext;
+
+		if (plugged) {
+			meter_sum.cable[state]++;
+		} else {
+			meter_sum.ms[state] += ms;
+			meter_sum.uah[state] += drawn;
+			meter_sum.n[state]++;
+		}
+		if (state == 1 || ms >= 20000) {
+			printf("power: meter: %s %llu.%03llu s: %d -> %d mAh, %lld uAh drawn = %lld mA on average; the gauge's own average %d mA "
+			    "(%d at the start), %d mV; cable %s\n", state ? "asleep" : "awake", ms / 1000, ms % 1000, meter_mark.uah / 1000,
+			    uah / 1000, drawn, ms != 0 ? drawn * 3600 / (int64_t)ms : 0, -ma, -meter_mark.ma, mv, plugged ? "IN (no drain figure)" : "out");
+		}
+	}
+	meter_mark.ok = ok;
+	if (ok) {
+		meter_mark.uah = uah;
+		meter_mark.ma = ma;
+		meter_mark.mv = mv;
+		meter_mark.ext = ext;
+		meter_mark.hw = hw;
+	}
+}
+
+static int
+sysctl_power_meter(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	char text[256];
+	size_t n = 0;
+
+	for (int s = 0; s < 2; s++) {
+		uint64_t ms = meter_sum.ms[s];
+
+		n += snprintf(text + n, sizeof(text) - n, "%s%s %llu s, %lld uAh drawn, %lld mA (%u intervals, %u with the cable in)",
+		    s ? "; " : "", s ? "asleep" : "awake", ms / 1000, meter_sum.uah[s], ms != 0 ? meter_sum.uah[s] * 3600 / (int64_t)ms : 0,
+		    meter_sum.n[s], meter_sum.cable[s]);
+	}
+	return SYSCTL_OUT(req, text, n + 1);
+}
+SYSCTL_PROC(_kern_hackios, OID_AUTO, power_meter, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, NULL, 0, sysctl_power_meter, "A",
+    "the cell's charge drawn awake and asleep, by the gauge, over every interval since the boot (cable out only)");
+
+/*
+ * The drain bench (boot-arg drain_bench=1; the run for finding what a sleeping phone costs, `docs/subsystems/power.md`):
+ * a thread that, drain_after seconds (default 90: iOS up) after the gauge answers, waits for the cable to come out
+ * (the gauge shows the charger's current with it in; up to drain_cable seconds, default 600), looks at the awake
+ * drain for drain_awake seconds (default 30), then puts the system to sleep as IOPMSleepSystem() does and, with
+ * drain_force=1 (default), asks again whenever the system has been awake for drain_gap seconds (default 60) with
+ * the panel dark, so that iOS's own dark wakes are part of the figure. With sleep_max=S every sleep is at most S
+ * seconds. After drain_count sleeps (default 3) the totals are said ("bench: DONE"), and the bench goes on asking
+ * unless drain_count was reached with drain_stop=1 (then the bench ends and iOS sleeps as it will).
+ */
+extern void hk_power_request_sleep(void);
+
+static void
+bench_thread(__unused void *parameter, __unused wait_result_t result)
+{
+	uint32_t after = 90, cable_wait = 600, awake_s = 30, force = 1, gap = 60, count = 3, stop = 0;
+	uint64_t last_sleeps;
+	uint32_t waited = 0, awake_for = 0;
+
+	PE_parse_boot_argn("drain_after", &after, sizeof(after));
+	PE_parse_boot_argn("drain_cable", &cable_wait, sizeof(cable_wait));
+	PE_parse_boot_argn("drain_awake", &awake_s, sizeof(awake_s));
+	PE_parse_boot_argn("drain_force", &force, sizeof(force));
+	PE_parse_boot_argn("drain_gap", &gap, sizeof(gap));
+	PE_parse_boot_argn("drain_count", &count, sizeof(count));
+	PE_parse_boot_argn("drain_stop", &stop, sizeof(stop));
+	printf("bench: on: %u s, then the cable out (up to %u s), %u s awake, sleeps (%u, forced %u, gap %u s)\n", after, cable_wait,
+	    awake_s, count, force, gap);
+	delay_for_interval(after * 1000, NSEC_PER_MSEC);
+	while (cable_in() == 1 && waited < cable_wait) {
+		if (waited % 30 == 0) {
+			printf("bench: WAITING FOR THE CABLE TO COME OUT (%u s)\n", waited);
+		}
+		delay_for_interval(5000, NSEC_PER_MSEC);
+		waited += 5;
+	}
+	printf("bench: the cable is %s after %u s\n", cable_in() == 1 ? "STILL IN: no drain figure" : "out", waited);
+	delay_for_interval(15000, NSEC_PER_MSEC);               /* (the unplugging's own wakeups settle) */
+	meter_close(0);
+	delay_for_interval(awake_s * 1000, NSEC_PER_MSEC);
+	meter_close(0);                                         /* (the awake interval says itself, from 20 s) */
+	printf("bench: awake with the panel %s for %u s, above\n", power_display_on ? "lit" : "dark", awake_s);
+	last_sleeps = sleep_count;
+	hk_power_request_sleep();
+	printf("bench: the system's sleep asked for\n");
+	for (;;) {
+		delay_for_interval(5000, NSEC_PER_MSEC);
+		if (sleep_count != last_sleeps) {
+			last_sleeps = sleep_count;
+			awake_for = 0;
+			if (sleep_count >= count) {
+				printf("bench: DONE after %llu sleeps: %s\n", sleep_count, sleep_last);
+				if (stop) {
+					return;
+				}
+			}
+			continue;
+		}
+		awake_for += 5;
+		if (force && awake_for >= gap && !power_display_on) {
+			awake_for = 0;
+			printf("bench: awake for %u s with the panel dark: asked again\n", gap);
+			hk_power_request_sleep();
+		}
+	}
+}
+
+void hk_power_bench_start(void);
+
+void
+hk_power_bench_start(void)
+{
+	uint32_t on = 0;
+	thread_t thread;
+
+	PE_parse_boot_argn("drain_bench", &on, sizeof(on));
+	if (on && kernel_thread_start(bench_thread, NULL, &thread) == KERN_SUCCESS) {
+		thread_deallocate(thread);
+	}
 }
 
 /*
@@ -247,11 +440,13 @@ hk_power_will_sleep(void)
 	if (gpu_sleep_enabled) {
 		hk_gpu_sleep_begin();
 	}
+	meter_close(0);
 }
 
 void
 hk_power_did_wake(void)
 {
+	meter_close(1);
 	hk_gpu_sleep_end();             /* (before the panel: its first frame may be the GPU's) */
 	hk_buttons_kick();
 	hk_wifi_wake();

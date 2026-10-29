@@ -301,6 +301,35 @@ sample(struct hk_battery_state *b, int *flags_out, uint8_t *charger_state)
 	return true;
 }
 
+/*
+ * One reading of the gauge now, for the power meter (bsd/dev/hk_power.c: the cell's charge before and after every
+ * sleep, drain_bench=). The cell's remaining charge in uAh (the gauge counts in mAh), its average current in mA
+ * (TI's sign: more than 0 while the cell takes charge), its voltage, whether a charger is in. False before the gauge
+ * answered once or when it does not. The bus is locked per transfer: the thread's reads and this one's may mix.
+ */
+static volatile bool gauge_ready;
+
+bool instantnoodle_battery_meter(int *charge_uah, int *avg_ma, int *mv, int *external);
+
+bool
+instantnoodle_battery_meter(int *charge_uah, int *avg_ma, int *mv, int *external)
+{
+	struct hk_battery_state b;
+	int flags;
+	uint8_t chgr;
+
+	if (!gauge_ready || !sample(&b, &flags, &chgr)) {
+		return false;
+	}
+	*charge_uah = b.charge_uah;
+	*avg_ma = b.current_ua / 1000;
+	*mv = b.voltage_uv / 1000;
+	*external = b.external;
+	return true;
+}
+
+void hk_power_bench_start(void);        /* bsd/dev/hk_power.c */
+
 static void
 battery_thread(__unused void *parameter, __unused wait_result_t result)
 {
@@ -332,6 +361,10 @@ battery_thread(__unused void *parameter, __unused wait_result_t result)
 		map.ai = 0x10; map.soc = 0x1c; map.cycles = 0; map.design = 0;
 	}
 	printf("battery: the gauge says device type %#x: %s register map\n", type, map.name);
+	gauge_ready = type >= 0;
+	if (gauge_ready) {
+		hk_power_bench_start();
+	}
 
 	for (unsigned tick = 0;; tick++) {
 		if (sample(&b, &flags, &chgr)) {

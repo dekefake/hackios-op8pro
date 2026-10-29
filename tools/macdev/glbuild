@@ -1,0 +1,29 @@
+#!/bin/bash
+# glbuild OUTDIR   build libhackios-gl.dylib (userland/src/eagl.c + gl_osmesa.c) on this Mac in the kernel-builder container, as userland/build.sh does it, against the
+#   OpenGL ES library that is to be shipped: OSMESA=path/to/libOSMesa.8.dylib (default: the one in the extracted small image of the session; the gl* export list comes from it)
+#   and GL_XML=path/to/gl.xml (the Khronos registry as Mesa 25.0.7 has it: src/mapi/glapi/registry/gl.xml). Neither needs a Mesa build: only its prototypes and exports.
+#   The library goes to OUTDIR; put it into an image by repacking it (see ubuild).
+set -e
+cd "$(dirname "$(readlink -f "$0")")/../.."
+. tools/macdev/env.sh
+out=$1
+[ -n "$out" ] && [ -f "$OSMESA" ] && [ -f "$GL_XML" ] || { sed -n 2,6p "$0"; exit 1; }
+mkdir -p "$out"; out=$(cd "$out" && pwd)
+m=$(mktemp -d)
+cp "$OSMESA" $m/libOSMesa.8.dylib; cp "$GL_XML" $m/gl.xml
+nm -gU "$OSMESA" | awk '$3 ~ /^_gl/ { print substr($3, 2) }' > $m/exported-gl.txt
+cat > $m/inner.sh <<'IN'
+#!/bin/bash
+set -e
+mkdir -p /b && tar -xf - -C /b 2>/dev/null; cd /b/userland; mkdir -p obj
+export THEOS=/opt/theos HACKIOS_ROOT=/ws XNUDEPS=/ws/xnu-deps XNU_SDK_VERSION=16.5 XNU_CLANG_DIR=/usr/bin
+export PATH=/ws/xnu-deps/host/bin:$PATH
+DYN="xnu-clang -arch arm64 -isysroot /opt/theos/sdks/iPhoneOS16.5.sdk -O1"
+python3 mkeagl.py src/eagl_slots.txt /m/gl.xml /m/exported-gl.txt src/eagl.c > obj/eagl_gen.h
+$DYN -dynamiclib -install_name /hackios/lib/libhackios-gl.dylib -Iobj -framework CoreFoundation -framework IOKit -framework IOSurface -lobjc /m/libOSMesa.8.dylib \
+	-o obj/libhackios-gl.dylib src/eagl.c src/gl_osmesa.c
+cp obj/libhackios-gl.dylib /out/
+IN
+chmod +x $m/inner.sh
+COPYFILE_DISABLE=1 tar -cf - userland/src userland/mkeagl.py | docker run --rm -i -v hk-ws-cam:/ws:ro -v theos:/opt/theos:ro -v $m:/m:ro -v $m/inner.sh:/inner.sh:ro -v "$out":/out hackios-kernel-builder /inner.sh
+ls -l "$out/libhackios-gl.dylib"

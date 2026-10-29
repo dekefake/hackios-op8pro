@@ -250,5 +250,6 @@ hk_input_init(void)
 	hk_adreno_init();
 	hk_wifi_init();
 	hk_adsp_init();
+	hk_modem_init();                /* the OnePlus 8 Pro's X55 modem on PCIe 2 (bsd/dev/instantnoodle_modem.c, modem=1/2) */
 	instantnoodlep_bt_init();       /* the OnePlus 8 Pro's Bluetooth controller (bsd/dev/instantnoodle_bt.c, bt=1/2) */
 }

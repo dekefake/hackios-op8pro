@@ -1,0 +1,11 @@
+#!/usr/bin/python3 -I
+import subprocess, sys
+secs = float(sys.argv[1]); cmd = sys.argv[2:]
+p = subprocess.Popen(cmd)
+try:
+    sys.exit(p.wait(timeout=secs))
+except subprocess.TimeoutExpired:
+    p.terminate()
+    try: p.wait(5)
+    except subprocess.TimeoutExpired: p.kill()
+    sys.exit(124)

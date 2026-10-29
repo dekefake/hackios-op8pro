@@ -737,13 +737,29 @@ struct cmd_db_bcm {                             /* a BCM's auxiliary data (Linux
 	uint8_t vcd, reserved;
 };
 
+/*
+ * Is cpufreq on? The boot-arg cpufreq=N says; without it the OnePlus phones (board=instantnoodle*) have it on and
+ * every other board off. (The OnePlus 8 Pro's profile had no cpufreq=1: its cores stayed at the loader's clock, with no
+ * memory vote and no governor, and the UI dropped frames; cpufreq=0 gives that back for A/B runs.)
+ */
+bool hk_cpufreq_enabled(void);
+bool
+hk_cpufreq_enabled(void)
+{
+	uint32_t on = 0;
+	char board[32] = "";
+
+	if (PE_parse_boot_argn("cpufreq", &on, sizeof(on))) {
+		return on != 0;
+	}
+	return PE_parse_boot_argn("board", board, sizeof(board)) && strncmp(board, "instantnoodle", 13) == 0;
+}
+
 /* (the same condition as the cores' clocks: the addresses are this phone's) */
 static bool
 cpufreq_wanted(void)
 {
-	uint32_t on = 0;
-
-	return PE_parse_boot_argn("cpufreq", &on, sizeof(on)) && on != 0;
+	return hk_cpufreq_enabled();
 }
 
 static void
@@ -990,6 +1006,7 @@ extern kern_return_t kernel_thread_start_priority(thread_continue_t continuation
 extern void thread_set_thread_name(thread_t thread, const char *name);
 
 static uint64_t gov_boost_until;
+static uint64_t gov_frame_until;        /* hk_cpufreq_frames(): frames are being pushed fast: every group, whatever gov_boost_domains says */
 static bool gov_dark;
 /*
  * From the performance controller (bsd/dev/hk_perfctl.c), which knows what runs where: the lowest speed each group
@@ -1001,6 +1018,30 @@ static uint32_t gov_boost_domains = (1u << EPSS_DOMAINS) - 1;
 static uint32_t gov_ddr_high = 0x3fff, gov_ddr_idle = DDR_IDLE, gov_ddr_dark = DDR_IDLE, gov_ddr_now;
 static uint64_t gov_ticks, gov_row_sum[EPSS_DOMAINS], gov_ddr_changes;
 static int gov_event;
+
+/*
+ * The display driver, while frames go to the panel at 50 a second or more (MiniIOMobileFramebuffer.cpp frameBoost()): every group at its top for GOV_FRAME_MS
+ * after the last such frame, the groups the performance controller keeps out of a touch's boost included (measured 2026-10-28: a scripted Settings scroll at 120 Hz
+ * had 12.6% of its frames a refresh late with the governor following load, 6.5% with every group held at its top row).
+ */
+#define GOV_FRAME_MS            250
+
+void
+hk_cpufreq_frames(void)
+{
+	uint64_t until;
+
+	if (!os_atomic_load(&gov_on, relaxed)) {
+		return;
+	}
+	clock_interval_to_deadline(GOV_FRAME_MS, NSEC_PER_MSEC, &until);
+	os_atomic_store(&gov_frame_until, until, relaxed);
+	for (uint32_t d = 0; d < EPSS_DOMAINS; d++) {
+		if (epss_top[d] >= 0 && epss_row[d] < epss_cap[d]) {
+			epss_set(d, epss_cap[d]);
+		}
+	}
+}
 
 /* A touch or a key: every group to its top at once (any context: one register write a group) */
 void
@@ -1184,7 +1225,7 @@ gov_thread(void *arg __unused, wait_result_t wr __unused)
 	    gov_ddr_high, gov_ddr_idle, gov_ddr_dark);
 	for (;;) {
 		uint32_t busy[EPSS_DOMAINS] = { 0 };
-		bool dark = os_atomic_load(&gov_dark, relaxed), boosted, active = false;
+		bool dark = os_atomic_load(&gov_dark, relaxed), boosted, framed, active = false;
 		uint64_t now, span;
 
 		tsleep(&gov_event, PZERO, "cpufreq", MAX(1, (dark ? GOV_TICK_DARK_MS : GOV_TICK_MS) * hz / 1000));
@@ -1209,6 +1250,7 @@ gov_thread(void *arg __unused, wait_result_t wr __unused)
 			busy[d] = MAX(busy[d], (uint32_t)(span > spent ? (span - spent) * 100 / span : 0));
 		}
 		boosted = now < os_atomic_load(&gov_boost_until, relaxed);
+		framed = now < os_atomic_load(&gov_frame_until, relaxed);
 		for (uint32_t d = 0; d < EPSS_DOMAINS; d++) {
 			uint64_t want;
 			int target = 0;
@@ -1220,7 +1262,7 @@ gov_thread(void *arg __unused, wait_result_t wr __unused)
 			while (target < epss_top[d] && epss_khz[d][target] < want) {
 				target++;
 			}
-			if (boosted && (os_atomic_load(&gov_boost_domains, relaxed) & (1u << d))) {
+			if ((boosted && (os_atomic_load(&gov_boost_domains, relaxed) & (1u << d))) || framed) {
 				target = epss_top[d];
 			}
 			/* (the controller sets floors with the screen off only for work with deadlines: audio, say) */
@@ -1297,7 +1339,7 @@ hk_cpufreq_init(void)
 		ddr_raise();
 	}
 	enabled = 0;
-	if (!PE_parse_boot_argn("cpufreq", &enabled, sizeof(enabled)) || !enabled) {
+	if (!hk_cpufreq_enabled()) {
 		return;
 	}
 	for (unsigned int i = 0; i < topology->num_cpus; i++) {

@@ -1,0 +1,19 @@
+#!/bin/bash
+# enter: get the OnePlus 8 Pro from the stock bootloader's fastboot into the RAM loader. NEVER rebuilds an image and never calls `xl enter`
+# (which, without the device profile, packs redwood's UEFI: that hangs this phone -- happened once on this Mac, 2026-10-27).
+# Boots out/xnu-usb-8pro.img (the 8 Pro's RELEASE UEFI without UFSDxe + shim + DTB + the loader payload, 2586624 bytes), up to 3 tries.
+cd "$(dirname "$(readlink -f "$0")")/../.."
+. tools/macdev/env.sh
+img=out/xnu-usb-8pro.img
+[ "$(stat -f %z $img)" = 2586624 ] || { echo "enter: $img is not the expected 8 Pro image"; exit 1; }
+p=$(fastboot getvar product 2>&1 | head -1)
+case "$p" in
+*xnuloader*) echo "enter: the loader is already up"; exit 0 ;;
+*kona*) ;;
+*) echo "enter: no phone in fastboot ($p)"; exit 1 ;;
+esac
+for try in 1 2 3; do
+	fastboot boot $img 2>&1 | grep -q OKAY || continue
+	for i in 1 2 3 4 5 6 7 8; do sleep 3; fastboot getvar product 2>&1 | grep -q xnuloader && { echo "enter: loader up (try $try)"; exit 0; }; done
+done
+echo "enter: the loader did not come up"; exit 1

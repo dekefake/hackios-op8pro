@@ -31,6 +31,13 @@ __pycache__/
 *~
 *.orig
 *.rej
+.DS_Store
+
+# The OnePlus 8 Pro's UEFI inputs are not tracked: the driver set is the OnePlus 8's (uefi/apply.sh copies it) and the
+# device tree is cut from the phone's own boot partition (uefi/mk-instantnoodlep-dtb.py).
+/uefi/files/Binaries/instantnoodlep/*
+!/uefi/files/Binaries/instantnoodlep/README.md
+/uefi/files/Resources/DTBs/instantnoodlep.dtb
 
 # hackios-xnu-userland's files share this working tree (common/setup.sh)
 /docs/air.md

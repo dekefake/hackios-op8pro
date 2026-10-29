@@ -1,0 +1,17 @@
+#!/bin/bash
+# phone LABEL CMD...   run CMD while holding the ONE phone: other sessions (kernel display work, camera, power) wait their turn.
+#   phone camera-probe ./xl run        phone --status        (who holds it)
+# Hold it only for one run (minutes), never while thinking or building. A run of more than ~10 minutes (sleep tests) needs the owner's OK
+# and must be announced in your report; the owner watches the screen. The lock is /tmp/hackios-phone.hw (a directory with a `who` file).
+L=/tmp/hackios-phone.hw
+if [ "$1" = --status ]; then cat $L/who 2>/dev/null || echo "free"; exit 0; fi
+label=$1; shift
+waited=0
+until mkdir $L 2>/dev/null; do
+	[ $((waited % 30)) -eq 0 ] && echo "phone: waiting for: $(cat $L/who 2>/dev/null)" >&2
+	sleep 5; waited=$((waited + 5))
+	[ $waited -gt 3600 ] && { echo "phone: gave up after an hour"; exit 3; }
+done
+echo "$label since $(date +%H:%M:%S) (pid $$)" > $L/who
+trap 'rm -rf $L' EXIT INT TERM
+"$@"

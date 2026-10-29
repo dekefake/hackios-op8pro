@@ -1,0 +1,18 @@
+#!/usr/bin/python3 -I
+import fcntl, os, sys, time, subprocess
+a = sys.argv[1:]; wait = None; nb = False
+while a and a[0].startswith('-'):
+    if a[0] == '-w': wait = float(a[1]); a = a[2:]
+    elif a[0] == '-n': nb = True; a = a[1:]
+    else: a = a[1:]
+target = a[0]; cmd = a[1:]
+fd = int(target) if target.isdigit() else os.open(target, os.O_RDWR | os.O_CREAT, 0o644)
+end = time.time() + (wait if wait is not None else 1e9)
+while True:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); break
+    except OSError:
+        if nb or time.time() > end: sys.exit(1)
+        time.sleep(0.1)
+if cmd:
+    sys.exit(subprocess.call(cmd))

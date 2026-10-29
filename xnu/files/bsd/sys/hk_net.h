@@ -25,10 +25,12 @@
 #include <sys/kpi_mbuf.h>
 
 #define HK_NET_FRAME_MAX   1514
+#define HK_NET_UNITS       2       /* en0: the radio (or virtio); en1: the modem's packets (instantnoodle_modem.c) */
 
 struct hk_net_link {
 	const char *    name;           /* for the log */
 	uint8_t         address[6];     /* the interface's Ethernet address */
+	unsigned        unit;           /* which enN this is (0 unless said otherwise) */
 	bool            wireless;       /* the interface is told to be Wi-Fi (its "subfamily"), which is how the
 	                                 * network stack and configd tell a radio from a cable */
 	bool            up;             /* frames can pass from the start (else: wait for hk_net_link_state()) */
@@ -47,12 +49,14 @@ struct hk_net_link {
 	unsigned        (*poll)(void);
 };
 
-/* Make en0 on top of that link (the structure must stay). One link, once: false if there is one already. */
+/* Make en<unit> on top of that link (the structure must stay). One link per unit, once: false if there is one already. */
 bool hk_net_attach(const struct hk_net_link *link);
-/* A frame has arrived. Copied; the buffer is the caller's again on return. */
+/* A frame has arrived (on en0 / on en<unit>). Copied; the buffer is the caller's again on return. */
 void hk_net_input(const uint8_t *frame, size_t length);
-/* Frames can pass now / can no longer pass. */
+void hk_net_input_unit(unsigned unit, const uint8_t *frame, size_t length);
+/* Frames can pass now / can no longer pass (on en0 / on en<unit>). */
 void hk_net_link_state(bool up);
+void hk_net_link_state_unit(unsigned unit, bool up);
 /* The interface's address from now on (a radio's private address for a network; the IOKit controller's stays the hardware's) */
 void hk_net_address(const uint8_t address[6]);
 

@@ -1,0 +1,15 @@
+#!/bin/bash
+# run-camera [SECS] [EXTRA BOOT-ARGS]   boot iOS RAM-only with the merged camera kernel + image and the last known-good config (baseline.args: cpufreq=1 torch=3 Wi-Fi Bluetooth GPU audio) + cam=5,
+#   under the phone lock. The phone must be in the loader (`./xl state` = loader; if it is in the stock fastboot: tools/macdev/enter, then tools/macdev/ramdisk).
+#   KERNEL / RAMDISK in the environment override the defaults. The loader log ends up in logs/res/camera-live.txt (logpoll.py: fetched at once, `oem log` would overwrite it).
+cd "$(dirname "$(readlink -f "$0")")/../.."
+. tools/macdev/env.sh
+secs=${1:-600}; shift
+exec tools/macdev/phone camera-merged bash -c '
+export XL_KERNEL=${KERNEL:-out/kernel/mach.development.bcm2837.merged2} XL_RAMDISK=${RAMDISK:-userland/root-merged1.apfs} XL_SECS=$1 XL_CMDLINE="$(cat tools/macdev/baseline.args) cam=5 $2"
+shift 2
+: > logs/res/camera-live.txt; mkdir -p logs/res
+./xl run > logs/res/camera-run.xl 2>&1 &
+XP=$!; sleep 30; pkill -P $XP 2>/dev/null; kill $XP 2>/dev/null
+python3 -I tools/macdev/logpoll.py logs/res/camera-live.txt $((XL_SECS + 60))
+' _ "$secs" "$*"

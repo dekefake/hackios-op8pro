@@ -74,26 +74,39 @@ instantnoodlep_board(void)
 
 /* ---- pins ------------------------------------------------------------------------------------- */
 
-#define TLMM_TILE_SIZE  0x100000UL      /* 0x1000 per pin, 180 pins */
+/*
+ * 0x1000 per pin, 180 pins per tile. A pin's registers are mapped in chunks of four pins (one 16 KB page), as they are first used:
+ * mapping a whole tile (1 MB) takes a megabyte of the kernel's I/O window (8 MB, shared by every driver of this port), and
+ * with the GPU, Wi-Fi, Bluetooth and the audio DSP up the window had no megabyte left for the camera's WEST tile:
+ * kmem_alloc failed with KERN_NO_SPACE and the kernel panicked (2026-10-27, camera_thread -> pin_base -> io_map).
+ */
+#define TLMM_PINS       180
+#define TLMM_CHUNK_PINS 4
 
 static vm_offset_t
 pin_base(struct instantnoodle_pin p)
 {
 	static const uint64_t tiles[] = { INSTANTNOODLE_TLMM_WEST, INSTANTNOODLE_TLMM_SOUTH, INSTANTNOODLE_TLMM_NORTH };
-	static vm_offset_t mapped[3];
+	static vm_offset_t mapped[3][TLMM_PINS / TLMM_CHUNK_PINS];
 
 	for (unsigned t = 0; t < 3; t++) {
 		if (tiles[t] != p.tile) {
 			continue;
 		}
-		if (__atomic_load_n(&mapped[t], __ATOMIC_ACQUIRE) == 0) {
+		if (p.pin >= TLMM_PINS) {
+			panic("instantnoodle: pin %u is not in the TLMM", p.pin);
+		}
+		unsigned chunk = p.pin / TLMM_CHUNK_PINS;
+
+		if (__atomic_load_n(&mapped[t][chunk], __ATOMIC_ACQUIRE) == 0) {
 			lck_mtx_lock(&map_lock);
-			if (mapped[t] == 0) {
-				__atomic_store_n(&mapped[t], ml_io_map(tiles[t], TLMM_TILE_SIZE), __ATOMIC_RELEASE);
+			if (mapped[t][chunk] == 0) {
+				__atomic_store_n(&mapped[t][chunk], ml_io_map(tiles[t] + 0x1000UL * chunk * TLMM_CHUNK_PINS, 0x1000UL * TLMM_CHUNK_PINS),
+				    __ATOMIC_RELEASE);
 			}
 			lck_mtx_unlock(&map_lock);
 		}
-		return mapped[t] + 0x1000UL * p.pin;
+		return mapped[t][chunk] + 0x1000UL * (p.pin % TLMM_CHUNK_PINS);
 	}
 	panic("instantnoodle: pin %u in no TLMM tile (%#llx)", p.pin, p.tile);
 }
@@ -115,6 +128,18 @@ uint32_t
 instantnoodle_gpio_cfg(struct instantnoodle_pin p)
 {
 	return rd(pin_base(p));
+}
+
+/* A pin whose configuration register has bit 11 set is an eGPIO: the application processor drives it only with bit 12 set too
+ * (pinctrl-msm.c); see bsd/dev/instantnoodle_camera.c. Not done by the functions below on purpose: it broke the Bluetooth UART. */
+void
+instantnoodle_gpio_egpio_enable(struct instantnoodle_pin p)
+{
+	uint32_t cfg = rd(pin_base(p));
+
+	if (cfg & (1u << 11)) {
+		wr(pin_base(p), cfg | (1u << 12));
+	}
 }
 
 static void
@@ -162,9 +187,11 @@ line(struct instantnoodle_i2c *b, struct instantnoodle_pin p, bool high)
 }
 
 static void
-bb_delay(void)
+bb_delay(struct instantnoodle_i2c *b)
 {
-	delay(4);
+	if (!b->fast) {
+		delay(4);
+	}
 }
 
 /*
@@ -189,22 +216,22 @@ bb_start(struct instantnoodle_i2c *b)
 {
 	line(b, b->sda, true);
 	scl_high(b);
-	bb_delay();
+	bb_delay(b);
 	line(b, b->sda, false);
-	bb_delay();
+	bb_delay(b);
 	line(b, b->scl, false);
-	bb_delay();
+	bb_delay(b);
 }
 
 static void
 bb_stop(struct instantnoodle_i2c *b)
 {
 	line(b, b->sda, false);
-	bb_delay();
+	bb_delay(b);
 	scl_high(b);
-	bb_delay();
+	bb_delay(b);
 	line(b, b->sda, true);
-	bb_delay();
+	bb_delay(b);
 }
 
 /* the byte, then 0 if the target pulled SDA low for it */
@@ -215,22 +242,22 @@ bb_tx(struct instantnoodle_i2c *b, uint8_t byte)
 
 	for (int i = 7; i >= 0; i--) {
 		line(b, b->sda, (byte >> i) & 1);
-		bb_delay();
+		bb_delay(b);
 		scl_high(b);
-		bb_delay();
+		bb_delay(b);
 		line(b, b->scl, false);
-		bb_delay();
+		bb_delay(b);
 	}
 	line(b, b->sda, true);
-	bb_delay();
+	bb_delay(b);
 	if (scl_high(b) != 0) {
 		line(b, b->scl, false);
 		return ETIMEDOUT;
 	}
-	bb_delay();
+	bb_delay(b);
 	nack = instantnoodle_gpio_level(b->sda);
 	line(b, b->scl, false);
-	bb_delay();
+	bb_delay(b);
 	return nack ? ENXIO : 0;
 }
 
@@ -241,19 +268,19 @@ bb_rx(struct instantnoodle_i2c *b, bool ack)
 
 	line(b, b->sda, true);
 	for (int i = 7; i >= 0; i--) {
-		bb_delay();
+		bb_delay(b);
 		scl_high(b);
-		bb_delay();
+		bb_delay(b);
 		v = (uint8_t)(v << 1 | instantnoodle_gpio_level(b->sda));
 		line(b, b->scl, false);
 	}
 	line(b, b->sda, !ack);
-	bb_delay();
+	bb_delay(b);
 	scl_high(b);
-	bb_delay();
+	bb_delay(b);
 	line(b, b->scl, false);
 	line(b, b->sda, true);
-	bb_delay();
+	bb_delay(b);
 	return v;
 }
 
@@ -264,9 +291,9 @@ instantnoodle_i2c_recover(struct instantnoodle_i2c *b)
 	line(b, b->sda, true);
 	for (int i = 0; i < 9; i++) {
 		line(b, b->scl, false);
-		bb_delay();
+		bb_delay(b);
 		line(b, b->scl, true);
-		bb_delay();
+		bb_delay(b);
 	}
 	bb_stop(b);
 	lck_mtx_unlock(b->lock);

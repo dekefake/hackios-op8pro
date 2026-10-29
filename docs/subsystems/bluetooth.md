@@ -2,7 +2,7 @@
 
 **Status (owner-verified in RAM runs, 2026-10-27):** discovery (Classic and LE), pairing, and A2DP audio to a JBL Charge 2+ work with iOS's own `bluetoothd`.
 Open: local name shows "(null)", a paired speaker's device type is blank, the Settings switch does not power the chip off, receive is polled, calls/sleep unverified
-([../TODO.md](../TODO.md) T05, [../KNOWN_ISSUES.md](../KNOWN_ISSUES.md) K05). Background and the run-by-run record: `INSTANTNOODLEP-PLAN.md` addenda 36-44 (top-level repository).
+([../TODO.md](../TODO.md) T05, [../KNOWN_ISSUES.md](../KNOWN_ISSUES.md) K05). Background and the run-by-run record: `INSTANTNOODLEP-PLAN.md` addenda 36-44 (at the root of this repository).
 
 ## The hardware
 One chip, the QCA6390: Wi-Fi on PCIe (`instantnoodle_wifi.c`), Bluetooth on a UART — serial engine 6 of QUPv3 wrapper 0 (`qcom,qup_uart@998000`, GPIO 16 CTS, 17 RFR, 18 TX,

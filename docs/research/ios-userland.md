@@ -143,6 +143,15 @@ All in `userland/src/inject_sb.c` (replacements located by class, selector and e
   20 s or SpringBoard SIGSEGVs. [observed]
 - **Status bar.** On the iPhone X identity the left region holds only the clock; `sb_clock=N` centres it N points of 375
   further right to clear the OnePlus camera hole (UIKit lays it out so it animates normally).
+- **Status bar geometry for the 8 Pro (UIKit 16.5).** At 1320 x 2868 UIKit picks `_UIStatusBarVisualProvider_DynamicSplit` (not the FixedSplit notch layouts; the old
+  `visualProviderSubclassForScreen:` hook in inject_ui.c never answered in any log: it was installed on `_UIStatusBarVisualProvider_CarPlay`'s copy of the selector).
+  The clock box runs from `edgeInsets.left` (17) to the island's left edge - 8, the icon box from the island's right edge + 8 to `edgeInsets.right` (18) from the side; items are
+  centred in their box; both boxes' centre line is the guide's + `edgeInsets.top`, the clock's re-set from it at every update (`_updateSystemNavigationWithData:avoidanceFrame:`).
+  Measured on the photographs: clock box centre 78 pt from the left, lone battery 82 pt from the right (island ~x 147..293), clock digits 4.9 pt below the hole's centre.
+  Moving `sensorAreaRect.x` and the clock's `edgeInsets.top` fixed it [observed: owner]. Disassembly read from the shared cache extracted with /usr/lib/dsc_extractor.bundle. [inferred + observed]
+- **Lock screen bar under the battery.** `CSTeachableMomentsContainerView` makes the Control Center grabber and glyph in `-initWithFrame:` (`_addControlCenterTutors`); the
+  controller teaches them while `_shouldTeachAboutControlCenter` (the Control Center invocation count < 2, persisted under /var, empty each boot). [inferred; the bar was not
+  inspected live; if it stays, dump the layers with `com.hackios.layers` on the lock screen]
 - **Battery.** `UIDevice batteryLevel/batteryState` hooks and `_UIBatteryView` `chargePercent`/`setChargePercent:`; the
   battery view fill sat at about 1% when BatteryCenter / IOPowerSources were empty. Once `HKBattery` (an `IOPMPowerSource`)
   exists, iOS's own code does it. Monitoring is switched on one second after run-loop start. [observed]

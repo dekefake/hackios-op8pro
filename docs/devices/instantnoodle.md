@@ -26,13 +26,14 @@ What has been **seen working on the phone itself** (the kernel's log of a run sa
 | Haptics (AW8697) | works | `haptic=5`, `fw-haptic` | input-peripherals.md |
 | Flashlight | works | `torch=3` | input-peripherals.md |
 | Adreno 650 for CoreAnimation | works | `gpu=1`, `fw-gpu`, `GL=1` images | [gpu.md](../subsystems/gpu.md) |
-| Wi-Fi (QCA6390) | works in RAM runs (WPA2, WPA2/TKIP mixed, WPA3 SAE) | `wifi=1`, `fw-wifi` | [wifi.md](../subsystems/wifi.md) |
-| System sleep, wake by key/timer/cable | works (6 of 7 cores off); not the SoC's lowest state | `syssleep` default on | power.md |
+| Wi-Fi (QCA6390) | works in RAM runs (WPA2, WPA2/TKIP mixed, WPA3 SAE); **does not join a saved network by itself** (K44) | `wifi=1`, `fw-wifi` | [wifi.md](../subsystems/wifi.md) |
+| Cellular, 8 Pro (external X55 on PCIe 2): LTE registration, SIM PIN, SMS send, signal bars, date from the PMIC's RTC | works in the flashed image 37 (2026-10-29): registered ~30 s after boot, SMS sent from the kernel and from iOS user space (`hk_cell`), bars in the status bar (the icon pulses, K46), date kept across restarts (`hk_time`) | `modem=5 modem_quiet=3 modem_chans=139 modem_bringup=1 modem_tftp=1 modem_blk=1024 modem_efs=1 modem_service=1 modem_qrtr=100000000` | [research/modem-sdx55.md](../research/modem-sdx55.md), TODO T06 |
+| System sleep, wake by key/timer/cable | **OnePlus 8**: works (6 of 7 cores off). **8 Pro: off by default** (the board test compared with "instantnoodle" only); `syssleep=1`: the first timed sleep passes, then the Wi-Fi radio does not come back and the second sleep never completes (KNOWN_ISSUES K45) | `syssleep` | power.md |
 | GPU block collapse in sleep, brightness command path | works / command path verified | `gpu_sleep` default | gpu.md, display.md |
 | Boot from flash, boot menu, boot guard, `/private/var` on HFS+ | works (installed 2026-10-24) | `common/flash/install-xl.sh` | [storage.md](../subsystems/storage.md), INSTALL.md |
 | Custom boot logo | works | `userland/mkbootlogo.py` | research/ios-userland.md §7 |
 | Metal driver | experimental, off by default | `metal=1`/`2` | gpu.md |
-| Not done | headphones/USB-C audio, cameras, sensors, Bluetooth, cellular, location, fast charging (Warp), SoC low-power states, auto-brightness | | [../TODO.md](../TODO.md), [../KNOWN_ISSUES.md](../KNOWN_ISSUES.md) |
+| Not done | headphones/USB-C audio, sensors (accelerometer, gyro, compass, light, GPS: the sensor DSP is not started), voice calls/VoLTE/VoWiFi, mobile data and tethering, AirDrop, location, fast charging (Warp), SoC low-power states, auto-brightness | | [../TODO.md](../TODO.md), [../KNOWN_ISSUES.md](../KNOWN_ISSUES.md) |
 
 ## Setting up (RAM-only run)
 

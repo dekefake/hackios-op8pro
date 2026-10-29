@@ -1122,6 +1122,25 @@ ufshc_report(const char *when)
 	}
 }
 
+/* ---- the peek (ufs_peek=1) ---- */
+
+/*
+ * A look at the controller as the stock bootloader left it, for a phone whose UEFI has no UFS driver of its own (the OnePlus 8 Pro: Qualcomm's
+ * UFSDxe asserts Device Error when it initialises the controller that ABL used, plan addendum 5): the first 0x100 bytes of the host controller's
+ * registers (capabilities, version, enable, status, interrupt status, UIC error codes, the transfer list's base, doorbell and run bits), READ
+ * ONLY: nothing is written, nothing is mapped but the controller's own registers.
+ */
+void
+ufshc_peek(void)
+{
+	volatile uint32_t *r = (volatile uint32_t *)ml_io_map(UFSHC_PHYS, UFSHC_SIZE);
+
+	hc_say("ufs: peek: the controller at %llx as it was left:\n", UFSHC_PHYS);
+	for (uint32_t o = 0; o < 0x100; o += 16) {
+		hc_say("ufs: peek: %03x: %08x %08x %08x %08x\n", o, r[o / 4], r[o / 4 + 1], r[o / 4 + 2], r[o / 4 + 3]);
+	}
+}
+
 /* ---- the probe ---- */
 
 /*
@@ -1299,6 +1318,8 @@ void
 hk_ufs_quiesce(void)
 {
 	struct hc_put_back_result r;
+
+	instantnoodle_ufs_down();       /* (the 8 Pro's own backend, if it is up: ABL's list and the SMMU back) */
 
 	if (hc_kept_count != 0) {
 		hc_say_late("ufs: native: what happened in this run, again:\n");

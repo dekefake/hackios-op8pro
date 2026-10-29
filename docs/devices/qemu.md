@@ -5,7 +5,7 @@ Profile `common/devices/qemu-virt.conf`; scripts in `qemu/`. Drivers for virtual
 `hk_virtio_net.c` (en0), `hk_virtio_sound.c`, `hk_virtio_blk.c` (read-only host image). CoreAnimation uses its software renderer (no GPU); no thermal service (no TSENS).
 
 ```sh
-git clone https://github.com/oosexgang/hackios-xnu-kernel.git hackios && cd hackios   # (this fork: see docs/architecture.md for remotes)
+git clone https://github.com/dekefake/hackios-op8pro.git hackios && cd hackios   # upstream: oosexgang/hackios-xnu-kernel (docs/architecture.md)
 common/setup.sh               # brings the userland repo into the same tree, checks the host
 ios165/fetch.sh               # downloads 7.4 GB from Apple's CDN and extracts what is needed (5-15 min)
 common/build.sh qemu-virt     # builds the APFS images (and the kernel, if the toolchain is there)

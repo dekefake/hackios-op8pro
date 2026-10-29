@@ -384,8 +384,11 @@ struct DSCParams {
 	uint32_t words[DSC_WORDS];
 	uint32_t initialXmit, initialDec, initialScale, decInterval, incInterval, firstLine, nfl, sliceBpg, initialOffset, finalOffset, rcModel,
 	    chunk, minQpFlat, maxQpFlat, flatThresh, lineBuf, initialLines;
-	const int8_t * minQp, * maxQp;
+	uint32_t rcEdge, rcLimit0, rcLimit1, rcTargetHi, rcTargetLo;
+	int8_t bufThresh[14], minQp[15], maxQp[15], bpgOffset[15];
 };
+
+static void dscWords(const DSCMode * m, DSCParams * d);
 
 static void
 dscDerive(const DSCMode * m, DSCParams * d)
@@ -418,9 +421,21 @@ dscDerive(const DSCMode * m, DSCParams * d)
 	d->minQpFlat = m->bpc == 8 ? 3 : 7;
 	d->maxQpFlat = m->bpc == 8 ? 12 : 16;
 	d->flatThresh = 2u << (m->bpc - 8);
-	d->minQp = m->bpc == 8 ? kDscMin8 : kDscMin10;
-	d->maxQp = m->bpc == 8 ? kDscMax8 : kDscMax10;
+	d->rcEdge = 6;
+	d->rcLimit0 = d->rcLimit1 = 11;
+	d->rcTargetHi = d->rcTargetLo = 3;
+	memcpy(d->bufThresh, kDscBuf, sizeof(kDscBuf));
+	memcpy(d->minQp, m->bpc == 8 ? kDscMin8 : kDscMin10, sizeof(d->minQp));
+	memcpy(d->maxQp, m->bpc == 8 ? kDscMax8 : kDscMax10, sizeof(d->maxQp));
+	memcpy(d->bpgOffset, kDscBpg, sizeof(d->bpgOffset));
+	dscWords(m, d);
+}
 
+/* The encoder's register words from the fields of d. */
+static void
+dscWords(const DSCMode * m, DSCParams * d)
+{
+	uint32_t bpp16 = m->bpp * 16;
 	uint32_t * w = d->words;
 
 	bzero(w, sizeof(d->words));
@@ -438,15 +453,79 @@ dscDerive(const DSCMode * m, DSCParams * d)
 	w[11] = (d->initialOffset << 16) | d->finalOffset;
 	w[12] = (d->flatThresh << 10) | (d->maxQpFlat << 5) | d->minQpFlat;
 	w[13] = d->rcModel;
-	w[14] = 6 | (11 << 4) | (11 << 9) | (3 << 14) | (3 << 18);
+	w[14] = d->rcEdge | (d->rcLimit0 << 4) | (d->rcLimit1 << 9) | (d->rcTargetHi << 14) | (d->rcTargetLo << 18);
 	for (unsigned i = 0; i < 14; i++) {
-		w[DSC_FIRST_TABLE + i] = (uint32_t) kDscBuf[i];
+		w[DSC_FIRST_TABLE + i] = (uint32_t) d->bufThresh[i];
 	}
 	for (unsigned i = 0; i < 15; i++) {
 		w[DSC_FIRST_TABLE + 14 + i] = (uint32_t) d->minQp[i];
 		w[DSC_FIRST_TABLE + 29 + i] = (uint32_t) d->maxQp[i];
-		w[DSC_FIRST_TABLE + 44 + i] = ((uint32_t) kDscBpg[i] & 0x3f);
+		w[DSC_FIRST_TABLE + 44 + i] = ((uint32_t) d->bpgOffset[i] & 0x3f);
 	}
+}
+
+/*
+ * The 88 bytes of picture parameters the Samsung panel's own init sequence sends (DCS 0x9e; the device tree's
+ * qcom,mdss-dsi-on-command of timing@3, 1440 x 3168 60 Hz, 10 bpc 10 bpp, slices 720 x 16), and the encoder set that goes with them.
+ * Where my derivation (dscDerive) differs for this mode: first line bpg offset 9 (12), initial offset 5632 (6144), rate-control limits 15
+ * (11), range table min qp[3] 6 (5), initial scale 25, nfl 1229, slice bpg 1494, final offset 4332.
+ */
+static const uint8_t kQhd60Pps[88] = {
+	0x11, 0x00, 0x00, 0xab, 0x30, 0xa0, 0x0c, 0x60, 0x05, 0xa0, 0x00, 0x10, 0x02, 0xd0, 0x03, 0x84, 0x01, 0x9a, 0x02, 0x68, 0x00, 0x19,
+	0x01, 0xd1, 0x00, 0x0e, 0x00, 0x09, 0x04, 0xcd, 0x05, 0xd6, 0x16, 0x00, 0x10, 0xec, 0x07, 0x10, 0x20, 0x00, 0x06, 0x0f, 0x0f, 0x33,
+	0x0e, 0x1c, 0x2a, 0x38, 0x46, 0x54, 0x62, 0x69, 0x70, 0x77, 0x79, 0x7b, 0x7d, 0x7e, 0x02, 0x02, 0x22, 0x00, 0x2a, 0x40, 0x32, 0xbe,
+	0x3a, 0xfc, 0x3a, 0xfa, 0x3a, 0xf8, 0x3b, 0x38, 0x3b, 0x78, 0x3b, 0x76, 0x4b, 0xb6, 0x4b, 0xb4, 0x4b, 0xf4, 0x5b, 0xf4, 0x7c, 0x34,
+};
+/* The same panel's 1440 x 3168 120 Hz set (timing@2: 10 bpc 8 bpp, slices 720 x 96; DSC version byte 0x12). */
+static const uint8_t kQhd120Pps[88] = {
+	0x12, 0x00, 0x00, 0xab, 0x30, 0x80, 0x0c, 0x60, 0x05, 0xa0, 0x00, 0x60, 0x02, 0xd0, 0x02, 0xd0, 0x02, 0x00, 0x02, 0xc2, 0x00, 0x20,
+	0x09, 0x62, 0x00, 0x0a, 0x00, 0x0f, 0x01, 0x44, 0x00, 0xcc, 0x18, 0x00, 0x10, 0xf0, 0x07, 0x10, 0x20, 0x00, 0x06, 0x0f, 0x0f, 0x33,
+	0x0e, 0x1c, 0x2a, 0x38, 0x46, 0x54, 0x62, 0x69, 0x70, 0x77, 0x79, 0x7b, 0x7d, 0x7e, 0x02, 0x02, 0x22, 0x00, 0x2a, 0x40, 0x2a, 0xbe,
+	0x3a, 0xfc, 0x3a, 0xfa, 0x3a, 0xf8, 0x3b, 0x38, 0x3b, 0x78, 0x3b, 0xb6, 0x4b, 0xb6, 0x4b, 0xf4, 0x4b, 0xf4, 0x6c, 0x34, 0x84, 0x74,
+};
+
+/* The fields of d (and so the encoder words) from picture parameters as the panel takes them (VESA layout, dscPps()). */
+static void
+dscFromPps(const uint8_t * b, DSCParams * d)
+{
+	DSCMode m = {"pps", (uint32_t) (b[3] >> 4), (uint32_t) (((b[4] & 3) << 8 | b[5]) / 16), (uint32_t) ((b[8] << 8) | b[9]),
+	    (uint32_t) ((b[6] << 8) | b[7]), (uint32_t) ((b[12] << 8) | b[13]), (uint32_t) ((b[10] << 8) | b[11]), true};
+	uint32_t hrd;
+
+	d->lineBuf = b[3] & 15;
+	d->chunk = (b[14] << 8) | b[15];
+	d->initialXmit = (b[16] << 8) | b[17];
+	d->initialDec = (b[18] << 8) | b[19];
+	d->initialScale = b[21] & 0x3f;
+	d->incInterval = (b[22] << 8) | b[23];
+	d->decInterval = (b[24] << 8) | b[25];
+	d->firstLine = b[27] & 0x1f;
+	d->nfl = (b[28] << 8) | b[29];
+	d->sliceBpg = (b[30] << 8) | b[31];
+	d->initialOffset = (b[32] << 8) | b[33];
+	d->finalOffset = (b[34] << 8) | b[35];
+	d->minQpFlat = b[36] & 0x1f;
+	d->maxQpFlat = b[37] & 0x1f;
+	d->rcModel = (b[38] << 8) | b[39];
+	d->rcEdge = b[40] & 15;
+	d->rcLimit0 = b[41] & 0x1f;
+	d->rcLimit1 = b[42] & 0x1f;
+	d->rcTargetHi = b[43] >> 4;
+	d->rcTargetLo = b[43] & 15;
+	d->flatThresh = 2u << (m.bpc - 8);
+	hrd = d->initialDec + d->initialXmit;
+	d->initialLines = (hrd + m.sliceW - 1) / m.sliceW;
+	for (unsigned i = 0; i < 14; i++) {
+		d->bufThresh[i] = (int8_t) b[44 + i];
+	}
+	for (unsigned i = 0; i < 15; i++) {
+		uint16_t r = (uint16_t) ((b[58 + 2 * i] << 8) | b[59 + 2 * i]);
+
+		d->minQp[i] = (int8_t) (r >> 11);
+		d->maxQp[i] = (int8_t) ((r >> 6) & 0x1f);
+		d->bpgOffset[i] = (int8_t) ((int) (r & 0x3f) >= 32 ? (int) (r & 0x3f) - 64 : (int) (r & 0x3f));
+	}
+	dscWords(&m, d);
 }
 
 /* The 128-byte picture parameter set (DSC 1.1, VESA) the panel is sent (DSI type 0x0a) for these numbers. */
@@ -478,15 +557,15 @@ dscPps(const DSCMode * m, const DSCParams * d, uint8_t * b)
 	b[36] = (uint8_t) d->minQpFlat;
 	b[37] = (uint8_t) d->maxQpFlat;
 	b[38] = (uint8_t) (d->rcModel >> 8), b[39] = (uint8_t) d->rcModel;
-	b[40] = 6;
-	b[41] = 11;
-	b[42] = 11;
-	b[43] = (3 << 4) | 3;
+	b[40] = (uint8_t) d->rcEdge;
+	b[41] = (uint8_t) d->rcLimit0;
+	b[42] = (uint8_t) d->rcLimit1;
+	b[43] = (uint8_t) ((d->rcTargetHi << 4) | d->rcTargetLo);
 	for (unsigned i = 0; i < 14; i++) {
-		b[44 + i] = (uint8_t) kDscBuf[i];
+		b[44 + i] = (uint8_t) d->bufThresh[i];
 	}
 	for (unsigned i = 0; i < 15; i++) {
-		uint16_t r = (uint16_t) ((d->minQp[i] << 11) | (d->maxQp[i] << 6) | ((uint32_t) kDscBpg[i] & 0x3f));
+		uint16_t r = (uint16_t) ((d->minQp[i] << 11) | (d->maxQp[i] << 6) | ((uint32_t) d->bpgOffset[i] & 0x3f));
 
 		b[58 + 2 * i] = (uint8_t) (r >> 8);
 		b[59 + 2 * i] = (uint8_t) r;
@@ -565,6 +644,39 @@ dscStep(void)
 	dscLogMode(&qhd60, &d);
 }
 
+/*
+ * fb_probe=3: the two VIG pipes' scalers as the firmware leaves them, reads only (the first step of scaling in the display engine instead of by the GPU:
+ * kona's SDE has "qseedv3lite" at SSPP + 0xa00, kona-sde.dtsi; registers as Linux dpu_hw_util.c: HW_VERSION 0, OP_MODE 4, PHASE_INIT 0xc, PHASE_STEP_Y_H 0x10,
+ * PHASE_STEP_Y_V 0x14, PRELOAD 0x20, SRC_SIZE_Y_RGB_A 0x40, DST_SIZE 0x48, COEF_LUT_CTRL 0x4c, DIR_FILTER_WEIGHT 0x60, PHASE_INIT_Y_H/V 0x90/0x94, the
+ * separable coefficient tables at 0x100 (Y/RGB) and 0x300 (UV), 33 words each in the Lite version): is there anything in the tables.
+ */
+static void
+probeScalers(void)
+{
+	static const unsigned pipes[2] = { 0x5000, 0x7000 };
+
+	for (unsigned i = 0; i < 2; i++) {
+		unsigned s = pipes[i] + 0xa00;
+
+		displayLog("display: scaler VIG%u: version %#x op %#x rgb2y %#x init %#x step y h %#x v %#x uv h %#x v %#x preload %#x src %#x uv-src %#x dst %#x "
+		    "lut-ctrl %#x buffer %#x clk %#x %#x dir-weight %#x init y %#x %#x uv %#x %#x\n", i,
+		    displayReg(gDPU, s), displayReg(gDPU, s + 4), displayReg(gDPU, s + 8), displayReg(gDPU, s + 0xc), displayReg(gDPU, s + 0x10),
+		    displayReg(gDPU, s + 0x14), displayReg(gDPU, s + 0x18), displayReg(gDPU, s + 0x1c), displayReg(gDPU, s + 0x20),
+		    displayReg(gDPU, s + 0x40), displayReg(gDPU, s + 0x44), displayReg(gDPU, s + 0x48), displayReg(gDPU, s + 0x4c),
+		    displayReg(gDPU, s + 0x50), displayReg(gDPU, s + 0x54), displayReg(gDPU, s + 0x58), displayReg(gDPU, s + 0x60),
+		    displayReg(gDPU, s + 0x90), displayReg(gDPU, s + 0x94), displayReg(gDPU, s + 0x98), displayReg(gDPU, s + 0x9c));
+		for (unsigned t = 0; t < 2; t++) {
+			unsigned w = s + 0x100 + t * 0x200;
+
+			displayLog("display: scaler VIG%u table %u: %#x %#x %#x %#x %#x %#x %#x %#x %#x %#x %#x %#x ... %#x %#x %#x %#x\n", i, t,
+			    displayReg(gDPU, w), displayReg(gDPU, w + 4), displayReg(gDPU, w + 8), displayReg(gDPU, w + 12), displayReg(gDPU, w + 16),
+			    displayReg(gDPU, w + 20), displayReg(gDPU, w + 24), displayReg(gDPU, w + 28), displayReg(gDPU, w + 32), displayReg(gDPU, w + 36),
+			    displayReg(gDPU, w + 40), displayReg(gDPU, w + 44), displayReg(gDPU, w + 116), displayReg(gDPU, w + 120), displayReg(gDPU, w + 124),
+			    displayReg(gDPU, w + 128));
+		}
+	}
+}
+
 static void
 probeDisplay(void)
 {
@@ -578,6 +690,9 @@ probeDisplay(void)
 	    vinfo.v_rowbytes);
 	if (probe >= 2) {
 		probeModeRegisters();
+	}
+	if (probe >= 3) {
+		probeScalers();
 	}
 	/* MDP top (MDSS + 0x1000): INTF_SEL, INTR_EN/STATUS, INTR2_EN/STATUS, VSYNC_SEL */
 	displayLog("display: HW %#x mdss-intr %#x INTF_SEL %#x INTR en %#x st %#x INTR2 en %#x st %#x VSYNC_SEL %#x\n",
@@ -675,6 +790,10 @@ probeDisplay(void)
 #define CTL0_INTF_ACTIVE        0x20f4
 #define CTL_TOP_CMD_MODE        (1u << 17)
 #define CTL_FLUSH_FRAME         (1u << 0 | 1u << 1 | 1u << 17)  /* VIG0, VIG1, the CTL itself */
+/* fb_qhd_flush=1: what a changed size needs besides (Linux dpu_hw_ctl.c, dpu_6_0: LM0/LM1 6 and 7, DSC 22 with CTL_DSC_FLUSH, INTF 31 with CTL_INTF_FLUSH) */
+#define CTL_FLUSH_QHD           (CTL_FLUSH_FRAME | 1u << 6 | 1u << 7 | 1u << 22 | 1u << 31)
+#define CTL0_INTF_FLUSH         0x2110
+#define CTL0_DSC_FLUSH          0x2188
 #define VIG0_SRC0_ADDR          0x5014
 #define VIG1_SRC0_ADDR          0x7014
 #define INTF1_TE_EN             0x6ba84
@@ -1125,7 +1244,7 @@ static const uint8_t kPro60HzQhd[] = {
 
 /* The panel's switch in the device tree's order; after the compression-mode packet the DSC picture parameters (type 0x0a). */
 static bool
-qhdSend(const uint8_t * c, const uint8_t * pps)
+qhdSend(const uint8_t * c, const uint8_t * pps, bool trace, const uint8_t * nine)
 {
 	unsigned sent = 0;
 
@@ -1138,12 +1257,28 @@ qhdSend(const uint8_t * c, const uint8_t * pps)
 		if (c[1] != 0) {
 			panelWait(c[1]);
 		}
-		if (c[0] == 0x07) {
+		if (trace) {
+			displayLog("display: qhd2: packet %u (type %#x, first byte %#x) sent: TE %u Hz\n", sent, c[0], c[3], teRate());
+		}
+		if (nine != NULL && c[0] == 0x15 && c[3] == 0xba) {
+			if (!dsiPacket(gDSI, 0x39, nine, 89)) {         /* the panel's own PPS command (DCS 0x9e), where its init sequence has it */
+				displayLog("display: qhd: the 0x9e PPS command did not complete\n");
+				return false;
+			}
+			sent++;
+			if (trace) {
+				displayLog("display: qhd2: packet %u (DCS 0x9e, the panel's PPS) sent: TE %u Hz\n", sent, teRate());
+			}
+		}
+		if (c[0] == 0x07 && pps != NULL) {
 			if (!dsiPacket(gDSI, 0x0a, pps, 128)) {
 				displayLog("display: qhd: the PPS packet did not complete\n");
 				return false;
 			}
 			sent++;
+			if (trace) {
+				displayLog("display: qhd2: packet %u (the DSC picture parameters, type 0x0a) sent: TE %u Hz\n", sent, teRate());
+			}
 		}
 	}
 	displayLog("display: qhd: %u packets sent\n", sent);
@@ -1229,7 +1364,7 @@ qhdPattern(volatile uint32_t * px)
 static void
 qhdTry(void)
 {
-	uint32_t on = 0, secs = 20;
+	uint32_t on = 0, secs = 20, stage = 3, withPps = 1, fullFlush = 0, use9e = 0, in10 = 0, once = 0;
 	static const DSCMode fhd = {"fhd60", 8, 8, 1080, 2376, 540, 72, true};
 	static const DSCMode qhd60 = {"qhd60", 10, 10, 1440, 3168, 720, 16, false};
 	DSCParams dFhd, dQhd;
@@ -1238,6 +1373,12 @@ qhdTry(void)
 
 	PE_parse_boot_argn("fb_qhd", &on, sizeof(on));
 	PE_parse_boot_argn("fb_qhd_secs", &secs, sizeof(secs));
+	PE_parse_boot_argn("fb_qhd_stage", &stage, sizeof(stage));
+	PE_parse_boot_argn("fb_qhd_pps", &withPps, sizeof(withPps));
+	PE_parse_boot_argn("fb_qhd_flush", &fullFlush, sizeof(fullFlush));
+	PE_parse_boot_argn("fb_qhd_9e", &use9e, sizeof(use9e));
+	PE_parse_boot_argn("fb_qhd_in10", &in10, sizeof(in10));
+	PE_parse_boot_argn("fb_qhd_once", &once, sizeof(once));
 	if (!on || !instantnoodlep() || !mapDisplay() || !dsiReady()) {
 		return;
 	}
@@ -1262,11 +1403,26 @@ qhdTry(void)
 	dscDerive(&qhd60, &dQhd);
 	dscPps(&fhd, &dFhd, ppsFhd);
 	dscPps(&qhd60, &dQhd, ppsQhd);
+	uint8_t nine[89];
+
+	nine[0] = 0x9e;
+	memcpy(nine + 1, kQhd60Pps, 88);
+	if (withPps == 2) {
+		/* fb_qhd_pps=2: the parameter set the panel itself is given by its own init sequence, for the encoders and for the type 0x0a packet */
+		dscFromPps(kQhd60Pps, &dQhd);
+		bzero(ppsQhd, sizeof(ppsQhd));
+		memcpy(ppsQhd, kQhd60Pps, 88);
+	}
 	qhdPattern((volatile uint32_t *) map->getVirtualAddress());
 	__asm__ volatile ("dsb sy" ::: "memory");
 	displayLog("display: qhd: THROWAWAY ATTEMPT begins (pattern drawn, %u s hold)\n", secs);
 
 	qhdSave(&saved);
+	bool trace = on == 2;
+
+	if (trace) {
+		displayLog("display: qhd2: the TE rate before anything is touched: %u Hz, %u Hz (stage %u, PPS %u)\n", teRate(), teRate(), stage, withPps);
+	}
 	uint32_t autorefresh = displayReg(gDPU, INTF1_AUTOREFRESH), vsync = displayReg(gDPU, INTF1_TE_VSYNC), dma = displayReg(gDSI, DSI_CMD_DMA_CTRL);
 	unsigned waited;
 
@@ -1282,6 +1438,9 @@ qhdTry(void)
 		IODelay(100);
 	}
 	displayWrite(INTF1_TE_VSYNC, vsync);
+	if (trace) {
+		displayLog("display: qhd2: autorefresh off, the frame finished after %u x 100 us: TE %u Hz\n", waited, teRate());
+	}
 	if (waited == 5000) {
 		displayLog("display: qhd: the autorefresh frame did not finish; autorefresh back on, not attempted\n");
 		displayWrite(INTF1_AUTOREFRESH, autorefresh);
@@ -1290,13 +1449,19 @@ qhdTry(void)
 	}
 	/* the panel first, then the pipeline */
 	*(volatile uint32_t *)(gDSI + DSI_CMD_DMA_CTRL) = dma & ~DSI_CMD_DMA_LOW_POWER;     /* "dsi_hs_mode" */
-	bool ok = qhdSend(kPro60HzQhd, ppsQhd);
+	bool ok = qhdSend(kPro60HzQhd, withPps ? ppsQhd : NULL, trace, use9e ? nine : NULL);
 
 	*(volatile uint32_t *)(gDSI + DSI_CMD_DMA_CTRL) = dma;
-	if (ok) {
+	if (trace && ok) {
+		for (unsigned t = 0; t < (stage < 2 ? secs : 3); t++) {
+			displayLog("display: qhd2: panel switched, pipeline untouched, t+%u s: TE %u Hz\n", t, teRate());
+			panelWait(900);
+		}
+	}
+	if (ok && stage >= 2) {
 		for (unsigned e = 0; e < 2; e++) {
 			for (unsigned w = 1; w < DSC_WORDS; w++) {
-				displayWrite(0x81000 + e * 0x400 + 4 * w, dQhd.words[w]);
+				displayWrite(0x81000 + e * 0x400 + 4 * w, w == 1 && in10 ? dQhd.words[w] | 1u : dQhd.words[w]);   /* (bit 0: the input is 10 bits per component) */
 			}
 			displayWrite(0x5000 + e * 0x2000, ((uint32_t) QHD_H << 16) | (QHD_W / 2));           /* source size */
 			displayWrite(0x5000 + e * 0x2000 + 0x08, e * (QHD_W / 2));                           /* source x (the right half starts at 720) */
@@ -1313,23 +1478,59 @@ qhdTry(void)
 		*(volatile uint32_t *)(gDSI + 0x5c) = ((uint32_t) QHD_H << 16) | (2 * dQhd.chunk / 3);
 		__asm__ volatile ("dsb sy" ::: "memory");
 		displayLog("display: qhd: pipeline written (stream %#x %#x); pushing the pattern\n", displayReg(gDSI, 0x58), displayReg(gDSI, 0x5c));
-		for (unsigned t = 0; t < secs * 2; t++) {
+		if (trace) {
+			displayLog("display: qhd2: pipeline written: TE %u Hz\n", teRate());
+		}
+		for (unsigned t = 0; t < (stage >= 3 ? secs * 2 : 0); t++) {
+			if (once && t > 0) {
+				if (t % 4 == 0 && trace) {
+					displayLog("display: qhd2: one frame pushed, holding: t+%u s TE %u Hz\n", t / 2, teRate());
+				}
+				IODelay(500000);
+				continue;
+			}
 			displayWrite(MDP_INTR_CLEAR, MDP_INTR_PP0_DONE);
-			displayWrite(CTL0_FLUSH, CTL_FLUSH_FRAME);
+			if (fullFlush) {
+				displayWrite(CTL0_DSC_FLUSH, 3);
+				displayWrite(CTL0_INTF_FLUSH, 2);
+			}
+			displayWrite(CTL0_FLUSH, fullFlush ? CTL_FLUSH_QHD : CTL_FLUSH_FRAME);
 			displayWrite(CTL0_START, 1);
 			__asm__ volatile ("dsb sy" ::: "memory");
 			IODelay(500000);
+			if (t == 0 && trace) {
+				for (unsigned e = 0; e < 2; e++) {
+					displayLog("display: qhd2: DSC%u after the first frame: %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x\n", e,
+					    displayReg(gDPU, 0x81000 + e * 0x400), displayReg(gDPU, 0x81004 + e * 0x400), displayReg(gDPU, 0x81008 + e * 0x400),
+					    displayReg(gDPU, 0x8100c + e * 0x400), displayReg(gDPU, 0x81010 + e * 0x400), displayReg(gDPU, 0x81014 + e * 0x400),
+					    displayReg(gDPU, 0x81018 + e * 0x400), displayReg(gDPU, 0x8101c + e * 0x400), displayReg(gDPU, 0x81020 + e * 0x400),
+					    displayReg(gDPU, 0x81024 + e * 0x400), displayReg(gDPU, 0x81028 + e * 0x400), displayReg(gDPU, 0x8102c + e * 0x400));
+				}
+				displayLog("display: qhd2: VIG0 %08x %08x LM0 %08x INTF1 6ba94 %08x %08x %08x  DSI stream %08x %08x ctl top %08x intf %08x\n",
+				    displayReg(gDPU, 0x5000), displayReg(gDPU, 0x500c), displayReg(gDPU, 0x45004), displayReg(gDPU, 0x6ba94), displayReg(gDPU, 0x6baa0),
+				    displayReg(gDPU, 0x6baa4), displayReg(gDSI, 0x58), displayReg(gDSI, 0x5c), displayReg(gDPU, CTL0_TOP), displayReg(gDPU, CTL0_INTF_ACTIVE));
+			}
 			if (t < 4 || (t % 10) == 0) {
-				displayLog("display: qhd: t+%u ms: mdp intr %#x, dsi intr %#x, intf1 line %#x frame %u, ctl flush %#x\n", t * 500,
+				displayLog("display: qhd: t+%u ms: mdp intr %#x, dsi intr %#x, intf1 line %#x frame %u, ctl flush %#x, TE %u Hz\n", t * 500,
 				    displayReg(gDPU, MDP_INTR_STATUS), displayReg(gDSI, DSI_INTR_CTRL), displayReg(gDPU, INTF1_TE_LINE),
-				    displayReg(gDPU, 0x6b8ac), displayReg(gDPU, CTL0_FLUSH));
+				    displayReg(gDPU, 0x6b8ac), displayReg(gDPU, CTL0_FLUSH), trace ? teRate() : 0);
+				if (trace) {
+					displayLog("display: qhd2: ctl dsc flush %#x intf flush %#x, pp0 done intr %#x, tear intr %#x\n", displayReg(gDPU, CTL0_DSC_FLUSH),
+					    displayReg(gDPU, CTL0_INTF_FLUSH), displayReg(gDPU, MDP_INTR_STATUS), displayReg(gDPU, INTF1_TEAR_INTR_STATUS));
+				}
+			}
+		}
+		if (trace && stage == 2) {
+			for (unsigned t = 0; t < secs; t++) {
+				displayLog("display: qhd2: pipeline resized, nothing pushed, t+%u s: TE %u Hz\n", t, teRate());
+				panelWait(900);
 			}
 		}
 	}
 	/* and back */
 	displayLog("display: qhd: putting FHD+ back\n");
 	*(volatile uint32_t *)(gDSI + DSI_CMD_DMA_CTRL) = dma & ~DSI_CMD_DMA_LOW_POWER;
-	qhdSend(kPro60Hz, ppsFhd);
+	qhdSend(kPro60Hz, ppsFhd, trace, NULL);
 	*(volatile uint32_t *)(gDSI + DSI_CMD_DMA_CTRL) = dma;
 	qhdRestore(&saved);
 	displayWrite(MDP_INTR_CLEAR, MDP_INTR_PP0_DONE);
@@ -1340,7 +1541,12 @@ qhdTry(void)
 	displayWrite(INTF1_AUTOREFRESH, autorefresh);
 	OSSafeReleaseNULL(map);
 	displayLog("display: qhd: done; FHD+ registers back (intf1 line %#x frame %u)\n", displayReg(gDPU, INTF1_TE_LINE), displayReg(gDPU, 0x6b8ac));
+	if (trace) {
+		displayLog("display: qhd2: FHD+ back: TE %u Hz\n", teRate());
+	}
 }
+
+static void backlightFirstSend(void);
 
 static bool
 pushStart(unsigned height)
@@ -1392,6 +1598,7 @@ pushStart(unsigned height)
 	if (refreshHz() == 90 || refreshHz() == 60 || (refreshHz() == 120 && instantnoodlep())) {
 		panelRate(refreshHz());         /* (120: the OnePlus 8 Pro's panel only; its panelRate() sends that panel's own commands) */
 	}
+	backlightFirstSend();               /* (the brightness iOS set before there was a way to send it, see there) */
 	displayLog("display: autorefresh %#x off after %u us; each frame is pushed through CTL0 on the panel's TE (%s)\n",
 	    gAutorefresh, waited * 100, gPushIrqLive ? "interrupt" : "polled");
 	return true;
@@ -1408,6 +1615,37 @@ static bool
 pushGiveUp(void)
 {
 	return ++gPushFailures >= PUSH_FAILURES;
+}
+
+/*
+ * An experiment that did NOT pay (2026-10-28), left in and OFF (boot-arg fb_boost=1 turns it on): while frames are pushed at 50 a second or more (5 in 100 ms)
+ * every push tells the CPU governor (hk_cpufreq_frames(): every group to its top for GOV_FRAME_MS). The idea was that the governor's 20 ms tick and its step
+ * down made the 120 Hz scroll's frames late. Measured with a scripted Settings scroll (`rwtouch`, `fb_kicklog=1`, 6 to 12 thousand frames a run): the runs
+ * fall in two groups whatever this does -- about 87.5% of the intervals within one refresh (<10 ms) and 7.2% a refresh and a half late, or about 93% and 6.5% --
+ * a property of the boot (the same kernel, boost off: 87.4, 88.2, 93.3; boost on: 87.0, 87.7, 93.1), not of the governor. See display.md.
+ */
+extern "C" void hk_cpufreq_frames(void);
+static TUNABLE(uint32_t, gFrameBoost, "fb_boost", 0);       /* off: it made no measurable difference (see above) */
+static TUNABLE(uint32_t, gKickLog, "fb_kicklog", 0);       /* 1: only the "tl: k" line of every push (35 bytes a frame; touch_lat=1 logs six lines, more than the loader's log window holds at 120 a second) */
+
+static void
+frameBoost(uint64_t now)
+{
+	static uint64_t windowStart;
+	static unsigned count;
+	uint64_t window;
+
+	if (!gFrameBoost) {
+		return;
+	}
+	nanoseconds_to_absolutetime(100 * NSEC_PER_MSEC, &window);
+	if (now - windowStart > window) {
+		windowStart = now;
+		count = 0;
+	}
+	if (++count >= 5) {
+		hk_cpufreq_frames();
+	}
 }
 
 /* Wait until no push is in flight: the framebuffer is the MDP's while one is. false: it never finished. */
@@ -1454,9 +1692,10 @@ pushWait(void)
 		return false;
 	}
 	gPushFailures = 0;
-	if (gTouchLat) {
+	if (gTouchLat || gKickLog) {
 		hk_tl("tl: k %u kick %llu done %llu\n", gPushId, micros(pushed), micros(done));
 	}
+	frameBoost(done);
 	return true;
 }
 
@@ -1540,6 +1779,26 @@ backlightSendLocked(void)
 	*(volatile uint32_t *)(gDSI + DSI_CMD_DMA_CTRL) = dma;
 	gBacklightSent += ok;
 	return ok;
+}
+
+/*
+ * The brightness iOS asked for before the first frame was pushed (backboardd restores the saved level within the first seconds of a boot; the push path, and with it the
+ * DSI command path, starts with the first frame): hk_display_set_backlight() could only keep it ("not sent: no DSI command path") and nothing sent it afterwards, so the panel
+ * stayed at the firmware's level until iOS asked again (owner, 2026-10-28: the saved brightness is not set on boot). Sent here once the push has started.
+ */
+static void
+backlightFirstSend(void)
+{
+	if (gPanelLock == NULL) {
+		return;
+	}
+	IOLockLock(gPanelLock);
+	if (gBacklight != 0) {
+		bool sent = backlightSendLocked();
+
+		displayLog("display: the brightness iOS set earlier (panel value %#x) %s\n", gBacklight, sent ? "sent now that the push has started" : "could not be sent yet");
+	}
+	IOLockUnlock(gPanelLock);
 }
 
 /*

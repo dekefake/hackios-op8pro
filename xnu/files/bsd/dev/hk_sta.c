@@ -17,6 +17,7 @@
  * another network -- as iOS itself rejoins the networks it knows. If that other network cannot
  * be joined (a wrong passphrase), the standing one is joined again.
  */
+#include <kern/clock.h>
 #include <kern/kalloc.h>
 #include <kern/locks.h>
 #include <kern/sched_prim.h>
@@ -50,6 +51,10 @@ static struct hk_sta_join asked_join_what;
 static struct hk_sta_join standing;        /* the network joined whenever the radio comes on (ssid_length 0: none) */
 static struct hk_sta_join fallback;        /* ... as it was before a join that has not come through yet */
 
+extern int hk_wifi_tell(const char *format, ...) __printflike(1, 2);
+
+static bool scan_busy;                     /* a scan is asked for or under way: another request is answered EBUSY, as a radio's driver does (wifid retries; two requests used to share one scan and one SCAN_DONE, and the second one's command never finished) */
+static unsigned scans_owed;                /* scans asked for since the last one began: wifid (corewifi) waits for a SCAN_DONE per request, and several requests share one scan */
 static struct hk_sta_bss *heard;           /* by the last scan that came to an end */
 static unsigned heard_count;
 static struct hk_sta_channel channels[CHANNELS_MOST];
@@ -75,6 +80,7 @@ sta_runs(__unused void *parameter, __unused wait_result_t result)
 	for (;;) {
 		const struct hk_sta_ops *ops;
 		bool power = false, power_on = false, leave = false, do_join = false, do_scan = false;
+		unsigned owed_now = 0;
 		int error = 0;
 
 		lck_mtx_lock(&sta_lock);
@@ -99,6 +105,8 @@ sta_runs(__unused void *parameter, __unused wait_result_t result)
 			do_scan = true;
 			scan = asked_scan_what;
 			asked_scan = false;
+			owed_now = scans_owed > 0 ? scans_owed : 1;
+			scans_owed = 0;
 		}
 		sta_calls = true;
 		lck_mtx_unlock(&sta_lock);
@@ -147,6 +155,29 @@ sta_runs(__unused void *parameter, __unused wait_result_t result)
 			heard_count = 0;
 			lck_mtx_unlock(&sta_lock);
 			ops->heard(heard_one, NULL);
+			{
+				static unsigned listed;
+
+				if (listed < 4) {
+					listed++;
+					for (unsigned i = 0; i < heard_count && i < 24; i++) {
+						bool rsn = false;
+
+						for (unsigned at = 0; at + 2 <= heard[i].elements_length;) {
+							if (heard[i].elements[at] == 48) {
+								rsn = true;
+							}
+							at += 2u + heard[i].elements[at + 1];
+						}
+						hk_wifi_tell("sta: heard %u: \"%.*s\" %u MHz %d dBm capability %#x rsn %d\n", i, (int)heard[i].ssid_length, (const char *)heard[i].ssid,
+						    heard[i].frequency, heard[i].rssi, heard[i].capability, rsn);
+					}
+				}
+			}
+			(void)owed_now;      /* (one SCAN_DONE a scan: a SCAN_DONE per request was tried and changed nothing: wifid then logs "not expected while there is no command pending" for each) */
+			lck_mtx_lock(&sta_lock);
+			scan_busy = false;
+			lck_mtx_unlock(&sta_lock);
 			hk_apple80211_event(HK_STA_SCAN_DONE, error);
 		}
 
@@ -312,11 +343,35 @@ hk_sta_ask_scan(const struct hk_sta_scan *what)
 		lck_mtx_unlock(&sta_lock);
 		return sta_ops == NULL ? ENXIO : ENETDOWN;
 	}
+	scan_busy = true;
 	asked_scan_what = *what;
 	asked_scan = true;
+	scans_owed++;
 	lck_mtx_unlock(&sta_lock);
 	thread_wakeup((event_t)&sta_ops);
 	return 0;
+}
+
+/* Wait (up to `ms`) until no scan is asked for or under way. true: none is. */
+bool hk_sta_scan_wait(unsigned ms);
+
+bool
+hk_sta_scan_wait(unsigned ms)
+{
+	for (unsigned waited = 0;; waited += 20) {
+		bool busy;
+
+		lck_mtx_lock(&sta_lock);
+		busy = scan_busy;
+		lck_mtx_unlock(&sta_lock);
+		if (!busy) {
+			return true;
+		}
+		if (waited >= ms) {
+			return false;
+		}
+		delay_for_interval(20000, NSEC_PER_USEC);
+	}
 }
 
 int

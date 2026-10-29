@@ -52,3 +52,19 @@ and `tools/update-prebuilt.sh` refreshes `prebuilt/uefi`.
 
 A build from scratch by these instructions has not been re-run since (the tree was built along the way while
 the port was made). For a port to another phone, see [../docs/PORTING.md](../docs/PORTING.md). Build with `-d instantnoodle` for the OnePlus 8.
+
+## Building the UEFI in a container (the Mac setup, 2026-10-28)
+
+The OnePlus 8 Pro's UEFI builds in a Linux container in about a minute once its sources are in a Docker volume; the image `hackios-uefi-builder` is `hackios-kernel-builder`
+plus `apt install python3-venv python3-pip nasm acpica-tools uuid-dev build-essential git gcc-aarch64-linux-gnu mono-runtime`. Copy only what this phone needs into the volume
+`hk-uefi` (`/w/src`; streaming the whole tree from a network share takes hours: the other devices' Binaries and the test/fuzz data of the third-party libraries are 90% of it):
+`BootShim`, `Binaries/instantnoodlep`, `Binaries/generic`, `Platforms/OnePlus/instantnoodlepPkg`, `Resources/{Configs,Scripts,ramdisk,MuPatches,Pictures}`, `Resources/DTBs/instantnoodlep.dtb`,
+`Conf`, `Silicium-ACPI`, `Silicon`, `Common`, `Mu_Basecore` (without `fuzz`, `test`, `tests`, `UnitTests`, `Docs`, `libspdm`), `build_uefi.py`, `pip-requirements.txt`. In the container:
+`python3 -m venv /w/venv; . /w/venv/bin/activate; pip install -r pip-requirements.txt; mkdir -p Build; python3 build_uefi.py -d instantnoodlep -r RELEASE` (an existing `Build` skips stuart's setup).
+The result is `Build/instantnoodlepPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd` (3 MB); `UEFI_FD=... tools/macdev/mk-standalone` puts it into a standalone boot image.
+
+## The boot menu (volume up while the phone starts)
+
+`BootManagerLib/HackiosMenu.c` replaces Mu's boot manager menu: iOS (USB debug, default), iOS (no USB debug), Reboot to bootloader, Reboot to recovery, then the
+platform's own entries (Internal Storage, USB Storage, ...), at 3 times the console font, centred. The choice among ours is the volatile UEFI variable `HackiosBootMode` (0..4) which the loader
+reads (`xnuloader/loader.c`, `hackios_boot_mode()`).

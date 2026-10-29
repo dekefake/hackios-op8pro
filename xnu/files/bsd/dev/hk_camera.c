@@ -4260,6 +4260,12 @@ hk_camera_init(void)
 void
 hk_camera_quiesce(void)
 {
+	if (instantnoodlep_board()) {
+		extern void instantnoodlep_camera_quiesce(void);
+
+		instantnoodlep_camera_quiesce();        /* (the OnePlus 8 Pro's frame path: its own driver) */
+		return;
+	}
 	if (level < 2 || tlmm == 0) {
 		return;
 	}

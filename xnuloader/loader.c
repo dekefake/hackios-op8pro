@@ -167,7 +167,11 @@ str_eq(const char *a, const char *b)
  * Set once the loader takes commands over USB: its log travels that way, and
  * the screen is left to the kernel (and to "oem screenshot").
  */
+#ifdef SCREEN_QUIET
+static int screen_quiet = 1;            /* LOADER_DEFS=-DSCREEN_QUIET: the loader never writes its log on the screen; USB only (tools/macdev/lbuild) */
+#else
 static int screen_quiet;
+#endif
 
 static void
 put_char(char c)
@@ -857,16 +861,22 @@ charger_icl_raise(void)
 }
 
 static void
-reboot(void)
+reboot_as(uint8_t type)
 {
 	charger_icl_restore();
 	usb_quiesce();
-	pon_ps_hold(PON_HARD_RESET);
+	pon_ps_hold(type);
 	hc_take_back("before the reset");
 	flush_log();
 	ST->rt->reset_system(0 /* EfiResetCold */, 0, 0, NULL);
 	for (;;) {
 	}
+}
+
+static void
+reboot(void)
+{
+	reboot_as(PON_HARD_RESET);
 }
 
 /*
@@ -890,7 +900,14 @@ reboot_to(uint8_t reason)
 	} else {
 		print("reboot: no PMIC power-on protocol: a plain reset\n");
 	}
-	reboot();                                       /* a hard reset, as the stock kernel's (above) */
+	/*
+	 * A WARM reset, as the stock kernel's msm_restart_prepare makes it whenever `reboot <reason>` names one (need_warm_reset = the command is
+	 * not empty): the PMIC is not power-cycled, so its charger keeps what it has found out about the cable. After the hard reset this made until
+	 * 2026-10-28 the stock ABL found the computer's port taken for a wall charger (abl_log: `usb: chgr - DCP_CHARGER`) and its fastboot never
+	 * came up on USB with the cable in. Untested on the phone when written: if the cable still has to come out, reboot_to_fastboot() waits
+	 * for it as before (set `fb_unplug=1`).
+	 */
+	reboot_as(PON_WARM_RESET);
 }
 
 /* The USB cable, by the PM8150B's USBIN status (0x1310 bit 4): 1 in, 0 out, -1 not known (not the OnePlus 8). */
@@ -916,13 +933,19 @@ cable_in(void)
  */
 #define CABLE_OUT_SECONDS       60
 
+static int fb_unplug;           /* fb_unplug=1 in the command line: the old way, the reset waits for the cable to come out */
+
 static void
 reboot_to_fastboot(void)
 {
 	int left = CABLE_OUT_SECONDS * 10;
 
-	if (cable_in() == 1) {
+	if (cable_in() == 1 && !fb_unplug) {
+		print("reboot: into the bootloader with the cable in (a warm reset; fb_unplug=1 waits for the cable to come out first)\n");
+		flush_log();
+	} else if (cable_in() == 1) {
 		usb_quiesce();
+		screen_quiet = 0;       /* the one message of a quiet loader that must be seen: nothing else on the screen tells why the phone waits */
 		print("\n  Unplug the USB cable now: the stock bootloader's fastboot does not come up on USB\n"
 		    "  after a reset with the cable in. The phone goes into the bootloader once it is out;\n"
 		    "  plug the cable in again there.\n");
@@ -3418,6 +3441,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		block_probe_requested |= starts_with(c, "ufs_probe=1") && (c == pi.cmdline || c[-1] == ' ');
 		block_write_requested |= starts_with(c, "ufs_write=1") && (c == pi.cmdline || c[-1] == ' ') &&
 		    (c[11] == 0 || c[11] == ' ');
+		fb_unplug |= starts_with(c, "fb_unplug=1") && (c == pi.cmdline || c[-1] == ' ');
 		hc_requested |= starts_with(c, "ufs_native=") && (c == pi.cmdline || c[-1] == ' ') && c[11] >= '1' &&
 		    c[11] <= '9';
 	}
@@ -4710,6 +4734,49 @@ ramfb_phone_screen(void)
 
 #include "flashboot.c"
 
+/* ------------------------------------------------------------------------ */
+/* The boot menu of a standalone boot (an image that carries its kernel)    */
+/*
+ * The menu itself is the UEFI's (uefi/files/.../BootManagerLib/HackiosMenu.c: volume up while the phone starts): it puts the choice in the
+ * volatile UEFI variable HackiosBootMode and lets the boot go on to this loader. No variable (the menu was not opened) is 1 (owner, 2026-10-28:
+ * debug is the default while the port is not stable). 0 (the menu's "iOS (no USB debug)"): iOS, the USB link off. 1: iOS with the USB link
+ * (the log through `fastboot oem log`, and after a crash the link stays). 2: Android of the other A/B slot, once -- the kernel is started
+ * with hk_swap_slot=1 in place of hk_fast_halt=1, exchanges the two slots' A/B bytes in the GPT and restarts at once
+ * (instantnoodle_ufs.c, instantnoodle_ufs_ab_swap(); Android's HackiOS module makes this slot active again once it has come up,
+ * common/flash/rearm) -- REMOVED 2026-10-28, see below: mode 2 now boots iOS. 3: the stock bootloader (fastboot). 4: recovery.
+ */
+static uint8_t
+hackios_boot_mode(void)
+{
+	static const efi_guid guid = { 0x8d3c2a41, 0x5b7e, 0x4d09, { 0xa1, 0x6f, 0x0c, 0x12, 0x7e, 0x44, 0x91, 0x2b } };
+	static const char16 name[] = { 'H', 'a', 'c', 'k', 'i', 'o', 's', 'B', 'o', 'o', 't', 'M', 'o', 'd', 'e', 0 };
+	uint8_t mode = 0;
+	uint64_t size = 1;
+	uint32_t attributes = 0;
+
+	if (ST->rt->get_variable == NULL || EFI_ERROR(ST->rt->get_variable(name, &guid, &attributes, &size, &mode))) {
+		return 1;
+	}
+	return mode;
+}
+
+/* "hk_fast_halt=1" in the command line becomes "hk_swap_slot=1" (as long): what the kernel takes as "exchange the slots, restart" */
+__attribute__((unused)) static int
+oneshot_cmdline_swap(const char *cmdline)
+{
+	static const char from[] = "hk_fast_halt=1", to[] = "hk_swap_slot=1";
+
+	for (char *c = (char *)(uintptr_t)cmdline; *c; c++) {
+		if (starts_with(c, from) && (c == cmdline || c[-1] == ' ')) {
+			for (unsigned i = 0; i < sizeof(to) - 1; i++) {
+				c[i] = to[i];
+			}
+			return 1;
+		}
+	}
+	return 0;
+}
+
 efi_status EFIAPI
 efi_main(efi_handle image, efi_system_table *st)
 {
@@ -4761,7 +4828,43 @@ efi_main(efi_handle image, efi_system_table *st)
 	 * (an installed device's boot partition: common/flash/install.sh) has no kernel: that is the menu's.
 	 */
 	if (have_payload && pi.kernel != NULL) {
+		/*
+		 * The USB link comes up first, as it does for `xl run`: the loader watches the kernel from this core and answers the host meanwhile
+		 * (usb_poll_command), so a phone that does not finish booting can be looked at with the stock `fastboot` tool (`fastboot oem log`,
+		 * `fastboot get_staged log.txt`; xl's logpoll) while it runs, and after it hangs or panics. For now, while the standalone boot is being
+		 * brought up: a kernel that comes back for any other reason than iOS being shut down leaves the loader on this link instead of resetting.
+		 */
+		uint8_t mode = hackios_boot_mode();
+		int usb_up = 0;
+
+		print("boot mode %d\n", (uint64_t)mode);
+		if (mode == 3) {
+			reboot_to_fastboot();
+		} else if (mode == 4) {
+			reboot_to(1);
+		} else if (mode == 2) {
+			/*
+			 * "Android of the other slot" is gone (2026-10-28): its A/B exchange changed boot_a's and boot_b's attribute bytes and not the type GUIDs
+			 * that ABL's `fastboot --set-active` moves with them, and the phone would not boot until it was repaired over EDL. The menu no longer has the
+			 * entry; a variable that still says 2 boots iOS with the USB link up. Slots are changed with `fastboot --set-active=a|b`.
+			 */
+			print("boot mode 2 (Android, other slot) is not supported any more: booting iOS\n");
+			usb_up = usb_start();
+		}
+		if (mode == 1) {
+			usb_up = usb_start();
+		}
 		run_kernel(0, 0);
+		if (loader_ctx[CTX_REASON] == 3) {
+			power_off();            /* iOS shut down (halt_all_cpus), in a bundle that came with this image: off, not round again */
+		}
+		if (loader_ctx[CTX_REASON] == 4) {
+			reboot();               /* iOS restarted (reason 4, loader_return_restart): the phone restarts */
+		}
+		if (usb_up || usb_start()) {            /* any other return than iOS's shutdown or restart (a panic): the link, so that the log can be read */
+			flush_log();
+			usb_command_loop();
+		}
 		reboot();
 	}
 	/* No kernel: an installed device booting on its own -- the menu, the bundle from darwin, Android */

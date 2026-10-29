@@ -28,6 +28,7 @@ void instantnoodle_gpio_input(struct instantnoodle_pin p, unsigned pull);
 void instantnoodle_gpio_output(struct instantnoodle_pin p, bool high, unsigned pull, unsigned ma);
 void instantnoodle_gpio_function(struct instantnoodle_pin p, unsigned function, unsigned pull, unsigned ma);   /* a function of the pin's other than GPIO */
 bool instantnoodle_gpio_level(struct instantnoodle_pin p);
+void instantnoodle_gpio_egpio_enable(struct instantnoodle_pin p);  /* bit 12 on an eGPIO pin (bit 11 set): the camera's analog switches */
 
 /*
  * An I2C bus driven on its two pins (open drain: low = output 0, high = input, the board's
@@ -41,6 +42,7 @@ struct instantnoodle_i2c {
 	unsigned errors;                /* transfers that were not acknowledged */
 	struct _lck_mtx_ *lock;          /* initialized on first use; the bus lives for the kernel's lifetime */
 	bool trace;                     /* touch_lat=1: lock wait and wire time */
+	bool fast;                      /* no delay between the transitions of the pins (the pins' own speed, a few hundred kHz): the camera sensor's 3000-write tables */
 };
 int instantnoodle_i2c_write(struct instantnoodle_i2c *bus, uint8_t addr, const uint8_t *bytes, unsigned n);
 int instantnoodle_i2c_read(struct instantnoodle_i2c *bus, uint8_t addr, uint8_t reg, uint8_t *buf, unsigned n);

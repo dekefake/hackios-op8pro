@@ -62,6 +62,28 @@ too small). See [../research/hardware-qualcomm.md](../research/hardware-qualcomm
   long writes through DSI0's command DMA at the same DSI clock. The packets sit past the last pixel of the boot
   framebuffer, in memory the display SMMU already maps. `fb_hz=60` switches back (the panel keeps its rate across
   runs). The measured TE rate is logged.
+- **120 Hz on the OnePlus 8 Pro** (profile default since 2026-10-28). `panelRate(120)` sends this panel's own `timing@1` switch from the live device tree (11 DSI commands, same
+  DSI clock as 60: `60 22`, `ba 02`, `f7 0f`, CASET/PASET, `b9 01`, `b0 01`, `b9 0c 54 00 0b`, 1080 x 2376), then INTF1's tear-check count is scaled to 120. Checked on the phone
+  (RAM run of `out/instantnoodlep-standalone23.img`, `fb_hz=120`): "TE 60 Hz before, 110 Hz after" by the panel's own TE counter, `UIScreen maximumFramesPerSecond` 120, and the
+  owner saw a clean picture that was clearly smoother. Dropped frames remain here and there (TODO: measure). Boot-arg `fb_hz=` must be given once.
+- **Dropped frames at 120 Hz (2026-10-28): measured; the first explanation was wrong.** Workload: `userland/root-perf2.apfs` (rc.jobs: `rwtouch` taps Settings, then 40 rounds of flicks and
+  drags, one `rwtouch` per line: a line takes few arguments), boot-arg `fb_kicklog=1` (only the `tl: k` line of each push; `touch_lat=1` writes six lines a frame, more than the loader's
+  log window holds at 120 a second, and lines are lost), the intervals between consecutive pushes while the screen draws at 90+ a second (`perfrun.sh`/`fs2.py` of the session, kept in the scratchpad: take the `tl: k`
+  lines, ignore intervals across a lost id). Result: **runs fall into two groups whatever is changed**: about 87.5% of the intervals within one refresh (<10 ms), 7.2% longer than 12.5 ms, push-to-done p95 12.6 ms
+  (seven runs), or about 93% / 6.5% / p95 8.27 ms (five runs). Per-boot, not per-setting: the same kernel with the frame boost off gave 87.4, 88.2 and 93.3, with it on 87.0, 87.7 and 93.1; a governor held at its top row
+  (`cpufreq_gov=0`) gave 93.5 once; `gpu_dcvs=0` 87.8 and 88.2. So the CPU governor's tick, the GPU's clock and a boost from the display driver (`fb_boost=1`, `frameBoost()` / `hk_cpufreq_frames()`, left in and OFF) were not the cause.
+  The two groups differ in where the late intervals fall (10-14 ms in the first, 14-18 ms in the second): the phase of the pushes against the panel's TE, a property of the boot. The GPU stage of a frame
+  (`tl: g`) is 5.75 ms median, 8.0 p95 at 120 Hz: close to the 8.33 ms budget, the real limit. Not tried: why a boot lands in one group (the phase), and a cheaper frame (scaling by the MDP's scaler
+  instead of a GPU blit; Mesa tile mode).
+- **Scaling by the display engine instead of the GPU blit: measured first, not built (2026-10-28).** `fb_probe=3` (read only) dumps the VIG pipes' scalers: VIG0 (SSPP 0x5000) and VIG1 (0x7000) have one at
+  SSPP + 0xa00, `HW_VERSION 0x3000` (DT: "qseedv3lite"; Linux programs a version >= 0x2004 with the Lite tables), idle, and the two separable coefficient tables (+0x100, +0x300, 33 words) read all zero; mainline
+  Linux sets `lut_flag = 0`, Android's tables come from its user space (not here). Then the GPU was measured (`gpu_stats=1`: "tl: u busy N permille of 1 s in M submissions" from the core's own timestamps): during the
+  scripted Settings scroll the **3D core is 48.5% busy, 0.67 ms a submission, 6.6 submissions per frame at 111 frames a second**, i.e. about 4 ms of every 8.3: not the bottleneck. The scaling blit is a part of that
+  4 ms, and the MDP would need the unscaled frame in the display's memory (the display surfaces here are shared images in ordinary memory, the MDP's SMMU maps the splash region only) and a coefficient table whose format
+  is unknown, with the picture visible only to the owner's eyes: a gain of well under a millisecond a frame for all that. Not built. `libhackios-gl` can be rebuilt on this Mac now (`tools/macdev/glbuild`, gl.xml from
+  Mesa 25.0.7's tarball and the exports of the shipped libOSMesa; a rebuild without changes is byte-identical to the shipped library), which was the other obstacle.
+  What limits a frame is the window server's CPU time (3 to 9.5 ms a frame in `hk-gl: frame` lines; the frame's GPU work already overlaps the next frame's CPU work: the display's driver waits for it, `glwait`); `MESA_GLTHREAD`
+  through `glenv=` changed nothing. A second GPU copy per frame (the mirror into the display surface) does not exist here (`glmirror=0` test: no change).
 - **CoreAnimation at 90.** iOS takes the panel's frame period from the framebuffer property `IOMFBDisplayRefresh`
   (`displayMinRefreshInterval` in 2^-32 s, `displayRefreshStepMachTime` in mach time), not from `TimingElements`.
   Without it an iPhone X is 60 Hz everywhere. The window server's frame clock is our VSync notification
@@ -131,6 +153,10 @@ kept animating: backboardd used 7.3 s of CPU time in 15 s. They are held to `ca_
 panel's rate, so frames fall on refreshes evenly); backboardd now uses 2.5 s in 15 s. Every other animation and
 link still asks for 90. Details: [../research/ios-userland.md](../research/ios-userland.md).
 
+## Smoothness: the clock was the cause (2026-10-27, perf session)
+
+**Measured (OnePlus 8 Pro, RAM run, boot-args of the known-good config + `touch_lat=1 cpuload=100`, kernel `perf0`, `logs/perf/base1.live`):** with no `cpufreq=1` the gold and prime clusters sat at EPSS row 0 (710 / 844 MHz; `perfctl:` said "0 MHz"), the memory vote was never raised and no governor ran. All seven cores were 99-100% busy in the first gesture, `rwtouch idle 60 30` did not settle, and the first swipe ran at 55.8 frames a second with 32% of frame steps over 16.7 ms, the window server's CPU draw (Mesa) 15.4 ms of a 16.7 ms frame. **Fix (built, `perf1`; verified on the phone by log and by the owner's eye, "much snappier"):** `hk_cpufreq_enabled()` in `hk_cpufreq.c`: `cpufreq=N` if given, else on for `board=instantnoodle*` (the 8 had it in its profile, the 8 Pro did not); rows 0 -> 17/19 (2419 / 2841 MHz), governor "takes over", memory vote 16383 busy. `cpufreq=0` restores the old behaviour for A/B. **Not measured:** frame-time distribution after the fix (the run was stopped before the gestures), 120 Hz. At `fb_hz=60` CoreAnimation uses its own timer, not the panel's TE (`ca_vbl` is automatic only above 60 Hz): `ca_vbl=1` is an untried boot-arg experiment. Test image with idle and gesture probes: `userland/root-perf2.apfs` (small image + `/hackios/etc/rc.jobs`, made with `7zz x` / `tools/apfs/mkapfs.py`).
+
 ## Screen off and on
 
 backboardd asks the framebuffer for the display's power (`IOMobileFramebufferRequestPowerChange`, selector 12):
@@ -159,6 +185,11 @@ DSI0's command DMA from a page between the two framebuffers (`DSI_DMA_PHYS`). St
 of the interrupt-quiesce fix that made it necessary: see [power.md](power.md).
 
 ## Brightness
+
+**Saved brightness at boot (fixed 2026-10-28, kernel `ufs40`, image 29).** backboardd restores the saved level within the first seconds of a boot; `hk_display_set_backlight()` could only keep it (log: "not sent: no DSI command path") because the push path, and with it the DSI
+command path, starts with the first frame, and nothing sent the kept value afterwards: the panel stayed at the firmware's level (0x168) until iOS asked again. `backlightFirstSend()` (end of `pushStart()`) sends it; log line "the brightness iOS set earlier (panel value ...) sent now that the push has started".
+Auto-brightness: see TODO T04 (no light sensor reaches the application processor: it is behind the DSP's sensor framework).
+
 
 Before 2026-10-26 there was none: backboardd sets brightness through a service that was not there (UserEventAgent
 logged "Error calling IOServiceAddInterestNotification for backlight service").

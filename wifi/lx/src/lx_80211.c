@@ -1518,6 +1518,8 @@ station_scan(struct lx_radio *radio, const uint8_t *name, unsigned name_length, 
 	}
 	if (what != NULL && what->dwell_ms != 0) {
 		request->req.duration = what->dwell_ms;
+	} else if (!quiet) {
+		request->req.duration = 40;		/* (an active scan: a probe and 40 ms on each channel, as a phone's scan takes: the defaults made 36 channels take 3 s, long enough for wifid's auto-join scan to find another one under way) */
 	}
 	radio->scan = 1;
 	radio->frames = radio->others = radio->heard_count = radio->heard_lost = 0;

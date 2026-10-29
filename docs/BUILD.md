@@ -126,3 +126,15 @@ Prebuilt files lag the source: `prebuilt/mach.development.bcm2837` predates `too
 
 `xnu/` is a derivative of XNU (APSL 2.0); the kernel also contains ath11k (BSD-3-Clause-Clear) and FreeBSD LinuxKPI code (BSD-2-Clause);
 libzbitmap (Corellium, MIT), libdeflate 1.24 (MIT). Apple's HFS+ is fetched at build time. See [../prebuilt/NOTICES.md](../prebuilt/NOTICES.md).
+
+## Userland programs on the macOS dev machine (no full build tree)
+`tools/macdev/ubuild OUTDIR [media camera_test camera_avtest torch_test record_test vt_test]` compiles those programs of `userland/build.sh` (same `$DYN` command lines) in the
+`hackios-kernel-builder` container, with the cross toolchain from the Docker volume `hk-ws-cam` (`xnu-deps/host/bin`) and the iPhoneOS 16.5 SDK from the volume `theos`;
+`media` (libhackios-media.dylib) of an unchanged tree is byte-identical to `userland/obj`'s. Put the result in a small image by repacking one:
+`7z x -o DIR userland/root-X.apfs`, copy into `DIR/bin` or `DIR/lib`, edit `DIR/etc/rc.jobs`, `python3 tools/apfs/mkapfs.py -z --plain fw -o userland/root-NEW.apfs hackios=DIR`.
+
+
+## Building the OnePlus 8 Pro's modem/cellular image (2026-10-29)
+- Kernel: `tools/macdev/kbuild cam TAG FILE...` with **every** changed file (it prints `built:` even when the compile failed: read `error: lines:`); the cam volume's tree may be older than the repo for files you did not change, so pass `hk_power.c`, `GenericARMPE.cpp`, `instantnoodle_battery.c`, `hk_mhi.c`, `hk_mhi.h`, `instantnoodle_ufs.c`, `hk_sta.c`, `hk_apple80211.c` along with `instantnoodle_modem.c`. Changes under `wifi/lx/src` need the driver object rebuilt first: the recipe is in KNOWN_ISSUES K44.
+- Userland: `tools/macdev/ubuild OUT sb|cell|time|sysctl|buddy|logcfg|wifijoin`, then repack the small image (`7z x`, restore every symlink from `7z l -slt`, copy, `tools/apfs/mkapfs.py -z --plain fw -o NEW hackios=DIR`); new launch daemons go in `LaunchDaemons/`.
+- Image: `UEFI_FD=out/uefi-8pro-menu3.fd STANDALONE_EXTRA="applog=1 <modem args>" SMALL_IMAGE=userland/root-sbNN.apfs tools/macdev/mk-standalone out/kernel/mach.development.bcm2837.TAG out/instantnoodlep-standaloneNN.img out/loader-8pro-uefimenu8.efi` (the loader was not rebuilt: a rebuild from the current source gave a different binary; do not replace it without a reason). Modem args and their meaning: BOOT_ARGS.md. Test loop: RAM boot with `fastboot boot`, then flash the validated image to `boot_a` only.

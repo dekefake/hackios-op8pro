@@ -66,6 +66,8 @@
 #include <sys/systm.h>
 #include <sys/work_interval.h>
 
+extern bool hk_cpufreq_enabled(void);          /* (hk_cpufreq.c: cpufreq=N, or on by default on the OnePlus phones) */
+
 #if CONFIG_SCHED_EDGE && HK_SCHED_SELECTABLE
 
 extern uint32_t ml_cpu_frequency_domain(int cpu_id);
@@ -1084,11 +1086,10 @@ pc_thread(__unused void *arg, __unused wait_result_t wr)
 {
 	const ml_topology_info_t *t = ml_get_topology_info();
 
-	uint32_t cpufreq = 0;
+	bool cpufreq = hk_cpufreq_enabled();
 	bool speeds_known;
 
 	thread_group_join_perf_controller();
-	PE_parse_boot_argn("cpufreq", &cpufreq, sizeof(cpufreq));
 	/*
 	 * The capacities are measured when every core is up (the E cores start late, GenericARMPE) and, with cpufreq=1,
 	 * when the governor knows each group's top speed (it starts with the drivers, after the root is mounted).

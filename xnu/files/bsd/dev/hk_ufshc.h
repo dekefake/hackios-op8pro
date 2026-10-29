@@ -20,6 +20,21 @@ struct ufshc_loader {
 };
 
 bool ufshc_probe(const struct ufshc_loader *loader, bool only);
+void ufshc_peek(void);
+void instantnoodle_ufs8_run(uint32_t mode);   /* ufs8=1: instantnoodle_ufs.c, the 8 Pro's controller adopted as ABL left it, read only */   /* ufs_peek=1: the controller's first registers, read only */
+/* the OnePlus 8 Pro's own storage backend (instantnoodle_ufs.c), for hk_ufs.c with ufs_8pro=1: read only */
+struct instantnoodle_ufs_part {
+	char name[36];
+	uint8_t type[16];               /* the GPT's type GUID, as stored */
+	uint64_t first, last;           /* blocks of 4096 on logical unit 0 */
+};
+int instantnoodle_ufs_up(void);
+int instantnoodle_ufs_read(uint8_t lun, uint64_t offset, uint8_t *dst, uint64_t len);
+int instantnoodle_ufs_write(uint8_t lun, uint64_t offset, const uint8_t *src, uint64_t len);
+int instantnoodle_ufs_write_window(uint64_t first, uint64_t end);
+int instantnoodle_ufs_ab_swap(void);
+void instantnoodle_ufs_down(void);
+uint32_t instantnoodle_ufs_gpt(struct instantnoodle_ufs_part *out, uint32_t max);
 bool ufshc_available(void);
 void ufshc_set_luns(uint32_t mask);
 int ufshc_switch_in(bool prove);

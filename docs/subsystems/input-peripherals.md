@@ -127,6 +127,15 @@ as the front), laid out like H10ISP's in iOS 16.5, formats named as the iPhone X
 (`camera_isp.c`: black level, lens shading, grey-world white balance and exposure gains, the camera's own colour matrix,
 sRGB gamma, zoom; no noise reduction). Camera.app shows preview, focus (by contrast, continuous, and on a tap), and
 takes HEIC photos (README claim). The portrait-mode Core Image prewarm that crashed mediaserverd is skipped.
+**OnePlus 8 Pro lens motor (autofocus), 2026-10-27, `bsd/dev/instantnoodle_lens.c`.** The main module's actuator is an AKM AK7377 at I2C 0x0c on CCI master 0
+[source: the module file's actuatorDriver "imx689_ak7377"; Linux ak7375 driver, same family]: reg 0x02 mode (0x20 sleep after power-up, 0x40 standby, 0x00 active; Android's init is
+0x40 then 0x00), position = one 16-bit word at reg 0x00, the 10-bit code << 6 (module file: 2 data bytes, register 0, shift 6; region 0..1014). The OIS (LC898128 at 0x24) is not touched:
+Android's driver reprograms its flash. The driver reads before writing, reads back the mode steps and the first position, ramps 24 codes / 2 ms, and switches itself off on any surprise.
+**Observed (lens1/lens2 on the phone):** the chip answers, comes up active, the first write reads back; the userland's contrast autofocus then finds sharp places (sharpness 25 at
+iOS position 268 for a close scene, 22 at the far end in run 1); the owner: autofocus works but is slow, tap-to-focus does not. Direction: code 0 (no current, rest) is the CLOSEST
+focus, a higher code is further, so iOS position = 1000 - code. Not measured: where infinity lies, the userland's AF range (AF_NEAR 16..AF_FAR 768, redwood's) against the code range
+0..1000, why the climb is slow (a step of 48 and frames of waiting each; the driver's own ramp is under 5 ms a step), why tap-to-focus does not converge. OIS: not done.
+
 Not on the OnePlus 8 (no driver), and no video or Live Photo recording. See [../KNOWN_ISSUES.md](../KNOWN_ISSUES.md).
 
 ### Sensors, ambient light, location

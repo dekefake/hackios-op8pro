@@ -1,0 +1,6 @@
+#!/bin/bash
+# ramdisk [FILE]: upload the resident system image (default userland/system-bt.apfs), only with the loader up (never lets xl rebuild an image)
+cd "$(dirname "$(readlink -f "$0")")/../.."
+. tools/macdev/env.sh
+fastboot getvar product 2>&1 | grep -q xnuloader || { echo "ramdisk: the loader is not up; run tools/macdev/enter first"; exit 1; }
+exec ./xl ramdisk "${1:-userland/system-bt.apfs}"

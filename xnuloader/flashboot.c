@@ -622,15 +622,18 @@ ab_read_gpt(struct ab_gpt *g, uint64_t lba, uint8_t *header)
 
 	if (EFI_ERROR(g->bio->read_blocks(g->bio, g->bio->media->media_id, lba, g->bs, ufs_buffer)) ||
 	    memcmp(ufs_buffer, "EFI PART", 8) != 0) {
+		print("ab: block %d: no GPT header (first word %x)\n", lba, (uint64_t)*(const uint32_t *)ufs_buffer);
 		return 0;
 	}
 	memcpy(header, ufs_buffer, 512);
 	hsize = *(uint32_t *)(header + 12); hcrc = *(uint32_t *)(header + 16);
 	if (hsize < 92 || hsize > 512) {
+		print("ab: block %d: header size %d\n", lba, (uint64_t)hsize);
 		return 0;
 	}
 	*(uint32_t *)(header + 16) = 0;
 	if (ufs_crc32(header, hsize) != hcrc) {
+		print("ab: block %d: the header's CRC is wrong\n", lba);
 		return 0;
 	}
 	*(uint32_t *)(header + 16) = hcrc;
@@ -643,6 +646,7 @@ ab_read_gpt(struct ab_gpt *g, uint64_t lba, uint8_t *header)
 	if (g->esize < 128 || g->bytes == 0 || g->read > sizeof(ufs_buffer) / 2 ||
 	    EFI_ERROR(g->bio->read_blocks(g->bio, g->bio->media->media_id, g->entries_lba, g->read, ufs_buffer)) ||
 	    ufs_crc32(ufs_buffer, g->bytes) != *(uint32_t *)(header + 88)) {
+		print("ab: block %d: the table (%d entries of %d bytes) is not sound\n", lba, g->count, g->esize);
 		return 0;
 	}
 	return 1;
@@ -656,16 +660,47 @@ ab_find(struct ab_gpt *g, uint8_t *header)
 	efi_handle *handles;
 	uint64_t count;
 
-	if (EFI_ERROR(BS->locate_handle_buffer(ByProtocol, &blk_guid, NULL, &count, &handles))) {
-		return 0;
+	efi_status st = BS->locate_handle_buffer(ByProtocol, &blk_guid, NULL, &count, &handles);
+
+	if (EFI_ERROR(st)) {
+		/*
+		 * The standalone boot starts the loader from the UEFI's BootManagerLib, before the storage drivers are connected: connect every handle's
+		 * drivers, recursively (what the UEFI's own ConnectAll does), and ask again.
+		 */
+		print("ab: no block devices yet (status %x): connecting the drivers\n", (uint64_t)st);
+		{
+			efi_handle *all;
+			uint64_t n = 0;
+
+			st = BS->locate_handle_buffer(0 /* AllHandles */, NULL, NULL, &n, &all);
+			print("ab: %d handles (status %x)\n", n, (uint64_t)st);
+			if (!EFI_ERROR(st) && BS->connect_controller != NULL) {
+				for (uint64_t i = 0; i < n; i++) {
+					((efi_status (EFIAPI *)(efi_handle, efi_handle *, void *, int))BS->connect_controller)(all[i], NULL, NULL, 1);
+				}
+			}
+		}
+		st = BS->locate_handle_buffer(ByProtocol, &blk_guid, NULL, &count, &handles);
+		if (EFI_ERROR(st)) {
+			print("ab: still no block devices (status %x)\n", (uint64_t)st);
+			return 0;
+		}
 	}
+	print("ab: %d block devices\n", count);
 	for (uint64_t i = 0; i < count; i++) {
 		memset(g, 0, sizeof(*g));
-		if (EFI_ERROR(BS->handle_protocol(handles[i], &blk_guid, (void **)&g->bio)) || g->bio->media->logical) {
+		if (EFI_ERROR(BS->handle_protocol(handles[i], &blk_guid, (void **)&g->bio))) {
+			continue;
+		}
+		print("ab: device %d: %s, media %d, %d blocks of %d\n", i, g->bio->media->logical ? "a partition" : "a raw unit",
+		    (uint64_t)g->bio->media->media_id, g->bio->media->last_block + 1, (uint64_t)g->bio->media->block_size);
+		if (g->bio->media->logical) {
 			continue;
 		}
 		g->bs = g->bio->media->block_size;
 		if (g->bs < 512 || !ab_read_gpt(g, 1, header)) {
+			print("ab: device %d: no sound GPT at block 1 (read %s, \"%x\")\n", i,
+			    g->bs < 512 ? "not tried" : "tried", g->bs < 512 ? 0 : (uint64_t)*(const uint32_t *)ufs_buffer);
 			continue;
 		}
 		g->a = g->b = -1;
@@ -674,6 +709,8 @@ ab_find(struct ab_gpt *g, uint8_t *header)
 			if (ab_entry_is(e, "boot_a")) g->a = g->a == -1 ? (int)k : -2;
 			if (ab_entry_is(e, "boot_b")) g->b = g->b == -1 ? (int)k : -2;
 		}
+		print("ab: device %d: a GPT of %d entries, boot_a %d, boot_b %d\n", i, g->count, (uint64_t)(int64_t)g->a,
+		    (uint64_t)(int64_t)g->b);
 		if (g->a >= 0 && g->b >= 0) {
 			return 1;
 		}

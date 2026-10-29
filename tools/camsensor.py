@@ -13,7 +13,11 @@ Two versions are read. "Parameter Parser V2.0.0" (the OnePlus 8 Pro's, /odm/lib6
 symbol of the power-up and power-down sequences), register settings of 80 bytes. For V2 this prints and writes the
 identity, the power sequences (types are Qualcomm's cam_sensor_power_seq_type: 0 MCLK, 1 VANA, 2 VDIG, 3 VIO, 4 VAF, 5 VAF_PWDM,
 6 CUSTOM_REG1, 7 CUSTOM_REG2, 8 RESET, 9 STANDBY, 10 CUSTOM_GPIO1, 11 CUSTOM_GPIO2; value: 1 on, 0 off, MCLK's in Hz) and
-the register tables, and NO modes (the 408-byte resolution elements are not decoded yet).
+the register tables and, since 2026-10-27, the modes: the 408-byte resolution elements are 51 64-bit words {2: symbol of the stream
+configuration (blocks of 8 words: vc, data type, x, y, width, height, bits, kind; the first is the image), 3: sensor pixel clock, 4: line length,
+5: frame length, 8: output rate (the "pixel clock" of the V3 element), 9: binning, 11: frames a second as a double, 12: lanes (trios),
+19/20: count and symbol of the mode's register writes}; their tables are res0, res1, ...; settle is 0 (not in the V2 files) and
+C-PHY is taken from the sensor's own init table (Sony: register 0x0111 = 3).
 
 The V3.0.1 format: a "QTI Chromatix Header" / "Parameter Parser V3.0.1" file: after the header a
 table of entry points (offset, size) -- the first is a table of symbols, the second the data the
@@ -204,6 +208,20 @@ def main_v2(data):
           f'({address_bytes}/{data_bytes} bytes, mask {id_mask:#x})')
     for label in ('pwrup', 'pwrdn'):
         print(f'  {label}: ' + ' '.join(f'{TYPES2.get(t, t)}={v}+{d}ms' for t, v, d in power[label]))
+    # the resolutions: 408-byte elements of 51 64-bit words
+    res_sid = next((x for x in order if syms[x][0] == 'resolutionData'), None)
+    modes, mode_tables, mode_sids = [], [], set()
+    raw = value(res_sid) if res_sid is not None else b''
+    for k in range(len(raw) // 408):
+        w = struct.unpack_from('<51Q', raw, 408 * k)
+        fps = struct.unpack_from('<d', raw, 408 * k + 88)[0]
+        stream = struct.unpack('<%dQ' % (syms[w[2]][2] // 8), value(w[2]))
+        _, data_type, x, y, width, height = stream[:6]
+        modes.append([width, height, x, y, w[12], 0, 0, w[8], w[4], w[5], int(fps * 1000), data_type])
+        mode_tables.append(('res%d' % k, regsetting_v2(data, pool, syms, value, w[20])))
+        mode_sids.add(w[20])
+    lane_sid = next((x for x in order if syms[x][0] == 'laneAssign'), None)
+    lane_assign = struct.unpack('<Q', value(lane_sid))[0] if lane_sid is not None and syms[lane_sid][2] == 8 else 0
     roles = {'regToRealGain': ['on', 'off', 'holdon', 'holdoff'], 'initSettings': ['init'], 'testPatternData': ['tpgoff', 'tpgon']}
     tables, after, used = [], '', {}
     for sid in order:
@@ -212,18 +230,30 @@ def main_v2(data):
             if nm not in ('slaveAddr', 'registerData', 'delayUs'):
                 after = nm
             continue
+        if sid in mode_sids:
+            continue
         names = roles.get(after, [])
         n = used.get(after, 0)
         used[after] = n + 1
         if n < len(names):
             tables.append((names[n], regsetting_v2(data, pool, syms, value, sid)))
+    init = dict((nm, wr) for nm, wr in tables).get('init', [])
+    cphy = int(any(a == 0x111 and v == 3 for a, v, _, _, _, _ in init))     # Sony: 0x0111 = 3 is C-PHY [inference]
+    for m in modes:
+        m[5] = cphy
+    for k, m in enumerate(modes):
+        print(f'  mode {k}: {m[0]}x{m[1]} at {m[2]},{m[3]} dt {m[11]:#x}, {m[4]} {"trio(s), C-PHY" if m[5] else "lane(s), D-PHY"}, '
+              f'output rate {m[7]}, line {m[8]}, frame {m[9]}, {m[10] / 1000:.2f} fps')
+    tables = mode_tables + tables
     for nm, writes in tables:
         print(f'  {nm}: {len(writes)} writes: ' + ' '.join(f'{a:x}={v:x}' + (f'+{d}us' if d else '') for a, v, _, _, _, d in writes[:10]) +
               (' ...' if len(writes) > 10 else ''))
     if sys.argv[2] == '-':
         return
     out = bytearray(b'RWCTAB02')
-    out += struct.pack('<8I', slave, address_bytes, data_bytes, id_address, chip_id, id_mask, 0, 0)    # no modes (V2: not decoded)
+    out += struct.pack('<8I', slave, address_bytes, data_bytes, id_address, chip_id, id_mask, lane_assign, len(modes))
+    for m in modes:
+        out += struct.pack('<12I', *m)
     for label in ('pwrup', 'pwrdn'):
         out += label.encode().ljust(8, b'\0') + struct.pack('<I', len(power[label]))
         for t, v, d in power[label]:

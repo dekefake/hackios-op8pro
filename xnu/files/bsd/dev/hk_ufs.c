@@ -197,6 +197,7 @@ static uint64_t ufs_last_end;
 static uint8_t ufs_lun[BLOCK_MAX_PARTS];         /* 0xff: not known, read through the loader */
 static uint64_t ufs_lun_offset[BLOCK_MAX_PARTS];
 static bool ufs_native_mapped;
+static bool ufs_8pro;                           /* the OnePlus 8 Pro's own storage (ufs_8pro=1, instantnoodle_ufs.c): no loader page, reads straight to LUN 0 */
 static uint32_t ufs_native_luns;                /* how many units are mapped (LUN 0..n-1) */
 static volatile bool ufs_native_on;
 static uint64_t ufs_native_fallbacks, ufs_mailbox_refused;
@@ -568,6 +569,9 @@ ufs_native_out(const char *why)
 static int
 ufs_read(uint32_t part, uint64_t offset, uint8_t *dst, uint64_t len)
 {
+	if (ufs_8pro) {
+		return part >= ufs_parts ? ENXIO : instantnoodle_ufs_read(0, ufs_page->part[part].start_lba * 4096ULL + offset, dst, len);
+	}
 	if (ufs_native_on && ufs_lun[part] != 0xff) {
 		int error = ufs_read_native(part, offset, dst, len);
 
@@ -610,6 +614,18 @@ ufs_write(uint32_t part, uint64_t offset, const uint8_t *src, uint64_t len)
 	nbs = ufs_page->part[part].block_size;
 	if (len == 0 || offset % nbs != 0 || len % nbs != 0) {
 		return EINVAL;          /* whole blocks only: nothing is read before a write */
+	}
+	if (ufs_8pro) {
+		/* the 8 Pro's own backend (instantnoodle_ufs.c): its window is darwin from UFS_WRITE_FIRST on, and it refuses any other write itself */
+		if (offset / nbs < UFS_WRITE_FIRST || offset > ufs_part_bytes(part) || len > ufs_part_bytes(part) - offset) {
+			ufs_write_refused++;
+			return EROFS;
+		}
+		error = instantnoodle_ufs_write(0, ufs_page->part[part].start_lba * 4096ULL + offset, src, len);
+		if (error != 0) {
+			ufs_write_errors++;
+		}
+		return error;
 	}
 	if (offset / nbs < UFS_WRITE_FIRST || offset > ufs_part_bytes(part) ||
 	    len > ufs_part_bytes(part) - offset) {
@@ -1765,6 +1781,179 @@ static bool data_started;               /* hk_data=3 made its volume at the very
 
 /* ---- bringing it up ---- */
 
+extern void loader_log_line(const char *line);   /* (osfmk/arm64/loader_return.c) */
+static void ufs_st_say(const char *format, ...) __printflike(1, 2);
+static void
+ufs_st_say(const char *format, ...)
+{
+	char line[200];
+	va_list list;
+
+	va_start(list, format);
+	vsnprintf(line, sizeof(line), format, list);
+	va_end(list);
+	printf("%s", line);
+	loader_log_line(line);
+}
+
+/*
+ * ufs_8pro_test=1: a look at what the backend reads (right here, at boot, through ufs_read() as everything else will): liblp's geometry of `super`,
+ * the first bytes of a few partitions, an unaligned read against an aligned one, and the speed of 256 MB read in a row from `super`.
+ */
+static void
+ufs_8pro_selftest(void)
+{
+	static const char *const names[] = { "super", "userdata", "metadata", "persist", "vbmeta_system_a" };
+	uint8_t *buf = kalloc_data(1 << 20, Z_WAITOK | Z_ZERO), small[64], aligned[8192];
+	uint32_t super = ~0u;
+	uint64_t seconds0, seconds1;
+	clock_usec_t us0, us1;
+
+	if (buf == NULL) {
+		return;
+	}
+	for (unsigned n = 0; n < sizeof(names) / sizeof(names[0]); n++) {
+		for (uint32_t i = 0; i < ufs_parts; i++) {
+			if (strcmp((const char *)ufs_page->part[i].name, names[n]) != 0) {
+				continue;
+			}
+			if (strcmp(names[n], "super") == 0) {
+				super = i;
+			}
+			if (ufs_read(i, 0, small, sizeof(small)) == 0) {
+				ufs_st_say("ufs: 8pro test: %s (%llu MB at block %llu): first bytes %02x %02x %02x %02x %02x %02x %02x %02x\n", names[n],
+				    ufs_part_bytes(i) >> 20, ufs_page->part[i].start_lba, small[0], small[1], small[2], small[3], small[4], small[5], small[6], small[7]);
+			} else {
+				ufs_st_say("ufs: 8pro test: %s: the read FAILED\n", names[n]);
+			}
+		}
+	}
+	for (uint32_t i = 0; i < ufs_parts; i++) {
+		static const uint64_t blocks[3] = { 0, 1374208, 2039808 };         /* darwin's iOS volume, OS cryptex, App cryptex */
+
+		if (strcmp((const char *)ufs_page->part[i].name, "darwin") != 0) {
+			continue;
+		}
+		for (unsigned k = 0; k < 3; k++) {
+			if (ufs_read(i, blocks[k] * 4096 + 32, small, 4) == 0) {
+				ufs_st_say("ufs: 8pro test: darwin block %llu: bytes 32..35 are '%c%c%c%c' (an APFS container has NXSB)\n", blocks[k],
+				    small[0] >= 32 && small[0] < 127 ? small[0] : '.', small[1] >= 32 && small[1] < 127 ? small[1] : '.',
+				    small[2] >= 32 && small[2] < 127 ? small[2] : '.', small[3] >= 32 && small[3] < 127 ? small[3] : '.');
+			}
+		}
+		ufs_st_say("ufs: 8pro test: darwin is %llu MB at block %llu\n", ufs_part_bytes(i) >> 20, ufs_page->part[i].start_lba);
+	}
+	if (super != ~0u) {
+		bool same = true;
+
+		if (ufs_read(super, 4096, small, 8) == 0) {
+			ufs_st_say("ufs: 8pro test: super at 4096: %02x %02x %02x %02x (liblp geometry magic 67 44 6c 61 = \"gDla\")\n", small[0], small[1], small[2], small[3]);
+		}
+		if (ufs_read(super, 4096, aligned, sizeof(aligned)) == 0 && ufs_read(super, 4096 + 100, small, sizeof(small)) == 0) {
+			same = memcmp(small, aligned + 100, sizeof(small)) == 0;
+			ufs_st_say("ufs: 8pro test: an unaligned read (offset 100 into a block) %s the aligned one\n", same ? "matches" : "DOES NOT MATCH");
+		}
+		clock_get_system_microtime(&seconds0, &us0);
+		for (uint64_t at = 0; at < (256ULL << 20) && at + (1 << 20) <= ufs_part_bytes(super); at += 1 << 20) {
+			if (ufs_read(super, at, buf, 1 << 20) != 0) {
+				ufs_st_say("ufs: 8pro test: the read at %llu MB failed\n", at >> 20);
+				break;
+			}
+		}
+		clock_get_system_microtime(&seconds1, &us1);
+		ufs_st_say("ufs: 8pro test: 256 MB of super in %llu ms\n", ((seconds1 - seconds0) * 1000000ULL + us1 - us0) / 1000);
+	}
+	kfree_data(buf, 1 << 20);
+}
+
+/*
+ * ufs_8pro=1: the OnePlus 8 Pro's storage through instantnoodle_ufs.c (the controller adopted as ABL left it, the SMMU stream 0xe0 through a context of
+ * ours): the partitions of logical unit 0 from its GPT, in a page of the loader's layout made here, so everything below -- the device nodes, the
+ * partition arithmetic -- is the one the loader's page feeds. Read only.
+ */
+extern void loader_return_restart(void);   /* osfmk/arm64/loader_return.c: reason 4, the loader resets */
+
+static bool
+ufs_8pro_setup(void)
+{
+	struct instantnoodle_ufs_part *p;
+	struct loader_block *page;
+	uint32_t n, check = 0;
+
+	if (instantnoodle_ufs_up() != 0) {
+		printf("ufs: ufs_8pro: the storage did not come up\n");
+		return false;
+	}
+	/*
+	 * hk_swap_slot=1 (the standalone boot menu's "Android, other slot, once": the loader put it in place of hk_fast_halt=1): the A/B bytes of boot_a and boot_b are exchanged in the GPT
+	 * and the phone restarts at once, into the other slot (instantnoodle_ufs.c, instantnoodle_ufs_ab_swap()). If it cannot be done, iOS boots as it was.
+	 */
+	if (PE_parse_boot_argn("hk_swap_slot", &check, sizeof(check)) && check == 1) {
+		int swapped = instantnoodle_ufs_ab_swap();
+
+		ufs_st_say("ufs: ufs_8pro: the other slot made active: %s (%d)\n", swapped == 0 ? "done, restarting" : "NOT DONE, iOS goes on", swapped);
+		if (swapped == 0) {
+			loader_return_restart();
+		}
+		check = 0;
+	}
+	page = kalloc_data(sizeof(struct loader_block), Z_WAITOK | Z_ZERO);
+	p = kalloc_data(BLOCK_MAX_PARTS * sizeof(*p), Z_WAITOK | Z_ZERO);
+	if (page == NULL || p == NULL) {
+		return false;
+	}
+	n = instantnoodle_ufs_gpt(p, BLOCK_MAX_PARTS);
+	if (n == 0) {
+		return false;
+	}
+	for (uint32_t i = 0; i < n; i++) {
+		strlcpy(page->part[i].name, p[i].name, sizeof(page->part[i].name));
+		page->part[i].block_size = 4096;
+		page->part[i].blocks = p[i].last - p[i].first + 1;
+		page->part[i].start_lba = p[i].first;
+		page->part[i].unit = 0;
+		page->part[i].lun = 0;
+		page->part[i].flags = 0;
+	}
+	page->magic = BLOCK_MAGIC;
+	page->version = BLOCK_VERSION;
+	page->size = sizeof(struct loader_block);
+	page->parts = n;
+	ufs_page = page;
+	ufs_parts = n;
+	ufs_buffer_size = 1u << 20;     /* the backend's data buffer: the character devices and hk_data move a bufferful at a time (with 0 they never advanced: init hung in newfs_hfs) */
+	ufs_8pro = true;
+	/*
+	 * ufs_write=1: writes into the port's own partition, past the iOS volume and the cryptexes (UFS_WRITE_FIRST), and nowhere else: it has to be the
+	 * partition named darwin, with an APFS container's type GUID, at least what the var store and a data volume need; the backend takes the
+	 * window and refuses every other write itself.
+	 */
+	check = 0;
+	if (PE_parse_boot_argn("ufs_write", &check, sizeof(check)) && check == 1) {
+		static const uint8_t apfs_type[16] = { 0xef, 0x57, 0x34, 0x7c, 0x00, 0x00, 0xaa, 0x11, 0xaa, 0x11, 0x00, 0x30, 0x65, 0x43, 0xec, 0xac };
+
+		for (uint32_t i = 0; i < n; i++) {
+			uint64_t blocks = p[i].last - p[i].first + 1;
+
+			if (strcmp(p[i].name, "darwin") != 0) {
+				continue;
+			}
+			if (memcmp(p[i].type, apfs_type, 16) != 0 || blocks < UFS_DARWIN_BLOCKS_LEAST + 65536 || blocks > (1ULL << 26)) {
+				ufs_st_say("ufs: ufs_8pro: darwin is not the partition the port made (type %02x%02x%02x%02x, %llu blocks): no write will be asked for\n", p[i].type[0], p[i].type[1], p[i].type[2], p[i].type[3], blocks);
+				break;
+			}
+			ufs_darwin_first = p[i].first;
+			ufs_darwin_blocks = blocks;
+			if (instantnoodle_ufs_write_window(p[i].first + UFS_WRITE_FIRST, p[i].first + blocks) == 0) {
+				ufs_write_part = (int)i;
+				ufs_st_say("ufs: ufs_8pro: darwin (%llu blocks at %llu) takes writes from its block %llu on\n", blocks, p[i].first, (uint64_t)UFS_WRITE_FIRST);
+			}
+			break;
+		}
+	}
+	return true;
+}
+
 void
 hk_ufs_init(void)
 {
@@ -1783,6 +1972,29 @@ hk_ufs_init(void)
 	}
 
 	ufs_store_from_args();
+
+	if (PE_parse_boot_argn("ufs_peek", &check, sizeof(check)) && check == 1) {
+		ufshc_peek();
+		check = 0;
+	}
+
+	if (PE_parse_boot_argn("ufs8", &check, sizeof(check)) && (check >= 1 && check <= 9)) {
+		instantnoodle_ufs8_run(check);
+		check = 0;
+	}
+
+	check = 0;
+	if (PE_parse_boot_argn("ufs_8pro", &check, sizeof(check)) && check == 1) {
+		if (!ufs_8pro_setup()) {
+			return;
+		}
+		check = 0;
+		if (PE_parse_boot_argn("ufs_8pro_test", &check, sizeof(check)) && check == 1) {
+			ufs_ready = true;
+			ufs_8pro_selftest();
+		}
+		goto have_page;
+	}
 
 	if (!PE_parse_boot_argn("ufs_shared_pa", &pa, sizeof(pa)) || pa == 0) {
 		return;                 /* the loader was not asked for ufs=2: there is nothing to read through */
@@ -1804,6 +2016,7 @@ hk_ufs_init(void)
 	    (buffer_pa & (UFS_PAGE - 1)));
 	ufs_seq = ufs_page->answer.answered;      /* a loader that served an earlier kernel counts on from there */
 
+have_page:
 	ufs_bmajor = bdevsw_add(-1, &ufs_bdevsw);
 	ufs_cmajor = ufs_bmajor < 0 ? -1 : cdevsw_add_with_bdev(-1, &ufs_cdevsw, ufs_bmajor);
 	if (ufs_cmajor < 0) {

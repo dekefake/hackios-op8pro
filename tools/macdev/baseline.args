@@ -1,0 +1,1 @@
+cpus=8 bootcpu=7 cpufreq=1 torch=3 gpu=1 fb_push=2 fb_dcs=1 fb_hz=60 adsp=1 sound=4 sound_amps=1 sound_below=96 haptic=5 wifi=1 bt=6 bt_after=45 fbwidth=1290 fbheight=2796

@@ -1,0 +1,38 @@
+#!/bin/bash
+# mk-standalone KERNEL OUT.img [LOADER.efi]   the 8 Pro's standalone boot image: the UEFI of the working RAM image (out/xnu-usb-8pro.img: its shim, FD and DTBs) with a
+#   payload made here -- the loader, KERNEL, the small image (userland/root-sa1.apfs), the resident boot volume (userland/flashboot.apfs) and the boot-args of the profile
+#   plus the flash-root and persistence ones -- so that the phone starts iOS from its own flash with no computer. Test it with `fastboot boot`, then (owner's OK) flash it.
+#   UEFI_FD: the firmware volume to use (a UEFI built in the container, default: the working image's). SMALL_IMAGE: the small image (default userland/root-sa1.apfs). STANDALONE_FB_HZ: the profile's fb_hz=60 replaced by this (120). STANDALONE_EXTRA: more boot-args in front (default "-v": the kernel's console as text on the screen, for now; STANDALONE_EXTRA="" for the logo).
+#   The command line has the phone's Wi-Fi MAC (fw-wifi/mac): the image is private, never committed.
+set -e
+cd "$(dirname "$(readlink -f "$0")")/../.."
+K=$1; OUT=$2; L=${3:-out/loader-8pro.efi}
+[ -f "$K" ] && [ -n "$OUT" ] && [ -f "$L" ] || { sed -n 2,6p "$0"; exit 1; }
+ARGS="$(grep '^BOOTARGS=' common/devices/instantnoodlep.conf | sed 's/^BOOTARGS="//; s/"$//')"
+if [ -n "$STANDALONE_FB_SIZE" ]; then ARGS="${ARGS//fbwidth=1320 fbheight=2868/fbwidth=${STANDALONE_FB_SIZE%x*} fbheight=${STANDALONE_FB_SIZE#*x}}"; fi     # STANDALONE_FB_SIZE=1290x2796: the display size in place of the profile's
+ARGS="${ARGS//fb_hz=60/fb_hz=${STANDALONE_FB_HZ:-60}}"     # STANDALONE_FB_HZ=120: the panel's rate in place of the profile's fb_hz=60 (two fb_hz= in one line: the kernel and userland disagree)
+CMD="${STANDALONE_EXTRA--v} epoch=$(date +%s) sb_delay=8 $ARGS root_apfs=ufs_darwin ufs_write=1 hk_data=1 var_data=hfs var_data_format=1 var_store=1 hk_fast_halt=1 wifi_mac=$(tr -d ' \n\r' < fw-wifi/mac)"
+python3 xnuloader/mkpayload.py -o out/standalone-payload.bin loader.efi=$L kernel=$K ramdisk=${SMALL_IMAGE:-userland/root-sa1.apfs} resident=userland/flashboot.apfs --cmdline "$CMD" > /dev/null
+python3 - "$OUT" <<'PY'
+import gzip, struct, subprocess, sys, os, zlib
+out = sys.argv[1]
+d = open('out/xnu-usb-8pro.img', 'rb').read()
+ksize = struct.unpack_from('<I', d, 8)[0]; page = struct.unpack_from('<I', d, 36)[0]
+do = zlib.decompressobj(31)
+blob = do.decompress(d[page:page + ksize]); dtb = do.unused_data
+head = blob[:blob.find(b'XNUP')]
+if os.environ.get('UEFI_FD'):          # a UEFI built here (Mu-Silicium, uefi/README.md): its FD in place of the working image's, behind the same boot shim
+    fd = open(os.environ['UEFI_FD'], 'rb').read()
+    shim = len(head) - len(fd)
+    assert shim >= 0 and len(fd) == 0x300000, 'the FD is not the size of the working image\'s'
+    head = head[:shim] + fd
+pay = open('out/standalone-payload.bin', 'rb').read()
+assert len(pay) < (64 << 20) - (1 << 20) - 0x1000, f'the payload is {len(pay)} bytes: more than the window holds'
+b = head + pay; b += b'\0' * (-len(b) % 16)
+k = out + '.kernel~'
+open(k, 'wb').write(gzip.compress(b, 6, mtime=0) + dtb)
+open(out + '.rd~', 'wb').write(b'\0' * 5)
+subprocess.check_call([sys.executable, 'Mu-Silicium/Resources/Scripts/mkbootimg.py', '--kernel', k, '--ramdisk', out + '.rd~', '--header_version', '1', '--board', 'HACKiOS', '-o', out])
+os.unlink(k); os.unlink(out + '.rd~')
+print(f'{out}: {os.path.getsize(out)} bytes (payload {len(pay)})')
+PY

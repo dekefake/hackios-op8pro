@@ -3447,6 +3447,9 @@ static uint32_t gpu_timed_by[7];        /* ... how many of them under 0.1, 0.25,
 static uint32_t gpu_exact = 1;          /* boot-arg gpu_exact=0: the core does not wait to be idle before it notes the time */
 static uint32_t gpu_recover;            /* boot-arg gpu_recover=1: a core that has stopped answering is reset and given work again */
 static uint32_t gpu_recoveries;         /* ... and how many times that has been done in this run */
+static uint64_t gpu_stat_ticks, gpu_stat_at;
+static uint32_t gpu_stat_count;
+uint32_t gpu_stats;                     /* boot-arg gpu_stats=1: the core's busy time once a second ("tl: u") */
 uint32_t gpu_log;                       /* boot-arg gpu_log=1: a line for every submission and the time the core spent on it */
 extern void hk_tl(const char *format, ...) __printflike(1, 2);
 static struct {
@@ -4038,6 +4041,22 @@ gpu_times(void)
 			gpu_ticks += ticks;
 			gpu_load_ticks += ticks;
 			gpu_timed_count++;
+			gpu_stat_ticks += ticks;
+			gpu_stat_count++;
+		}
+	}
+	if (gpu_stats) {
+		/* boot-arg gpu_stats=1: "tl: u busy PERMILLE of 1 s in N submissions": the core's own time (19.2 ticks a microsecond), for measuring what a change costs the GPU */
+		uint64_t now = mach_absolute_time(), ns;
+
+		absolutetime_to_nanoseconds(now - gpu_stat_at, &ns);
+		if (gpu_stat_at != 0 && ns >= 1000000000ull) {
+			hk_tl("tl: u busy %llu permille of %llu ms in %u submissions\n", gpu_stat_ticks * 10 / 192 * 1000 / (ns / 1000), ns / 1000000, gpu_stat_count);
+			gpu_stat_ticks = 0;
+			gpu_stat_count = 0;
+			gpu_stat_at = now;
+		} else if (gpu_stat_at == 0) {
+			gpu_stat_at = now;
 		}
 	}
 }
@@ -4751,6 +4770,7 @@ hk_adreno_init(void)
 			to_memory(core_scratch.memory, 4096);
 			PE_parse_boot_argn("gpu_exact", &gpu_exact, sizeof(gpu_exact));
 			PE_parse_boot_argn("gpu_log", &gpu_log, sizeof(gpu_log));
+			PE_parse_boot_argn("gpu_stats", &gpu_stats, sizeof(gpu_stats));
 			/* on by default where it has been seen to work: the Adreno 650, 3 hangs of 3 (log 185937) */
 			gpu_recover = kona;
 			PE_parse_boot_argn("gpu_recover", &gpu_recover, sizeof(gpu_recover));

@@ -171,6 +171,17 @@ extern "C" kern_return_t gic_v3_spi_attach(uint32_t intid, bool edge, void (*han
 extern "C" void gic_v3_spi_detach(uint32_t intid);
 extern "C" void loader_log_line(const char *line);
 
+/* For the drain bench (bsd/dev/hk_power.c, drain_bench=): the system put to sleep as IOPMSleepSystem() does, from the kernel */
+extern "C" void hk_power_request_sleep(void);
+
+void
+hk_power_request_sleep(void)
+{
+	if (IOService::getPMRootDomain() != NULL) {
+		IOService::getPMRootDomain()->sleepSystem();
+	}
+}
+
 void
 GenericARMCPU::haltCPU(void)
 {
@@ -426,6 +437,8 @@ static bool gBootEpochKnown;
 extern "C" uint64_t ml_get_hwclock(void);
 
 /* seconds of the hardware counter, which counts through the system's sleep */
+extern "C" uint32_t hk_rtc_seconds(void);
+
 static clock_sec_t
 counterSeconds(void)
 {
@@ -452,6 +465,15 @@ findBootEpoch(void)
 			memcpy(&epoch, data->getBytesNoCopy(), sizeof(epoch));
 		}
 		OSSafeReleaseNULL(chosen);
+	}
+	{
+		/* the phone's own clock, the PMIC's RTC, when it is later than the build's epoch (a plausible time: after the build and within ten years of it) */
+		uint32_t rtc = hk_rtc_seconds();
+
+		printf("clock: the boot-arg epoch is %llu, the PMIC's RTC reads %u\n", epoch, rtc);
+		if (rtc != 0 && (uint64_t) rtc > epoch && (uint64_t) rtc < epoch + 10ull * 365 * 86400) {
+			epoch = rtc;
+		}
 	}
 	if (epoch != 0) {
 		gBootEpoch = (long) epoch - (long) counterSeconds();

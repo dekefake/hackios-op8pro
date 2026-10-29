@@ -30,6 +30,10 @@ struct efi_text_output;
 typedef struct efi_text_output {
 	void *reset;
 	efi_status (EFIAPI *output_string)(struct efi_text_output *self, const char16 *str);
+	void *test_string, *query_mode, *set_mode, *set_attribute;
+	efi_status (EFIAPI *clear_screen)(struct efi_text_output *self);
+	efi_status (EFIAPI *set_cursor_position)(struct efi_text_output *self, uint64_t column, uint64_t row);
+	void *enable_cursor, *mode;
 } efi_text_output;
 
 enum { EfiLoaderData = 2, EfiConventionalMemory = 7 };
@@ -83,7 +87,8 @@ typedef struct {
 	efi_status (EFIAPI *get_time)(struct efi_time *time, void *capabilities);
 	void *set_time, *get_wakeup_time, *set_wakeup_time;
 	void *set_virtual_address_map, *convert_pointer;
-	void *get_variable, *get_next_variable_name, *set_variable;
+	efi_status (EFIAPI *get_variable)(const char16 *name, const efi_guid *guid, uint32_t *attributes, uint64_t *size, void *data);
+	void *get_next_variable_name, *set_variable;
 	void *get_next_high_mono_count;
 	void (EFIAPI *reset_system)(int type, efi_status status, uint64_t size, void *data);
 } efi_runtime_services;

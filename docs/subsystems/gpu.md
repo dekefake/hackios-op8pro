@@ -13,6 +13,13 @@ Metal. This page separates what is **finished and verified** (OpenGL ES for the 
 Vendor firmware (`a6xx_gmu`, `sqe`, zap shader) is never in the repository; it is taken from the phone's own
 vendor partition (`fw-gpu/`, see [../BUILD.md](../BUILD.md)).
 
+## hakios-metal compared with this driver (2026-10-28)
+
+`../hakios-metal` (C++, 1.1 kLOC) is a Metal command model (queue, command buffers, blits by CP_MEMCPY/CP_MEM_WRITE, .metallib parser) over the same msm-DRM interface of `HKGPU` (its transport
+only needs the service named `HKGPU`; upstream calls it `HakiosGPU`). It has no shaders: nothing is drawn through it, and everything on screen is OpenGL ES (Mesa) here. It is not a
+replacement for HKGPU (kernel) or for `hkmetal.m` (7.5 kLOC, AIR to ir3 shaders, 263 of 271 system fragment shaders draw); worth taking from it: its fake-GPU test method (a strict packet interpreter run
+under the sanitizers), and the measured fact that one CP_MEMCPY of 4 Mi words hung the GPU (we use none). Nothing in it would speed up the 120 Hz UI: the GPU stage of a frame is 5.75 ms of the 8.33 ms budget and it is drawn by Mesa (display.md, "Dropped frames at 120 Hz").
+
 ## Kernel side
 
 ### Bring-up (`hk_adreno.c`)

@@ -18,12 +18,34 @@
 #include <kern/thread.h>
 #include <mach/exception_types.h>
 #include <mach/machine/thread_status.h>
+#include <stdarg.h>
 #include <string.h>
 #include <vm/vm_map.h>
 #include <vm/vm_shared_region.h>
 
 extern char *proc_name_address(struct proc *p);
+extern void loader_log_line(const char *line);   /* (osfmk/arm64/loader_return.c) */
+extern int vsnprintf(char *, size_t, const char *, va_list) __printflike(3, 0);
 
+/*
+ * The console of an iOS run is flooded (a megabyte a minute); the loader's own log is not and it is what `xl log` and a poller reach
+ * with a few lines at a time, so the traces go to both.
+ */
+static void trace_say(const char *format, ...) __printflike(1, 2);
+static void
+trace_say(const char *format, ...)
+{
+	char line[256];
+	va_list arguments;
+
+	va_start(arguments, format);
+	vsnprintf(line, sizeof(line), format, arguments);
+	va_end(arguments);
+	printf("%s", line);
+	loader_log_line(line);
+}
+
+extern void hk_workq_info(thread_t thread, uint64_t *stack, uint32_t *flags, uint32_t *pri, uint32_t *thport);
 void user_exception_trace(exception_type_t exception, mach_exception_data_t code, mach_msg_type_number_t count, thread_t thread);
 
 static TUNABLE(uint32_t, user_exception_trace_enabled, "systrace", 0);
@@ -71,12 +93,41 @@ user_exception_trace(exception_type_t exception, mach_exception_data_t code, mac
 	}
 	proc = get_bsdtask_info(task);
 
-	printf("usertrap: %s[%d] exception %d code 0x%llx 0x%llx: pc 0x%llx lr 0x%llx sp 0x%llx, shared cache slide 0x%x\n",
+	trace_say("usertrap: %s[%d] exception %d code 0x%llx 0x%llx: pc 0x%llx lr 0x%llx sp 0x%llx, shared cache slide 0x%x\n",
 	    proc ? proc_name_address(proc) : "?", proc ? proc_pid(proc) : -1, exception,
 	    count > 0 ? (unsigned long long)code[0] : 0, count > 1 ? (unsigned long long)code[1] : 0,
 	    (unsigned long long)get_saved_state_pc(state), (unsigned long long)get_saved_state_lr(state),
 	    (unsigned long long)get_saved_state_sp(state), slide);
 
+	{
+		/* is it a workqueue thread, and where does the kernel say its stack is (bsd/pthread/pthread_kext_static.c) */
+		uint64_t stack = 0;
+		uint32_t flags = 0, pri = 0, thport = 0;
+
+		hk_workq_info(thread, &stack, &flags, &pri, &thport);
+		trace_say("usertrap:   thread id %llu, workq stack 0x%llx, workq flags 0x%x, workq pri 0x%x, thport %u\n", (unsigned long long)thread_tid(thread),
+		    (unsigned long long)stack, flags, pri, thport);
+	}
+	if (exception == EXC_BAD_ACCESS && count > 1) {
+		/* where the faulting address lies in the task's map, and the page of the stack pointer: protections tell a missing page from a read-only one */
+		vm_map_t map = get_task_map(task);
+		uint64_t where[2] = { (uint64_t)code[1], (uint64_t)get_saved_state_sp(state) };
+
+		for (unsigned i = 0; i < 2; i++) {
+			vm_map_entry_t entry;
+
+			vm_map_lock_read(map);
+			if (vm_map_lookup_entry(map, (vm_map_offset_t)where[i], &entry)) {
+				trace_say("usertrap:   %s 0x%llx is in [0x%llx, 0x%llx): prot %d max %d inherit %d submap %d object %d needs_copy %d wired %d use_pmap %d\n",
+				    i == 0 ? "the address" : "sp", (unsigned long long)where[i], (unsigned long long)entry->vme_start, (unsigned long long)entry->vme_end,
+				    entry->protection, entry->max_protection, entry->inheritance, entry->is_sub_map, VME_OBJECT(entry) != VM_OBJECT_NULL, entry->needs_copy,
+				    entry->wired_count, entry->use_pmap);
+			} else {
+				trace_say("usertrap:   %s 0x%llx is in no map entry\n", i == 0 ? "the address" : "sp", (unsigned long long)where[i]);
+			}
+			vm_map_unlock_read(map);
+		}
+	}
 	for (unsigned i = 0; i < sizeof(message_registers) / sizeof(message_registers[0]); i++) {
 		uint64_t value = (uint64_t)get_saved_state_reg(state, message_registers[i]);
 		char text[128];
@@ -92,16 +143,59 @@ user_exception_trace(exception_type_t exception, mach_exception_data_t code, mac
 			printable = printable && text[c] >= 0x20 && text[c] < 0x7f;
 		}
 		if (printable) {
-			printf("usertrap:   x%u -> \"%s\"\n", message_registers[i], text);
+			trace_say("usertrap:   x%u -> \"%s\"\n", message_registers[i], text);
 		}
 	}
 
+	if (exception == EXC_BAD_ACCESS) {
+		/* the words of the stack above sp that look like return addresses into the shared cache (text at 0x180000000 + slide, 1.5 GB at most): a recursion shows as a repeating pattern */
+		uint64_t words[256], sp = (uint64_t)get_saved_state_sp(state), lo = 0x180000000ULL + slide, hits = 0;
+		unsigned printed = 0;
+
+		if (copyin((user_addr_t)sp, words, sizeof(words)) == 0) {
+			for (unsigned i = 0; i < 256 && printed < 40; i++) {
+				if (words[i] >= lo && words[i] < lo + 0x60000000ULL) {
+					trace_say("usertrap:   sp+0x%x: 0x%llx\n", i * 8, (unsigned long long)words[i]);
+					printed++;
+					hits++;
+				}
+			}
+		}
+		if (hits == 0) {
+			trace_say("usertrap:   no return addresses in the 2 KB above sp\n");
+		}
+		/* libmalloc's globals (iOS 16.5 20F66 cache, addresses of libsystem_malloc's data before the slide): the zone table near 0x1dd3d0040 and the default zone struct at 0x1dd3cc000 */
+		{
+			static const uint64_t spots[] = { 0x1dd3d0040ULL, 0x1dd3d0080ULL, 0x1dd3cc000ULL, 0x1dd3cc040ULL };
+
+			for (unsigned k = 0; k < 4; k++) {
+				uint64_t data[8];
+
+				if (copyin((user_addr_t)(spots[k] + slide), data, sizeof(data)) == 0) {
+					trace_say("usertrap:   malloc data 0x%llx: %016llx %016llx %016llx %016llx %016llx %016llx %016llx %016llx\n", (unsigned long long)spots[k],
+					    (unsigned long long)data[0], (unsigned long long)data[1], (unsigned long long)data[2], (unsigned long long)data[3], (unsigned long long)data[4],
+					    (unsigned long long)data[5], (unsigned long long)data[6], (unsigned long long)data[7]);
+				}
+			}
+		}
+		/* the object the repeating frames hold (a stack of 0x50-byte frames: the word at sp+0x20): its first 0xc0 bytes */
+		if (words[4] >= 0x100000000ULL && words[4] < MACH_VM_MAX_ADDRESS) {
+			uint64_t object[24];
+
+			if (copyin((user_addr_t)words[4], object, sizeof(object)) == 0) {
+				for (unsigned i = 0; i < 24; i += 4) {
+					trace_say("usertrap:   object 0x%llx +0x%x: %016llx %016llx %016llx %016llx\n", (unsigned long long)words[4], i * 8, (unsigned long long)object[i],
+					    (unsigned long long)object[i + 1], (unsigned long long)object[i + 2], (unsigned long long)object[i + 3]);
+				}
+			}
+		}
+	}
 	fp = (uint64_t)get_saved_state_fp(state);
 	for (int depth = 0; depth < 10 && plausible_user_address(fp) && (fp & 7) == 0; depth++) {
 		if (copyin((user_addr_t)fp, frame, sizeof(frame)) != 0) {
 			break;
 		}
-		printf("usertrap:   called from 0x%llx\n", (unsigned long long)frame[1]);
+		trace_say("usertrap:   called from 0x%llx\n", (unsigned long long)frame[1]);
 		if (frame[0] <= fp) {
 			break;
 		}
@@ -135,7 +229,7 @@ user_abort_trace(void)
 		slide = region->sr_slide;
 		vm_shared_region_deallocate(region);
 	}
-	printf("userabort: %s[%d] aborts, shared cache slide 0x%x; called from:", proc ? proc_name_address(proc) : "?",
+	trace_say("userabort: %s[%d] aborts, shared cache slide 0x%x; called from:\n", proc ? proc_name_address(proc) : "?",
 	    proc ? proc_pid(proc) : -1, slide);
 	fp = (uint64_t)get_saved_state_fp(state);
 	for (int depth = 0; depth < 24 && plausible_user_address(fp) && (fp & 7) == 0; depth++) {

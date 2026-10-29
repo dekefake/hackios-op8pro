@@ -129,6 +129,9 @@ Rules of thumb: a bare `./xl enter` or a bad arg can hang a phone; **never pass 
 | `cam_fake` | *diagnostic/tuning knob: see the header comment of this file* |
 | `cam_fake_fps` | *diagnostic/tuning knob: see the header comment of this file* |
 | `cam_frames` | *diagnostic/tuning knob: see the header comment of this file* |
+| `cam_focus` | OnePlus 8 Pro: the main camera's lens to iOS position N (0 furthest .. 1000) once the camera is up (`instantnoodle_lens.c`). |
+| `cam_lensscan` | OnePlus 8 Pro: `1` = after 90 frames the lens sweeps its codes 0..1000 in steps of 32 and logs `lens scan: code C sharpness S` (the frames' own sharpness), then keeps the sharpest; iOS' focus commands are ignored meanwhile. |
+| `cam_lensmax` | OnePlus 8 Pro: the lens' soft limit (largest code, 1..1014; default 1000). |
 | `cam_gain` | *diagnostic/tuning knob: see the header comment of this file* |
 | `cam_keep_mb` | *diagnostic/tuning knob: see the header comment of this file* |
 | `cam_mode` | *diagnostic/tuning knob: see the header comment of this file* |
@@ -142,7 +145,7 @@ Rules of thumb: a bare `./xl enter` or a bad arg can hang a phone; **never pass 
 
 | Boot-arg | Meaning |
 |---|---|
-| `cpufreq` | 1: raise every used EPSS group to its top row and enable the governor/thermal service. |
+| `cpufreq` | 1: raise every used EPSS group to its top row and enable the governor/thermal service. **Default on for `board=instantnoodle*`** (kernel `perf1`, 2026-10-27; without it the OnePlus 8 Pro's big cores stayed at 710-844 MHz); `cpufreq=0` turns it off. Other boards: off unless given. |
 | `cpufreq_gov` | Governor on (default with cpufreq=1); 0 = groups stay at their cap. |
 | `cpuload` | *diagnostic/tuning knob: see the header comment of this file* |
 | `ddr` | *diagnostic/tuning knob: see the header comment of this file* |
@@ -216,6 +219,12 @@ Rules of thumb: a bare `./xl enter` or a bad arg can hang a phone; **never pass 
 
 | Boot-arg | Meaning |
 |---|---|
+| `drain_bench` | 1 (OnePlus 8): the drain bench thread (below; built 2026-10-27, not yet run on the phone). Reads the battery gauge around every sleep (`power: meter:` lines, `kern.hackios.power_meter`). |
+| `drain_after` | Seconds after the gauge answers before the bench starts (default 90). |
+| `drain_cable` | Seconds the bench waits for the cable to come out (default 600); with it in, the figures are not a drain. |
+| `drain_awake` | Seconds of awake drain looked at before the first sleep (default 30). |
+| `drain_force` | 1 (default): ask for the system's sleep again when it has been awake `drain_gap` s (default 60) with the panel dark. 0: only iOS decides. |
+| `drain_count` | Sleeps after which the bench says "bench: DONE" (default 3); `drain_stop=1` then ends the bench. |
 | `gpu_sleep` | 0 keeps the GPU powered through system sleep. |
 | `sleep_max` | Cap every system sleep to S seconds (timed runs need it). |
 | `syssleep` | 0 refuses system sleep (default on with board=instantnoodle, off elsewhere). |
@@ -273,6 +282,12 @@ Rules of thumb: a bare `./xl enter` or a bad arg can hang a phone; **never pass 
 | `ufs_check` | Hash partitions with reference images. |
 | `ufs_native` | 1: kernel's own read-only UFS command list (hk_ufshc.c). |
 | `ufs_native_bench` | Native benchmark. |
+| `ufs_peek` | 1: dumps the UFS host controller's first 0x100 bytes of registers at boot (`ufshc_peek()`, read only; for the OnePlus 8 Pro, whose UEFI has no UFS driver). |
+| `ufs_8pro` | 1: the OnePlus 8 Pro's own UFS backend (`instantnoodle_ufs.c`, read only): the controller adopted as ABL left it, SMMU stream 0xe0 through a context of ours, START STOP UNIT, a 1 MB data buffer; the partitions of LUN 0 from its GPT become `/dev/ufs_NAME` and `/dev/rufs_NAME` (no loader page needed). Verified on the phone 2026-10-27 (256 MB in 305 ms). |
+| `hk_fast_halt` | 1 (a standalone boot): iOS's shutdown/restart (`reboot(2)`) syncs the var store and the data volume and goes straight back to the loader (reason 3: the loader switches off; 4: it resets), instead of XNU's own unmount sequence, which stalled on the HFS data volume. |
+| `hk_swap_slot` | **Disabled 2026-10-28** (the boot menu no longer has "Android (other slot)"; `instantnoodle_ufs_ab_swap()` refuses with EPERM): exchanging only the A/B attribute bytes of boot_a/boot_b left them disagreeing with the partition type GUIDs that ABL's `fastboot --set-active` moves with them, and the phone would not boot until its LUN 4 table was rebuilt over EDL. Change slots with `fastboot --set-active=a|b`. |
+| `ufs_8pro_test` | 1 (with `ufs_8pro=1`): at boot, reads the first bytes of a few partitions, checks `super`'s liblp magic and an unaligned read, times 256 MB; into the loader log (`ufs: 8pro test: ...`). |
+| `ufs8` | 1..9: experiments with the 8 Pro's controller (`instantnoodle_ufs.c`): 4 register dump, 5/6/7 controller/PHY/device re-initialisation, 8/9 SMMU stream entries (9 is the working recipe, read only). `ufs8pa=ADDR` places the area of mode 1. |
 | `ufs_native_check` | Native driver self-check. |
 | `ufs_shared_pa` | Physical address of the loader's storage page (loader passes it). |
 | `ufs_write` | 1: allow writes to /dev/rufs_darwin past BLOCK_WRITE_FIRST. |
@@ -407,13 +422,27 @@ Rules of thumb: a bare `./xl enter` or a bad arg can hang a phone; **never pass 
 
 | Boot-arg | Meaning |
 |---|---|
-| `fb_hz` | 60: switch the OnePlus panel back from 90 Hz. |
+| `gpu_stats` | 1: once a second `tl: u busy PERMILLE of 1 s in N submissions`, the 3D core's own busy time (`hk_adreno.c`). `glmirror=0` (`eagl.c`): see display.md. |
+| `fb_boost` | 0 (default): an experiment that did not pay: 1 = while frames are pushed at 50 a second or more every push holds every CPU group at its top row for 250 ms (`frameBoost()`, `hk_cpufreq_frames()`); no measurable effect on late frames (display.md). `fb_kicklog=1`: log only the `tl: k` line of each push (for measuring). |
+| `fb_hz` | 60: switch the OnePlus panel back from 90 Hz. **OnePlus 8 Pro (instantnoodlep): 60 or 120** (needs `fb_dcs=1` and the push path; its panel's own timing@1 commands); the profile uses **120** since 2026-10-28 (owner: clearly smoother). Give it once: with two `fb_hz=` the kernel and userland read different ones. The panel keeps its rate across RAM runs; ABL's reset brings it back to 60. |
 | `fb_probe=2` | OnePlus 8/8 Pro: besides `fb_probe=1`'s dump, a read-only raw dump of DSI0's controller (0xae94000), its D-PHY and PLL (+0x400, +0x900), both DSC encoders, INTF1's timing registers and the display clock controller, to the loader log (`display: DSI0+0x..:` lines). Owner-run 2026-10-27, no crash. |
 | `fb_dsc=N` | OnePlus 8 Pro: derives the DSC encoder set and the PPS of the FHD+ (checked against both encoders: all 148 words equal) and the two QHD+ modes from the device tree's `qcom,mdss-dsc-*` numbers, logged as `display: dsc ...`. `fb_dsc=2` also rewrites the derived FHD+ values into both encoders (only if every word matched) and reads them back. Owner-run 2026-10-27: 0 of 148 differ, 0 differ on read-back, screen unaffected. |
 | `fb_qhd=1`, `fb_qhd_secs=N` | **Experimental, left the panel black (2026-10-27): do not use without a force-reboot at hand.** OnePlus 8 Pro, needs `fb_dcs=1`: a throwaway attempt at the panel's 60 Hz QHD+ mode before iOS has the screen (panel switch + DSC packet, pipeline resized, test pattern for N s (20), then FHD+ put back). See docs/TODO.md T38. |
-| `fbwidth`, `fbheight` | The size iOS renders at (default 1125 x 2436, the iPhone X), GPU-scaled to the panel with `fb_push=2`. OnePlus 8 Pro: `fbwidth=1320 fbheight=2868` (iPhone 16 Pro Max size, 3x; about 1.25% stretch to QHD+ 1440 x 3168, 2% to the FHD+ panel mode now driven; status bar needs `libhackios-ui`). |
+| `modem` | OnePlus 8 Pro only (`bsd/dev/instantnoodle_modem.c`, `hk_mhi.c`). The X55 modem on PCIe 2, in steps, on a thread beside the system's start: `1` reads the control lines and PCIe 2's clocks; `2` PCIe 2 up and the modem's MHI registers read, then down; `3` as 2 plus the SMMU stream and `sbl1.mbn` through BHI; `4` MHI through the boot ROM and SBL and Sahara served from the phone's modem partition (all 15 images); `5` as 4, then the mission's channels started and QRTR listened to. Research use: changes hardware state; RAM runs only so far. | off |
+| `modem_keep` | `1`: PCIe 2 left up when the steps end. | 0 |
+| `modem_fw` | `a`: the firmware from `modem_a` instead of `modem_b` (LUN 4, FAT16). | b |
+| `modem_ids` | Sahara image id overrides/additions, `ID=FILE,ID=FILE` (files of `image/sdx55m/`). | built-in table |
+| `modem_secs`, `modem_watch`, `modem_qrtr` | seconds: Sahara's limit (60), watching the modem after the images (15), listening to QRTR in the mission (20). | |
+| `modem_quiet`, `modem_cycle`, `modem_lanes` | experiments on the mission: `modem_quiet=1` start the channels and say nothing (2: answer hellos only); `modem_cycle=1` reset the link with a full controller power cycle instead of PERST alone; `modem_lanes=2` tell the controller it has two lanes. | 0 |
+| `modem_chans` | bit mask of the MHI channel pairs started (LOOPBACK, DIAG, QDSS, EFS, QMI0, QMI1, IP_CTRL, IPCR, TF, DCI, DUN, IP_HW0: bits 0..11); the working set is `139` (LOOPBACK, DIAG, EFS, IPCR) with `modem_quiet=3` (plain first-link mission). | 0x881 |
+| `modem_bringup`, `modem_tftp`, `modem_efs`, `modem_sms` | `modem_bringup=1`: the QMI bring-up (DMS online, UIM PIN1 0000, NAS registration); `modem_tftp=1`: serve the modem's TFTP (QRTR service 4096); `modem_efs=1`: Sahara ids 16/17/20 from the phone's `mdm1m9kefs1/2/3` (LUN 5, read only) instead of the firmware's empty stubs (without it the modem spends minutes loading every carrier config); `modem_sms=1`: one test SMS to the owner's number once registered. | 0 |
+| `modem_service` | 1: after the registration the modem thread stays: it keeps `kern.hackios.cellular_*` / `modem_*` true (bars, state, operator), sends SMS written to `modem_sms_send`, decodes SMS received, and boots the modem again when its link goes away (a system sleep). Needs `modem_qrtr=` large (seconds the thread runs). | 0 |
+| `sbsigmode` | SpringBoard hook (userland): the signal mode forced on the cellular icon while registered (1 is "active"; 0 shows dots, 2 dim). | 1 |
+| `modem_blk`, `modem_resume` | largest TFTP block offered (1024); `modem_resume=1` RESUME_TX after every datagram (experiment). | |
+| `modem_probe`, `modem_nc` | `modem_probe=1`: step 3 first hands the boot ROM an unmapped address (proof of the SMMU path); `modem_nc=1`: buffers mapped non-cacheable (as the failed first tries). | 0 |
+| `fbwidth`, `fbheight` | The size iOS renders at (default 1125 x 2436, the iPhone X), GPU-scaled to the panel with `fb_push=2`. OnePlus 8 Pro: `fbwidth=1290 fbheight=2796` (iPhone 14/15 Pro Max size, 3x, since 2026-10-28: at the 1320 x 2868 used before, iOS 16.5's keyboard has no digits plane, K43; about 1.25% stretch to QHD+ 1440 x 3168, 2% to the FHD+ panel mode now driven; status bar needs `libhackios-ui`). |
 | `fb_subtype=N` | Overrides the DT `/product artwork-device-subtype` (iPhone X: 2436). It changes UIKit's whole layout class; not needed with `libhackios-ui`. |
-| `fb_probe` | 1: dump the OnePlus 8 display pipeline. |
+| `fb_probe` | 1: dump the OnePlus 8 display pipeline; 2: the mode registers of a QHD+ switch too; 3: also the VIG pipes' scalers (SSPP + 0xa00: version, state, coefficient tables), read only. |
 | `metal` | 1 Metal driver for test programs; 2 whole system (with metal_profile=1). |
 
 ### `iokit/Kernel/MiniIOSurface.cpp`
@@ -454,6 +483,7 @@ Rules of thumb: a bare `./xl enter` or a bad arg can hang a phone; **never pass 
 | `ca_rates=1`, `ca_links=1` | `inject.c`, `inject_sb.c` | diagnostics: list rate methods / display links |
 | `cc_fade=MS` | `inject_sb.c` | check-only workaround: eased Control Center fade |
 | `sb_clock=N` | `inject_sb.c` | status-bar clock centred N points further right (OnePlus camera hole) |
+| `sb_hud_dy=N` | `inject_sb.c` | volume HUD shifted N points down (default 160.4: level with the OnePlus 8 Pro's volume rocker; 0 = iOS's place). Placement unverified; the HUD's views are logged as `volume HUD:` |
 | `sb_delay=S` | `inject_sb.c` | SpringBoard start delay so apps register in a stable order (default 8 under `xl run`) |
 | `autounlock=0` | `inject_sb.c` | keep the lock screen (default: dismiss after 10 s) |
 | `siri_orb=0` | `inject_sb.c` | skip Siri orb shader prewarm (diagnostic) |

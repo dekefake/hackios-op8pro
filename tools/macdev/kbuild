@@ -1,0 +1,44 @@
+#!/bin/bash
+# kbuild WORKSPACE TAG FILE...   build the kernel in a private Docker build tree and leave it as out/kernel/mach.development.bcm2837.TAG
+#   WORKSPACE  main | cam | pwr | perf | front | lens   (volumes hk-ws, hk-ws-cam, hk-ws-pwr, hk-ws-perf, hk-ws-front, hk-ws-lens; each a full copy of the kernel tree: two builds in ONE tree corrupt it)
+#   FILE...    repo-relative files you changed (xnu/files/..., xnu-deps/..., wifi/...); streamed in from the Mac (fast; do not bind-mount the repo:
+#              the share is slow under Docker). A NEW kernel source file must also be added to xnu-src/.../bsd/conf/files (or osfmk/iokit conf)
+#              inside your volume, and to xnu/hackios.patch's list the way xnu/export.sh does -- ask if unsure.
+# An incremental build takes seconds to a few minutes. The build "ends with an error" (lldb macros): judge by the binary and `error:` lines.
+set -e
+cd "$(dirname "$(readlink -f "$0")")/../.."
+. tools/macdev/env.sh
+ws=$1; tag=$2; shift 2
+case $ws in main) vol=hk-ws ;; cam) vol=hk-ws-cam ;; pwr) vol=hk-ws-pwr ;; perf) vol=hk-ws-perf ;; front) vol=hk-ws-front ;; lens) vol=hk-ws-lens ;; *) echo "workspace: main|cam|pwr|perf|front|lens"; exit 1 ;; esac
+[ -n "$tag" ] && [ $# -gt 0 ] || { echo "usage: kbuild WORKSPACE TAG FILE..."; exit 1; }
+cat > /tmp/kinc-$ws.sh <<'IN'
+#!/bin/bash
+cd /ws; export THEOS=/opt/theos
+git config --global --add safe.directory '*' 2>/dev/null
+tar -xf - -C /ws 2>/dev/null
+for f in "$@"; do case $f in xnu/files/*) mkdir -p "$(dirname /ws/xnu-src/xnu-8796.121.2/${f#xnu/files/})"; cp "/ws/$f" "/ws/xnu-src/xnu-8796.121.2/${f#xnu/files/}" ;; esac; done
+# the phone's own Bluetooth firmware (/ws/btfw, streamed in once from op8pro-data/bt-fw, never in git) as a generated header: without it bt=4 and up cannot download it
+if [ -f /ws/btfw/htbtfw20.tlv ] && [ -f /ws/btfw/htnv20.bin ]; then
+python3 - <<'PYEOF'
+def arr(name, path):
+    d = open(path, 'rb').read()
+    return 'static const uint8_t %s[%d] = {\n%s\n};\n' % (name, len(d), ',\n'.join(','.join('0x%02x' % b for b in d[i:i+16]) for i in range(0, len(d), 16)))
+open('/ws/xnu-src/xnu-8796.121.2/bsd/dev/instantnoodle_btfw.h', 'w').write(arr('btfw_patch', '/ws/btfw/htbtfw20.tlv') + arr('btfw_nvm', '/ws/btfw/htnv20.bin'))
+PYEOF
+fi
+F=/ws/xnu-src/xnu-8796.121.2/bsd/conf/files
+grep -q instantnoodle_camera.c $F || sed -i 's#^bsd/dev/instantnoodle_slider.c\tstandard#bsd/dev/instantnoodle_slider.c\tstandard\nbsd/dev/instantnoodle_camera.c\tstandard#' $F
+grep -q instantnoodle_bt.c $F || sed -i 's#^bsd/dev/instantnoodle_camera.c\tstandard#bsd/dev/instantnoodle_camera.c\tstandard\nbsd/dev/instantnoodle_bt.c\tstandard#' $F
+grep -q instantnoodle_lens.c $F || sed -i 's#^bsd/dev/instantnoodle_camera.c\tstandard#bsd/dev/instantnoodle_camera.c\tstandard\nbsd/dev/instantnoodle_lens.c\tstandard#' $F
+grep -q hk_mhi.c $F || sed -i 's#^bsd/dev/instantnoodle_camera.c\tstandard#bsd/dev/instantnoodle_camera.c\tstandard\nbsd/dev/hk_mhi.c\tstandard#' $F
+grep -q instantnoodle_modem.c $F || sed -i 's#^bsd/dev/instantnoodle_camera.c\tstandard#bsd/dev/instantnoodle_camera.c\tstandard\nbsd/dev/instantnoodle_modem.c\tstandard#' $F
+grep -q instantnoodle_ufs.c $F || sed -i 's#^bsd/dev/instantnoodle_camera.c\tstandard#bsd/dev/instantnoodle_camera.c\tstandard\nbsd/dev/instantnoodle_ufs.c\tstandard#' $F
+./xnu-build.sh -j4 -k > /ws/kernel-build-inc.log 2>&1 || true
+K=xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837
+ls -l --time-style=full-iso $K; echo "error: lines: $(grep -c 'error:' /ws/kernel-build-inc.log)"; grep 'error:' /ws/kernel-build-inc.log | head -8
+cat $K > /out/kernel.new
+IN
+chmod +x /tmp/kinc-$ws.sh
+COPYFILE_DISABLE=1 tar -cf - "$@" | docker run --rm -i -v $vol:/ws -v theos:/opt/theos -v /tmp/kinc-$ws.sh:/kinc.sh:ro -v "$PWD/out/kernel":/out hackios-kernel-builder /kinc.sh "$@"
+mv out/kernel/kernel.new out/kernel/mach.development.bcm2837.$tag; chmod +x out/kernel/mach.development.bcm2837.$tag
+echo "built: out/kernel/mach.development.bcm2837.$tag"
