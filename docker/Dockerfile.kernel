@@ -1,0 +1,8 @@
+FROM hackios-uefi-builder
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      flex bison m4 perl autoconf automake libtool libtool-bin pkg-config rsync cpio zlib1g-dev libssl-dev libxml2-dev \
+      libncurses6 libtinfo6 libncurses-dev libtirpc-dev gawk bc file patch tar xz-utils python3 \
+ && rm -rf /var/lib/apt/lists/*
+ENV THEOS=/opt/theos
+WORKDIR /ws

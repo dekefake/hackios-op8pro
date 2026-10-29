@@ -5,6 +5,8 @@
 !/.gitignore
 !/.github/
 !/README.md
+!/INSTANTNOODLEP-PLAN.md
+!/docker/
 !/AGENTS.md
 !/CLAUDE.md
 !/LICENSE

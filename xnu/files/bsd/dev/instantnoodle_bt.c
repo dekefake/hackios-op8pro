@@ -44,7 +44,7 @@
  *          phone (2026-10-27): the version after reads patch 0x4509 (before: 0x0d2b), HCI_Reset and Read_Local_Version answer (HCI 5.2,
  *          manufacturer 0x1d = Qualcomm). Without the reset at the old rate the controller waited at 115200 while the host spoke 3.2 M
  *          and answered a wake-up with a firmware crash report (04 ff fd 01 08 ...); wrong-rate bytes make it flood. The firmware is the
- *          phone's own and is never in this repository: the kernel build (op8pro-data/docker/rebuild-bt.sh) turns op8pro-data/bt-fw/
+ *          phone's own and is never in this repository: the kernel build (docker/rebuild-bt.sh) turns op8pro-data/bt-fw/
  *          htbtfw20.tlv and htnv20.bin into a generated header, instantnoodle_btfw.h, that only the build's copy of this directory has;
  *          without it bt=4 says so and stops. Boot-args for experiments: bt_nvm=1 (set the NVM's baud byte 2 to 0), bt_skip=1|2|3 (no
  *          patch / no NVM), bt_cts=1 (the engine honours the controller's RTS).

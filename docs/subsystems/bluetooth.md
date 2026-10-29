@@ -25,7 +25,7 @@ Things learned the hard way (all in the file's header comment too):
 - Firmware order (btqca.c): the patch, the NVM, **HCI_Reset at the download's rate (115200)**, only then the host to 3.2 Mbaud (tag 17 byte 1 = 0x11).
 - After the firmware the controller uses Qualcomm in-band sleep: a 0xfd (wake-up) is answered with 0xfc; the host sends 0xfd before the first packet and never sends 0xfe.
 - RX runs with the controller's flow control (no "RFR open"), TX honours CTS: a 1 ms poll cannot keep up with 3.2 Mbaud otherwise.
-- The firmware is the phone's own and **never in a repository**: `op8pro-data/docker/rebuild-bt.sh` turns `op8pro-data/bt-fw/*` into a generated header (`instantnoodle_btfw.h`, not committed) that `instantnoodle_bt.c` includes if present.
+- The firmware is the phone's own and **never in a repository**: `docker/rebuild-bt.sh` turns `op8pro-data/bt-fw/*` into a generated header (`instantnoodle_btfw.h`, not committed) that `instantnoodle_bt.c` includes if present.
 
 ## iOS side (userland `BLUETOOTH=1`; the design is the upstream author's, commit c4379c2 of `iphont-xnu-userland`)
 - **bluetoothd talks HCI itself.** `BlueTool` is only a boot helper: bluetoothd asks the Mach service `com.apple.BlueTool` to run `RunBuiltinScript` init/boot/deepsleep. `mkjobs.py` keeps
