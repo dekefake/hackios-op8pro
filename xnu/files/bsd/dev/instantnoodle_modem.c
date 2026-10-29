@@ -193,20 +193,29 @@ static bool cell_started;
 static volatile bool cell_mt_pending;  /* a new message is waiting in the card or the modem's memory (WMS event report) */
 static uint8_t cell_mt_storage;
 static uint32_t cell_mt_index;
+static volatile bool cell_route_pending;   /* a message came in the event report itself (WMS transfer route): decoded and acknowledged by the service loop */
+static bool cell_route_ack;
+static uint32_t cell_route_tid, cell_route_len;
+static uint8_t cell_route_format, cell_route_pdu[200];
 static struct {
 	char state[120];                /* "off", "starting", "registered LTE", ... */
 	int bars;                       /* 0..4 */
 	int dbm;
 	int registered;
 	char operator_name[64];
-	char sms_request[200];          /* "NUMBER TEXT" written to kern.hackios.modem_sms_send, taken by the modem's thread */
+	char qmi_request[420];          /* "SERVICE MSGID PORT HEXBYTES" written to kern.hackios.modem_qmi: a QMI request typed by hand, for experiments */
+	volatile bool qmi_pending;
+	char qmi_answer[1800];
+	char sms_request[700];          /* "NUMBER TEXT" written to kern.hackios.modem_sms_send, taken by the modem's thread */
 	volatile bool sms_pending;
 	char sms_status[120];
 	char sms_last[240];             /* the latest message received: "NUMBER: TEXT" */
 	uint32_t sms_received;
+	char sms_ring[8][240];          /* the last eight messages received, entry n % 8 for the n-th: "NUMBER: TEXT" (kern.hackios.modem_sms_ring) */
 	bool event_report_on;
 	uint64_t next_poll;
 } cell = { .state = "off", .sms_status = "none", .sms_last = "" };
+static bool option_sms_self;            /* modem_sms_self=1: one test SMS to the SIM's own number once registered */
 static bool option_sms;                 /* modem_sms=1: one test SMS to the owner once registered */
 static bool option_bringup;             /* modem_bringup=1: the radio brought online and the SIM and network watched */
 static bool option_hw;                  /* (unused) */
@@ -1772,6 +1781,8 @@ qrtr_send(uint32_t type, uint32_t from_port, uint32_t to_node, uint32_t to_port,
 
 /* a QMI client over QRTR: our one port, the reply of the request in flight */
 #define QMI_PORT                0x4000u
+#define QMI_PORT6               0x4003u         /* the second QMI client (the IPv6 data session: WDS clients are per QRTR port) */
+static uint32_t qmi_src_port = QMI_PORT;       /* the port the next request goes out from */
 #define IPA_SERVER_PORT         0x4001u         /* our side of the IPA QMI service (0x31, version 1, instance 1): the modem's driver is its client */
 static void ipa_server_request(uint32_t from_node, uint32_t from_port, const uint8_t *q, uint32_t length);
 static struct {
@@ -2168,7 +2179,7 @@ qrtr_packet(const uint8_t *d, uint32_t length, uint32_t dl_channel)
 		ipa_server_request(h.from_node, h.from_port, d + at, h.size);
 		return;
 	}
-	if (h.type == QRTR_DATA && h.to_port == QMI_PORT && h.size >= 7) {
+	if (h.type == QRTR_DATA && (h.to_port == QMI_PORT || h.to_port == QMI_PORT6) && h.size >= 7) {
 		const uint8_t *q = d + at;
 		uint32_t tl = q[5] | q[6] << 8;
 
@@ -2212,10 +2223,23 @@ qrtr_packet(const uint8_t *d, uint32_t length, uint32_t dl_channel)
 					if (t + 3 + n > tl) {
 						break;
 					}
-					if (q[7 + t] == 0x11 && n >= 5) {
+					if (q[7 + t] == 0x10 && n >= 5) {
+						/* TLV 0x10: a message stored (storage type, index): read with WMS Raw Read */
 						cell_mt_storage = q[7 + t + 3];
 						cell_mt_index = (uint32_t)(q[7 + t + 4] | q[7 + t + 5] << 8 | q[7 + t + 6] << 16 | (uint32_t)q[7 + t + 7] << 24);
 						cell_mt_pending = true;
+					} else if (q[7 + t] == 0x11 && n >= 8) {
+						/* TLV 0x11: a message transferred, not stored (the route of this SIM): ack indicator (0: to be acknowledged), transaction id, format, length, the PDU */
+						uint32_t len = q[7 + t + 3 + 6] | q[7 + t + 3 + 7] << 8;
+
+						if (len <= sizeof(cell_route_pdu) && 8 + len <= n && !cell_route_pending) {
+							cell_route_ack = q[7 + t + 3] == 0;
+							cell_route_tid = (uint32_t)(q[7 + t + 4] | q[7 + t + 5] << 8 | q[7 + t + 6] << 16 | (uint32_t)q[7 + t + 7] << 24);
+							cell_route_format = q[7 + t + 3 + 5];
+							cell_route_len = len;
+							memcpy(cell_route_pdu, q + 7 + t + 3 + 8, len);
+							cell_route_pending = true;
+						}
 					}
 					t += 3 + n;
 				}
@@ -2901,7 +2925,7 @@ qmi_call_at(uint32_t node, uint32_t port, uint16_t message, const uint8_t *tlvs,
 	q[6] = (uint8_t)(tlv_length >> 8);
 	memcpy(q + 7, tlvs, tlv_length);
 	qmi_reply.have = false;
-	if (qrtr_send(QRTR_DATA, QMI_PORT, node, port, q, 7 + tlv_length) != 0) {
+	if (qrtr_send(QRTR_DATA, qmi_src_port, node, port, q, 7 + tlv_length) != 0) {
 		return EIO;
 	}
 	for (uint64_t until = mhi_op_nanoseconds(NULL) + (uint64_t)ms * 1000000ull; mhi_op_nanoseconds(NULL) < until;) {
@@ -3226,65 +3250,197 @@ nas_registration(uint8_t *registration, uint8_t *radio)
 }
 
 
-/* WMS Raw Send of one SMS-SUBMIT (3GPP, default SMSC of the card), GSM 7-bit text. Only started with modem_sms=1, towards the number given in `modem_sms_to` (digits, international, no plus) */
+/*
+ * WMS Raw Send of SMS-SUBMIT messages (3GPP, the card's own SMSC): `text` is UTF-8. In the GSM 7-bit default alphabet (with its escape table) when every character is in it, else in UCS-2
+ * (UTF-16: an emoji is a surrogate pair); more than one message's worth (160 septets, 70 UCS-2 units) goes as concatenated parts (a user data header 05 00 03 REF TOTAL SEQ; 153 / 67 per part).
+ * Only started with modem_sms=1 (the owner's number, for tests), by `hk_cell sms NUMBER TEXT` / the sysctl modem_sms_send, or by hk_smsd for what Messages wants sent.
+ */
 static int
-wms_send_text(const char *to, const char *text)
+gsm7_of(uint32_t cp, uint8_t out[2])
 {
-	uint8_t pdu[180], t[200];
-	uint32_t n = 0, k = 0, digits = (uint32_t)strlen(to), len = (uint32_t)strlen(text), bits = 0, acc = 0, udl = 0;
-	uint8_t ud[140];
-	uint8_t raw[3 + 180];
+	static const struct { uint32_t cp; uint8_t g; } basic[] = { { 0x40, 0x00 }, { 0xa3, 0x01 }, { 0x24, 0x02 }, { 0xa5, 0x03 }, { 0xe8, 0x04 }, { 0xe9, 0x05 }, { 0xf9, 0x06 }, { 0xec, 0x07 },
+		{ 0xf2, 0x08 }, { 0xc7, 0x09 }, { 0x0a, 0x0a }, { 0xd8, 0x0b }, { 0xf8, 0x0c }, { 0x0d, 0x0d }, { 0xc5, 0x0e }, { 0xe5, 0x0f }, { 0x5f, 0x11 }, { 0xc6, 0x1c }, { 0xe6, 0x1d },
+		{ 0xdf, 0x1e }, { 0xc9, 0x1f }, { 0xa4, 0x24 }, { 0xa1, 0x40 }, { 0xc4, 0x5b }, { 0xd6, 0x5c }, { 0xd1, 0x5d }, { 0xdc, 0x5e }, { 0xa7, 0x5f }, { 0xbf, 0x60 }, { 0xe4, 0x7b },
+		{ 0xf6, 0x7c }, { 0xf1, 0x7d }, { 0xfc, 0x7e }, { 0xe0, 0x7f } };
+	static const struct { uint32_t cp; uint8_t g; } escaped[] = { { 0x0c, 0x0a }, { 0x5e, 0x14 }, { 0x7b, 0x28 }, { 0x7d, 0x29 }, { 0x5c, 0x2f }, { 0x5b, 0x3c }, { 0x7e, 0x3d },
+		{ 0x5d, 0x3e }, { 0x7c, 0x40 }, { 0x20ac, 0x65 } };
 
-	pdu[n++] = 0x00;                       /* no SMSC in the PDU: the card's own is used */
-	pdu[n++] = 0x01;                       /* SMS-SUBMIT, relative validity absent */
-	pdu[n++] = 0x00;                       /* message reference (the modem sets it) */
-	pdu[n++] = (uint8_t)digits;
-	pdu[n++] = 0x91;                       /* international, ISDN numbering */
-	for (uint32_t i = 0; i < digits; i += 2) {
-		uint8_t lo = (uint8_t)(to[i] - '0'), hi = i + 1 < digits ? (uint8_t)(to[i + 1] - '0') : 0x0f;
-
-		pdu[n++] = (uint8_t)(hi << 4 | lo);
-	}
-	pdu[n++] = 0x00;                       /* PID */
-	pdu[n++] = 0x00;                       /* DCS: GSM 7-bit default alphabet */
-	for (uint32_t i = 0; i < len && udl < 160; i++) {
-		acc |= (uint32_t)(text[i] & 0x7f) << bits;
-		bits += 7;
-		udl++;
-		while (bits >= 8) {
-			ud[k++] = (uint8_t)acc;
-			acc >>= 8;
-			bits -= 8;
+	for (unsigned i = 0; i < sizeof(basic) / sizeof(basic[0]); i++) {
+		if (basic[i].cp == cp) {
+			out[0] = basic[i].g;
+			return 1;
 		}
 	}
-	if (bits > 0) {
-		ud[k++] = (uint8_t)acc;
+	for (unsigned i = 0; i < sizeof(escaped) / sizeof(escaped[0]); i++) {
+		if (escaped[i].cp == cp) {
+			out[0] = 0x1b;
+			out[1] = escaped[i].g;
+			return 2;
+		}
 	}
-	pdu[n++] = (uint8_t)udl;
-	memcpy(pdu + n, ud, k);
-	n += k;
+	if (cp >= 0x20 && cp < 0x7f && cp != 0x60) {
+		out[0] = (uint8_t)cp;           /* printable ASCII is the same septet (the ones that are not are in the tables above) */
+		return 1;
+	}
+	return 0;
+}
+
+/* septets packed into bytes from bit `at` of `out` (zeroed by the caller) */
+static void
+pack7(uint8_t *out, uint32_t at, const uint8_t *sept, uint32_t count)
+{
+	for (uint32_t i = 0; i < count; i++, at += 7) {
+		uint32_t v = (uint32_t)(sept[i] & 0x7f) << (at & 7);
+
+		out[at >> 3] |= (uint8_t)v;
+		if ((at & 7) > 1) {
+			out[(at >> 3) + 1] |= (uint8_t)(v >> 8);
+		}
+	}
+}
+
+static int
+wms_send_pdu(const uint8_t *pdu, uint32_t n)
+{
+	uint8_t raw[3 + 200], t[220];
+	uint32_t k = 0;
+	int e;
+
 	raw[0] = 6;                            /* format: 3GPP point to point */
 	raw[1] = (uint8_t)n;
 	raw[2] = (uint8_t)(n >> 8);
 	memcpy(raw + 3, pdu, n);
-	k = 0;
 	tlv_put(t, &k, 0x01, raw, (uint16_t)(3 + n));
-	{
-		int e = qmi_call(5, 0x0020, t, k, 30000);
+	e = qmi_call(5, 0x0020, t, k, 30000);
+	say("modem: sms: WMS raw send of %u bytes: %s (result %u error %u)\n", n, e == 0 ? "answered" : "NO REPLY", qmi_reply.result, qmi_reply.error);
+	if (e == 0 && qmi_reply.result == 0) {
+		uint32_t m;
+		const uint8_t *c = qmi_tlv(0x01, &m);
 
-		say("modem: sms: WMS raw send of %u bytes: %s (result %u error %u)\n", n, e == 0 ? "answered" : "NO REPLY", qmi_reply.result, qmi_reply.error);
-		if (e == 0) {
-			qmi_hex("WMS raw send reply TLVs", qmi_reply.data, qmi_reply.length);
-		}
-		if (e == 0 && qmi_reply.result == 0) {
-			uint32_t m;
-			const uint8_t *c = qmi_tlv(0x01, &m);
-
-			say("modem: sms: SENT, message id %u\n", c != NULL && m >= 2 ? c[0] | c[1] << 8 : 0xffff);
-			return 0;
-		}
-		return e != 0 ? e : EIO;
+		say("modem: sms: SENT, message id %u\n", c != NULL && m >= 2 ? c[0] | c[1] << 8 : 0xffff);
+		return 0;
 	}
+	return e != 0 ? e : EIO;
+}
+
+static int
+wms_send_text(const char *to, const char *text)
+{
+	static uint8_t reference;
+	/* static: only the modem's thread sends, and its stack (16 KB, with the QMI calls and QRTR buffers below this) cannot hold 8 KB more (it did not: the kernel hung) */
+	static uint32_t cp[512], units[1024];
+	static uint8_t sept[1536];
+	uint32_t ncp = 0, nunits = 0, ns = 0, digits = (uint32_t)strlen(to);
+	bool gsm = true;
+	const uint8_t *u = (const uint8_t *)text;
+	uint32_t total, per, parts, done = 0;
+	int result = 0;
+
+	while (*u != 0 && ncp < 512) {
+		uint32_t c = *u++, more = 0;
+
+		if (c >= 0xf0) { c &= 7; more = 3; } else if (c >= 0xe0) { c &= 15; more = 2; } else if (c >= 0xc0) { c &= 31; more = 1; } else if (c >= 0x80) { c = '?'; }
+		while (more-- > 0 && (*u & 0xc0) == 0x80) {
+			c = c << 6 | (*u++ & 0x3f);
+		}
+		cp[ncp++] = c;
+	}
+	for (uint32_t i = 0; i < ncp; i++) {
+		uint8_t g[2];
+		int w = gsm ? gsm7_of(cp[i], g) : 0;
+
+		if (w == 0) {
+			gsm = false;
+		} else if (ns + (uint32_t)w <= sizeof(sept)) {
+			sept[ns++] = g[0];
+			if (w == 2) {
+				sept[ns++] = g[1];
+			}
+		}
+		if (cp[i] >= 0x10000) {
+			units[nunits++] = 0xd800 + ((cp[i] - 0x10000) >> 10);
+			units[nunits++] = 0xdc00 + ((cp[i] - 0x10000) & 0x3ff);
+		} else {
+			units[nunits++] = cp[i];
+		}
+	}
+	total = gsm ? ns : nunits;
+	say("modem: sms: encoding: %u characters (%u code points), %s: %u %s, a %u-digit number\n", (uint32_t)strlen(text), ncp, gsm ? "GSM 7-bit" : "UCS-2", total, gsm ? "septets" : "units", digits);
+	if (total == 0 || digits == 0 || digits > 20) {
+		say("modem: sms: nothing to send (total %u, digits %u)\n", total, digits);
+		return EINVAL;
+	}
+	per = total <= (gsm ? 160u : 70u) ? total : (gsm ? 153u : 67u);
+	parts = total <= (gsm ? 160u : 70u) ? 1 : (total + per - 1) / per;
+	reference++;
+	say("modem: sms: %u part(s) of up to %u, reference %u\n", parts, per, reference);
+	for (uint32_t part = 0; part < parts; part++) {
+		uint32_t from = done, count = total - done < per ? total - done : per, n = 0;
+		uint8_t pdu[200], ud[160];
+		bool multi = parts > 1;
+
+		if (multi && count == per && ((gsm && sept[from + count - 1] == 0x1b) || (!gsm && units[from + count - 1] >= 0xd800 && units[from + count - 1] < 0xdc00))) {
+			count--;                       /* not between the halves of one character */
+		}
+		done += count;
+		pdu[n++] = 0x00;                       /* no SMSC in the PDU: the card's own is used */
+		pdu[n++] = multi ? 0x41 : 0x01;        /* SMS-SUBMIT, relative validity absent, a user data header in front when in parts */
+		pdu[n++] = 0x00;                       /* message reference (the modem sets it) */
+		pdu[n++] = (uint8_t)digits;
+		pdu[n++] = 0x91;                       /* international, ISDN numbering */
+		for (uint32_t i = 0; i < digits; i += 2) {
+			uint8_t lo = (uint8_t)(to[i] - '0'), hi = i + 1 < digits ? (uint8_t)(to[i + 1] - '0') : 0x0f;
+
+			pdu[n++] = (uint8_t)(hi << 4 | lo);
+		}
+		pdu[n++] = 0x00;                       /* PID */
+		pdu[n++] = gsm ? 0x00 : 0x08;          /* DCS: GSM 7-bit default alphabet, or UCS-2 */
+		bzero(ud, sizeof(ud));
+		if (gsm) {
+			uint32_t bytes;
+
+			if (multi) {
+				static const uint8_t header[3] = { 0x05, 0x00, 0x03 };
+
+				memcpy(ud, header, 3);
+				ud[3] = reference; ud[4] = (uint8_t)parts; ud[5] = (uint8_t)(part + 1);
+				pack7(ud, 6 * 8 + 1, sept + from, count);   /* (one fill bit: the text starts at a septet boundary, 7 septets in) */
+				pdu[n++] = (uint8_t)(7 + count);
+				bytes = (6 * 8 + 1 + count * 7 + 7) / 8;
+			} else {
+				pack7(ud, 0, sept + from, count);
+				pdu[n++] = (uint8_t)count;
+				bytes = (count * 7 + 7) / 8;
+			}
+			memcpy(pdu + n, ud, bytes);
+			n += bytes;
+		} else {
+			uint32_t bytes = 0;
+
+			if (multi) {
+				static const uint8_t header[3] = { 0x05, 0x00, 0x03 };
+
+				memcpy(pdu + n + 1, header, 3);
+				pdu[n + 4] = reference; pdu[n + 5] = (uint8_t)parts; pdu[n + 6] = (uint8_t)(part + 1);
+				bytes = 6;
+			}
+			pdu[n] = (uint8_t)(bytes + 2 * count);
+			n++;
+			if (multi) {
+				n += 6;
+			}
+			for (uint32_t i = 0; i < count; i++) {
+				pdu[n++] = (uint8_t)(units[from + i] >> 8);
+				pdu[n++] = (uint8_t)units[from + i];
+			}
+		}
+		say("modem: sms: part %u/%u: %u %s, PDU of %u bytes\n", part + 1, parts, count, gsm ? "septets" : "units", n);
+		if ((result = wms_send_pdu(pdu, n)) != 0) {
+			say("modem: sms: part %u/%u not sent: %d\n", part + 1, parts, result);
+			return result;
+		}
+	}
+	return result;
 }
 
 /*
@@ -3299,6 +3455,7 @@ wms_send_text(const char *to, const char *text)
 #define QMI_WDA                 0x1a
 static unsigned option_data;            /* modem_data=1: the session after registration; 2: and a DNS query through it as a test */
 static unsigned option_data_ep = 0x30004;   /* modem_data_ep=HEX: endpoint type (high half, 3 = PCIe) and interface id (low half); other ids are tried when the modem refuses it */
+static unsigned option_data6 = 2;       /* modem_data6: 0 no IPv6 session, 1 a second WDS client after the IPv4 call, 2 (default) the IPv6 call FIRST (the carrier profile's PDP type is IPv6: the modem makes IPv4 by 464XLAT on that PDN, and an IPv6 call after the IPv4 one fails, reason 0xec) */
 static unsigned option_data_qmap = 1;   /* modem_data_qmap=0: raw IP packets with no QMAP header */
 static unsigned option_en1 = 1;         /* modem_en1=0: no network interface for iOS (the session and the DNS test only) */
 static char option_apn[64];             /* modem_apn=NAME: the access point name of the session (else the modem's default profile) */
@@ -3311,6 +3468,8 @@ static struct {
 	uint16_t dns_id;
 	bool dns_answered;
 	unsigned said;
+	bool format_done;
+	uint32_t ep_type, ep_iface;             /* the data port the modem accepted (WDA) */
 } data;
 
 static uint16_t
@@ -3332,18 +3491,18 @@ data_checksum(const uint8_t *d, uint32_t n)
 
 /* One IPv4 packet to the modem (QMAP-framed unless modem_data_qmap=0). */
 static bool
-data_send(const uint8_t *packet, uint32_t length)
+data_send_mux(const uint8_t *packet, uint32_t length, uint8_t mux)
 {
 	uint8_t f[2048 + 4];
 	uint32_t n = 0;
 
-	if (!data.up || length == 0 || length > 2048) {
+	if (length == 0 || length > 2048) {
 		data.dropped_out++;
 		return false;
 	}
 	if (option_data_qmap) {
 		f[0] = 0;
-		f[1] = data.mux;
+		f[1] = mux;
 		f[2] = (uint8_t)(length >> 8);
 		f[3] = (uint8_t)length;
 		n = 4;
@@ -3356,6 +3515,16 @@ data_send(const uint8_t *packet, uint32_t length)
 	}
 	data.to_modem++;
 	return true;
+}
+
+static bool
+data_send(const uint8_t *packet, uint32_t length)
+{
+	if (!data.up) {
+		data.dropped_out++;
+		return false;
+	}
+	return data_send_mux(packet, length, data.mux);
 }
 
 /* the DNS query for example.com (A), from `src` to `dst`, as one IPv4 packet in `out`; its length */
@@ -3624,6 +3793,265 @@ cl_dhcp_answer(const uint8_t *frame, size_t length, const uint8_t *udp)
 	return true;
 }
 
+/*
+ * ---- IPv6 on en1 ----
+ * The modem's IPv6 session (a second WDS client: data_bringup6) gives a global address, a prefix and DNS servers; the packets are the same Ethernet frames of ours, with the type 0x86dd.
+ * What a router on a link does is done here: Router Advertisements (a prefix to autoconfigure from, no on-link flag: everything goes to the router; the MTU; the DNS servers, RFC 8106),
+ * answers to Router Solicitations and to Neighbor Solicitations (for the router: its link-local address fe80::1, and whatever else is asked), and silence for the rest of the link-local
+ * traffic (multicast listener reports, Duplicate Address Detection, mDNS...), which is not the modem's business. Everything else goes to the modem as QMAP mux 2.
+ */
+static const uint8_t cl6_router_ll[16] = { 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+static struct {
+	volatile bool up;
+	uint8_t address[16], gateway[16], dns[2][16];
+	uint32_t prefix_length, mtu, handle;
+	uint64_t next_ra;
+	uint64_t ra_sent, rs_seen, ns_seen, ns_answered, ns_dad, mld_dropped, multicast_dropped, to_modem, from_modem, dropped_out, dropped_in;
+	unsigned logged;
+} cl6;
+#define CL6_MUX 2
+
+static void
+cl6_hex(char *out, size_t size, const uint8_t *a)
+{
+	snprintf(out, size, "%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x", a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15]);
+}
+
+static bool
+cl6_zero(const uint8_t *a)
+{
+	for (int i = 0; i < 16; i++) {
+		if (a[i] != 0) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/* the ICMPv6 checksum over the pseudo header and the message */
+static uint16_t
+cl6_checksum(const uint8_t *src, const uint8_t *dst, const uint8_t *icmp, uint32_t length)
+{
+	uint32_t sum = length + 58;
+
+	for (int i = 0; i < 16; i += 2) {
+		sum += (uint32_t)src[i] << 8 | src[i + 1];
+		sum += (uint32_t)dst[i] << 8 | dst[i + 1];
+	}
+	for (uint32_t i = 0; i + 1 < length; i += 2) {
+		sum += (uint32_t)icmp[i] << 8 | icmp[i + 1];
+	}
+	if (length & 1) {
+		sum += (uint32_t)icmp[length - 1] << 8;
+	}
+	while (sum >> 16) {
+		sum = (sum & 0xffff) + (sum >> 16);
+	}
+	return (uint16_t)~sum;
+}
+
+/* an ICMPv6 message from `src` to `dst` as a frame to the stack (hop limit 255, as neighbour discovery wants it) */
+static void
+cl6_send_icmp(const uint8_t *src, const uint8_t *dst, const uint8_t *dst_mac, uint8_t *icmp, uint32_t length)
+{
+	uint8_t frame[14 + 40 + 192];
+	uint16_t sum;
+
+	if (length > 192) {
+		return;
+	}
+	memcpy(frame, dst_mac, 6);
+	memcpy(frame + 6, cl_router_mac, 6);
+	cl_put16(frame + 12, 0x86dd);
+	bzero(frame + 14, 40);
+	frame[14] = 0x60;
+	cl_put16(frame + 18, length);
+	frame[20] = 58;
+	frame[21] = 255;
+	memcpy(frame + 22, src, 16);
+	memcpy(frame + 38, dst, 16);
+	icmp[2] = icmp[3] = 0;
+	sum = cl6_checksum(src, dst, icmp, length);
+	icmp[2] = (uint8_t)(sum >> 8);
+	icmp[3] = (uint8_t)sum;
+	memcpy(frame + 54, icmp, length);
+	hk_net_input_unit(CL_UNIT, frame, 54 + length);
+}
+
+/* a Router Advertisement, to the all-nodes address or to whoever solicited it */
+static void
+cl6_send_ra(const uint8_t *dst, const uint8_t *dst_mac, const char *why)
+{
+	uint8_t icmp[160];
+	uint32_t n = 0, mtu = cl6.mtu >= 1280 && cl6.mtu <= 1500 ? cl6.mtu : 1280, dns = (cl6_zero(cl6.dns[0]) ? 0 : 1) + (cl6_zero(cl6.dns[1]) ? 0 : 1);
+	char text[48];
+
+	if (!cl6.up) {
+		return;
+	}
+	bzero(icmp, sizeof(icmp));
+	icmp[n++] = 134;                        /* Router Advertisement */
+	icmp[n++] = 0;
+	n += 2;                                 /* checksum */
+	icmp[n++] = 64;                         /* hop limit */
+	icmp[n++] = 0;                          /* no managed / other configuration: SLAAC and the RDNSS below */
+	cl_put16(icmp + n, 1800);               /* router lifetime */
+	n += 2;
+	n += 8;                                 /* reachable and retransmit time: unspecified */
+	icmp[n++] = 1; icmp[n++] = 1;           /* source link-layer address */
+	memcpy(icmp + n, cl_router_mac, 6);
+	n += 6;
+	icmp[n++] = 5; icmp[n++] = 1;           /* MTU */
+	n += 2;
+	cl_put32(icmp + n, mtu);
+	n += 4;
+	icmp[n++] = 3; icmp[n++] = 4;           /* prefix information: /64 of the session's address, autonomous, not on-link */
+	icmp[n++] = 64;
+	icmp[n++] = 0x40;
+	cl_put32(icmp + n, 86400);
+	n += 4;
+	cl_put32(icmp + n, 14400);
+	n += 4;
+	n += 4;
+	memcpy(icmp + n, cl6.address, 8);       /* (the low 64 bits stay zero) */
+	n += 16;
+	if (dns > 0) {
+		icmp[n++] = 25; icmp[n++] = (uint8_t)(1 + 2 * dns);
+		n += 2;
+		cl_put32(icmp + n, 1800);
+		n += 4;
+		for (int d = 0; d < 2; d++) {
+			if (!cl6_zero(cl6.dns[d])) {
+				memcpy(icmp + n, cl6.dns[d], 16);
+				n += 16;
+			}
+		}
+	}
+	cl6_send_icmp(cl6_router_ll, dst, dst_mac, icmp, n);
+	cl6.ra_sent++;
+	cl6_hex(text, sizeof(text), cl6.address);
+	if (cl6.logged++ < 40) {
+		say("modem: en1: IPv6: router advertisement #%llu (%s): prefix %.19s::/64, MTU %u, %u DNS server(s), %u bytes\n", cl6.ra_sent, why, text, mtu, dns, n);
+	}
+}
+
+/* a frame of the stack with an IPv6 packet: neighbour and router discovery answered, local multicast dropped, the rest to the modem. true: handled (sent or deliberately not) */
+static bool
+cl6_transmit(const uint8_t *frame, size_t length)
+{
+	const uint8_t *ip = frame + 14, *icmp = ip + 40;
+	static const uint8_t all_nodes[16] = { 0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+	static const uint8_t all_nodes_mac[6] = { 0x33, 0x33, 0, 0, 0, 1 };
+	uint32_t payload;
+
+	if (length < 14 + 40 || (ip[0] >> 4) != 6) {
+		cl6.dropped_out++;
+		return false;
+	}
+	payload = (uint32_t)ip[4] << 8 | ip[5];
+	if (ip[6] == 58 && payload >= 8 && length >= 14 + 40 + 8) {
+		switch (icmp[0]) {
+		case 133:                       /* Router Solicitation: an advertisement to the asker (or to everybody if it has no address yet) */
+			cl6.rs_seen++;
+			if (cl6.logged++ < 40) {
+				say("modem: en1: IPv6: router solicitation #%llu\n", cl6.rs_seen);
+			}
+			if (cl6_zero(ip + 8)) {
+				cl6_send_ra(all_nodes, all_nodes_mac, "answer to a solicitation");
+			} else {
+				cl6_send_ra(ip + 8, frame + 6, "answer to a solicitation");
+			}
+			return true;
+		case 135:                       /* Neighbor Solicitation */
+			cl6.ns_seen++;
+			if (payload >= 24 && length >= 14 + 40 + 24) {
+				if (cl6_zero(ip + 8)) {
+					cl6.ns_dad++;   /* Duplicate Address Detection of the stack's own address: nobody else has it */
+					return true;
+				}
+				{
+					uint8_t na[32];
+
+					bzero(na, sizeof(na));
+					na[0] = 136;
+					na[4] = 0xe0;   /* router, solicited, override */
+					memcpy(na + 8, icmp + 8, 16);
+					na[24] = 2; na[25] = 1;
+					memcpy(na + 26, cl_router_mac, 6);
+					cl6_send_icmp(icmp + 8, ip + 8, frame + 6, na, 32);
+					cl6.ns_answered++;
+					if (cl6.logged++ < 40) {
+						char text[48];
+
+						cl6_hex(text, sizeof(text), icmp + 8);
+						say("modem: en1: IPv6: neighbor solicitation for %s answered (#%llu)\n", text, cl6.ns_answered);
+					}
+				}
+			}
+			return true;
+		case 130: case 131: case 132: case 143:    /* multicast listener discovery */
+			cl6.mld_dropped++;
+			return true;
+		case 134: case 136: case 137:   /* nobody but a router answers or redirects here */
+			return true;
+		default:
+			break;
+		}
+	}
+	if (ip[24] == 0xff || (ip[24] == 0xfe && (ip[25] & 0xc0) == 0x80)) {
+		cl6.multicast_dropped++;        /* multicast and link-local unicast stay on the link: there is nobody else on it */
+		return true;
+	}
+	if (!cl6.up || length - 14 > 2048) {
+		cl6.dropped_out++;
+		return false;
+	}
+	if (!data_send_mux(ip, (uint32_t)(length - 14), CL6_MUX)) {
+		cl6.dropped_out++;
+		return false;
+	}
+	cl6.to_modem++;
+	if (cl6.to_modem <= 5) {
+		char text[48];
+
+		cl6_hex(text, sizeof(text), ip + 24);
+		say("modem: en1: IPv6: packet #%llu to the modem: %u bytes, next header %u, to %s\n", cl6.to_modem, (uint32_t)(length - 14), ip[6], text);
+	}
+	return true;
+}
+
+/* an IPv6 packet from the modem to the stack */
+static void
+cl6_receive(const uint8_t *packet, uint32_t length)
+{
+	uint8_t frame[HK_NET_FRAME_MAX];
+
+	if (!cl6.up || length < 40 || length + 14 > sizeof(frame)) {
+		cl6.dropped_in++;
+		return;
+	}
+	memcpy(frame, cl_mac, 6);
+	memcpy(frame + 6, cl_router_mac, 6);
+	cl_put16(frame + 12, 0x86dd);
+	memcpy(frame + 14, packet, length);
+	cl6.from_modem++;
+	if (cl6.from_modem <= 5) {
+		char text[48];
+
+		cl6_hex(text, sizeof(text), packet + 8);
+		say("modem: en1: IPv6: packet #%llu from the modem: %u bytes, next header %u, from %s\n", cl6.from_modem, length, packet[6], text);
+	}
+	hk_net_input_unit(CL_UNIT, frame, 14 + length);
+}
+
+static void
+cl6_down(void)
+{
+	cl6.up = false;
+	bzero(cl6.address, sizeof(cl6.address));
+	cl6.handle = 0;
+}
+
 /* A frame from the stack: answered here, or its IP packet to the modem. */
 static bool
 cl_transmit(mbuf_t packet, size_t length)
@@ -3649,6 +4077,8 @@ cl_transmit(mbuf_t packet, size_t length)
 		} else {
 			cl_count.dropped_out++;
 		}
+	} else if (type == 0x86dd) {
+		ok = cl6_transmit(frame, length);
 	} else {
 		cl_count.not_ip4++;
 		ok = false;
@@ -3664,6 +4094,10 @@ cl_receive(const uint8_t *packet, uint32_t length)
 	uint8_t frame[HK_NET_FRAME_MAX];
 	uint32_t version = length > 0 ? packet[0] >> 4 : 0;
 
+	if (version == 6) {
+		cl6_receive(packet, length);
+		return;
+	}
 	if (length < 20 || length + 14 > sizeof(frame) || version != 4) {
 		cl_count.dropped_in++;
 		return;
@@ -3714,6 +4148,159 @@ cl_session_up(uint32_t address, uint32_t gateway, uint32_t mask, uint32_t dns1, 
 	say("modem: en1: %s, link %s\n", cl_attached ? "made" : "NOT made", cl_session.up ? "up" : "down");
 }
 
+static uint32_t data_le32(const uint8_t *v);
+static void data_put32(uint8_t *b, uint32_t *k, uint8_t type, uint32_t v);
+
+/* every TLV of the last QMI reply: type, length and the first bytes (the IPv6 settings' numbers are not certain: this is what shows them) */
+static void
+qmi_tlv_list(const char *what)
+{
+	for (uint32_t t = 0; t + 3 <= qmi_reply.length;) {
+		uint32_t n = qmi_reply.data[t + 1] | qmi_reply.data[t + 2] << 8;
+		char hex[3 * 24 + 1];
+		uint32_t m = n < 24 ? n : 24;
+
+		if (t + 3 + n > qmi_reply.length) {
+			break;
+		}
+		for (uint32_t i = 0; i < m; i++) {
+			snprintf(hex + 3 * i, 4, "%02x ", qmi_reply.data[t + 3 + i]);
+		}
+		say("modem: qmi: %s: TLV %#04x, %u bytes: %s%s\n", what, qmi_reply.data[t], n, hex, n > m ? "..." : "");
+		t += 3 + n;
+	}
+}
+
+/* the IPv6 session: a second WDS client (our QRTR port QMI_PORT6) bound to the QMAP mux 2 of the same data port, family 6, started, its settings read; then en1 gets its router */
+static void
+data_bringup6(void)
+{
+	uint8_t t[100];
+	uint32_t k, n;
+	const uint8_t *c;
+	int e;
+	char text[48];
+
+	if (!option_data6 || !data.format_done || !option_en1) {
+		say("modem: data6: not tried (modem_data6 %u, data format %s, en1 %u)\n", option_data6, data.format_done ? "set" : "NOT set", option_en1);
+		return;
+	}
+	qmi_src_port = QMI_PORT6;
+	{
+		uint8_t ep[8] = { (uint8_t)data.ep_type, (uint8_t)(data.ep_type >> 8), (uint8_t)(data.ep_type >> 16), (uint8_t)(data.ep_type >> 24), (uint8_t)data.ep_iface, (uint8_t)(data.ep_iface >> 8),
+			(uint8_t)(data.ep_iface >> 16), (uint8_t)(data.ep_iface >> 24) };
+		static const uint8_t mux = CL6_MUX, family = 6, preference = 6;
+
+		k = 0;
+		tlv_put(t, &k, 0x10, ep, 8);
+		tlv_put(t, &k, 0x11, &mux, 1);
+		e = qmi_call(QMI_WDS, 0x00a2, t, k, 5000);
+		say("modem: data6: WDS bind mux data port (mux %u) from port %#x: %s (result %u error %u)\n", mux, qmi_src_port, e == 0 ? "answered" : "NO REPLY", qmi_reply.result, qmi_reply.error);
+		k = 0;
+		tlv_put(t, &k, 0x01, &family, 1);
+		e = qmi_call(QMI_WDS, 0x004d, t, k, 5000);
+		say("modem: data6: WDS set IP family (IPv6): %s (result %u error %u)\n", e == 0 ? "answered" : "NO REPLY", qmi_reply.result, qmi_reply.error);
+		for (unsigned attempt = 0; attempt < 6 && cl6.handle == 0; attempt++) {
+			k = 0;
+			if (option_apn[0] != 0) {
+				tlv_put(t, &k, 0x14, option_apn, (uint16_t)strlen(option_apn));
+			}
+			tlv_put(t, &k, 0x19, &preference, 1);
+			e = qmi_call(QMI_WDS, 0x0020, t, k, 45000);
+			say("modem: data6: WDS start network interface (try %u): %s (result %u error %u)\n", attempt + 1, e == 0 ? "answered" : "NO REPLY", qmi_reply.result, qmi_reply.error);
+			if (e == 0) {
+				qmi_tlv_list("IPv6 start network reply");
+			}
+			if (e == 0 && qmi_reply.result == 0 && (c = qmi_tlv(0x01, &n)) != NULL && n >= 4) {
+				cl6.handle = data_le32(c);
+				break;
+			}
+			mission_pump(3000, NULL);
+		}
+	}
+	if (cl6.handle == 0) {
+		say("modem: data6: no IPv6 session\n");
+		qmi_src_port = QMI_PORT;
+		return;
+	}
+	k = 0;
+	data_put32(t, &k, 0x10, 0xa310);
+	e = qmi_call(QMI_WDS, 0x002d, t, k, 5000);
+	say("modem: data6: WDS get current settings: %s (result %u error %u)\n", e == 0 ? "answered" : "NO REPLY", qmi_reply.result, qmi_reply.error);
+	if (e != 0 || qmi_reply.result != 0) {
+		qmi_src_port = QMI_PORT;
+		return;
+	}
+	qmi_tlv_list("IPv6 settings");
+	qmi_src_port = QMI_PORT;
+	if ((c = qmi_tlv(0x25, &n)) != NULL && n >= 17) {
+		memcpy(cl6.address, c, 16);
+		cl6.prefix_length = c[16];
+	}
+	if ((c = qmi_tlv(0x26, &n)) != NULL && n >= 16) {
+		memcpy(cl6.gateway, c, 16);
+	}
+	if ((c = qmi_tlv(0x27, &n)) != NULL && n >= 16) {
+		memcpy(cl6.dns[0], c, 16);
+	}
+	if ((c = qmi_tlv(0x28, &n)) != NULL && n >= 16) {
+		memcpy(cl6.dns[1], c, 16);
+	}
+	if ((c = qmi_tlv(0x29, &n)) != NULL && n >= 4) {
+		cl6.mtu = data_le32(c);
+	}
+	cl6_hex(text, sizeof(text), cl6.address);
+	say("modem: data6: address %s/%u, MTU %u, DNS servers %s %s\n", text, cl6.prefix_length, cl6.mtu, cl6_zero(cl6.dns[0]) ? "none" : "yes", cl6_zero(cl6.dns[1]) ? "none" : "yes");
+	if (cl6_zero(cl6.address)) {
+		say("modem: data6: the session has no IPv6 address (TLV 0x25 missing: see the list above for where it is)\n");
+		return;
+	}
+	if (!cl_attached) {
+		cl_attached = hk_net_attach(&cl_link);
+		say("modem: en1: made (by the IPv6 session): %s\n", cl_attached ? "yes" : "NO");
+	}
+	data.receive = cl_receive;
+	cl6.up = true;
+	cl6.next_ra = 0;
+	if (cl_attached) {
+		hk_net_link_state_unit(CL_UNIT, true);
+	}
+	say("modem: data6: THE IPv6 SESSION IS UP; router advertisements follow\n");
+}
+
+/* every few seconds a Router Advertisement (soon after the session, then every 20 s) */
+static void
+cl6_tick(uint64_t now)
+{
+	static const uint8_t all_nodes[16] = { 0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+	static const uint8_t all_nodes_mac[6] = { 0x33, 0x33, 0, 0, 0, 1 };
+
+	if (!cl6.up || now < cl6.next_ra) {
+		return;
+	}
+	cl6_send_ra(all_nodes, all_nodes_mac, "periodic");
+	cl6.next_ra = now + (cl6.ra_sent < 4 ? 3000000000ull : 20000000000ull);
+}
+
+/* The modem went away (or is about to be started again): no session, en1's link down; the queue and the counters of the old one forgotten. */
+static void
+data_down(void)
+{
+	data.up = false;
+	data.format_done = false;
+	data.handle = 0;
+	data.address = data.gateway = data.mask = data.dns1 = data.dns2 = data.mtu = 0;
+	cl6_down();
+	data.dns_answered = false;
+	data_in.head = data_in.tail = 0;
+	lck_mtx_lock(&cl_lock);
+	cl_session.up = false;
+	lck_mtx_unlock(&cl_lock);
+	if (cl_attached) {
+		hk_net_link_state_unit(CL_UNIT, false);
+	}
+}
+
 static uint32_t
 data_le32(const uint8_t *v)
 {
@@ -3728,6 +4315,7 @@ data_put32(uint8_t *b, uint32_t *k, uint8_t type, uint32_t v)
 	tlv_put(b, k, type, w, 4);
 }
 
+static void data_bringup6(void);
 static bool
 data_bringup(void)
 {
@@ -3744,6 +4332,7 @@ data_bringup(void)
 		return false;
 	}
 	data.mux = 1;
+	data.handle = 0;
 	/* 1. the data format of the MHI port; the interface id the modem wants is not known: the configured one first, then the others */
 	for (unsigned i = 0; i <= sizeof(ifaces) / sizeof(ifaces[0]) && !format; i++) {
 		uint32_t iface = i == 0 ? ep_iface : ifaces[i - 1];
@@ -3771,6 +4360,16 @@ data_bringup(void)
 	}
 	if (!format) {
 		return false;
+	}
+	data.format_done = true;
+	data.ep_type = ep_type;
+	data.ep_iface = ep_iface;
+	if (option_data6 == 2) {
+		data_bringup6();
+		if (cl6.up) {
+			say("modem: data: the IPv6 session is up: no IPv4 call (the carrier's PDN is IPv6-only: IPv4 is iOS's own 464XLAT, CLAT46, over the NAT64 prefix the network announces)\n");
+			return true;
+		}
 	}
 	/* 2. the client bound to the mux id of that port */
 	{
@@ -3946,6 +4545,81 @@ modem_bringup(void)
 			cell.registered = 1;
 			if (option_data) {
 				data_bringup();
+				if (option_data6 == 1) {
+					data_bringup6();
+				}
+			}
+			if (option_sms_self) {
+				/* a message to the SIM's own number (DMS Get MSISDN), to see the receive path without anybody's help; the number is never printed */
+				char digits[24];
+				uint32_t d = 0;
+				bool have = false;
+
+				if (qmi_call(2, 0x0024, NULL, 0, 3000) == 0 && qmi_reply.result == 0 && (c = qmi_tlv(0x01, &n)) != NULL && n >= 6 && n < 24) {
+					for (uint32_t i = 0; i < n; i++) {
+						if (c[i] >= '0' && c[i] <= '9') {
+							digits[d++] = (char)c[i];
+						}
+					}
+					have = d >= 6;
+				}
+				if (!have) {
+					/* the card's EF MSISDN (6F40, under the USIM's directory 3F00/7FFF), record 1: alpha identifier, then length, type of number, 10 digit bytes (swapped BCD), two more */
+					uint8_t t[24], session[2] = { 0, 0 }, record[4] = { 1, 0, 0, 0 };
+					uint32_t k = 0;
+
+					tlv_put(t, &k, 0x01, session, 2);
+					{
+						uint8_t f[7] = { 0x40, 0x6f, 4, 0x00, 0x3f, 0xff, 0x7f };       /* file id, then the path: 3F00 7FFF as two little-endian words */
+
+						tlv_put(t, &k, 0x02, f, sizeof(f));
+					}
+					tlv_put(t, &k, 0x03, record, 4);
+					if (qmi_call(11, 0x0021, t, k, 5000) == 0 && qmi_reply.result == 0 && (c = qmi_tlv(0x11, &n)) != NULL && n >= 3 + 14) {
+						uint32_t len = c[0] | c[1] << 8, base = len >= 14 ? len - 14 : 0;
+						const uint8_t *r = c + 2;
+
+						if (len + 2 <= n && r[base] >= 2 && r[base] <= 11) {
+							uint32_t digits_bytes = r[base] - 1;
+
+							d = 0;
+							for (uint32_t i = 0; i < digits_bytes && i < 10; i++) {
+								uint8_t lo = r[base + 2 + i] & 0xf, hi = r[base + 2 + i] >> 4;
+
+								if (lo < 10) { digits[d++] = (char)('0' + lo); }
+								if (hi < 10) { digits[d++] = (char)('0' + hi); }
+							}
+							digits[d] = 0;
+							have = d >= 6;
+						}
+					}
+					{
+						uint32_t ff = 0, m = 0;
+						const uint8_t *c2 = qmi_reply.result == 0 ? qmi_tlv(0x11, &m) : NULL;
+
+						for (uint32_t i = 2; c2 != NULL && i < m; i++) {
+							ff += c2[i] == 0xff;
+						}
+						say("modem: sms: EF MSISDN: TLV 0x11 of %u bytes, %u of them 0xff (an empty record is all 0xff)\n", m, ff);
+					}
+					say("modem: sms: EF MSISDN read: %s (result %u error %u)\n", have ? "a number" : "nothing usable", qmi_reply.result, qmi_reply.error);
+				}
+				if (!have) {
+					/* modem_sms_num=DIGITS: the phone's own number, given by its owner for the test (the SIM stores none) */
+					uint64_t given = 0;
+
+					if (PE_parse_boot_argn("modem_sms_num", &given, sizeof(given)) && given >= 100000) {
+						snprintf(digits, sizeof(digits), "%llu", given);
+						d = (uint32_t)strlen(digits);
+						have = true;
+					}
+				}
+				if (have) {
+					digits[d] = 0;
+					say("modem: sms: own number has %u digits; self-test message sent: %d\n", d, wms_send_text(digits, "HackiOS self-test: this message came from the OnePlus 8 Pro to itself, line 1"));
+				} else {
+					say("modem: sms: the SIM has no readable own number (DMS Get MSISDN %u/%u)\n", qmi_reply.result, qmi_reply.error);
+				}
 			}
 			if (option_sms) {
 				/* one test message to the owner's number (given for these tests); an error answer is retried a few times, a missing answer is not (it may have gone) */
@@ -3993,6 +4667,28 @@ cell_sms_status_sysctl(__unused struct sysctl_oid *oid, __unused void *arg1, __u
 	return SYSCTL_OUT(req, cell.sms_status, strlen(cell.sms_status) + 1);
 }
 
+/* the messages received, as lines "N<TAB>NUMBER: TEXT" (a new line in a text is the byte 0x1f), the last eight at most */
+static int
+cell_sms_ring_sysctl(__unused struct sysctl_oid *oid, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	char text[8 * 260 + 1];
+	size_t n = 0;
+	uint32_t count = cell.sms_received;
+
+	text[0] = 0;
+	for (uint32_t i = count > 8 ? count - 8 : 0; i < count; i++) {
+		const char *m = cell.sms_ring[i % 8];
+
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "%u\t", i);
+		for (; *m != 0 && n + 2 < sizeof(text); m++) {
+			text[n++] = *m == '\n' || *m == '\r' ? 0x1f : *m;
+		}
+		text[n++] = '\n';
+		text[n] = 0;
+	}
+	return SYSCTL_OUT(req, text, n + 1);
+}
+
 static int
 cell_sms_last_sysctl(__unused struct sysctl_oid *oid, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
 {
@@ -4003,6 +4699,33 @@ cell_sms_last_sysctl(__unused struct sysctl_oid *oid, __unused void *arg1, __unu
 }
 
 /* writing "33612345678 text of the message" (digits of an international number, no plus, a space, then the text) queues one SMS */
+/* kern.hackios.modem_qmi: write "SERVICE MSGID PORT TLVBYTES" (service decimal, message id and bytes in hex, PORT 4 or 6: which of our two QMI clients), read the answer once the modem's thread has made the call */
+static int
+cell_qmi_sysctl(__unused struct sysctl_oid *oid, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	char text[sizeof(cell.qmi_request)];
+	int error;
+
+	if (req->newptr == USER_ADDR_NULL) {
+		return SYSCTL_OUT(req, cell.qmi_answer, strlen(cell.qmi_answer) + 1);
+	}
+	if (req->newlen == 0 || req->newlen >= sizeof(text)) {
+		return EINVAL;
+	}
+	bzero(text, sizeof(text));
+	if ((error = SYSCTL_IN(req, text, req->newlen)) != 0) {
+		return error;
+	}
+	if (cell.qmi_pending) {
+		return EBUSY;
+	}
+	strlcpy(cell.qmi_request, text, sizeof(cell.qmi_request));
+	snprintf(cell.qmi_answer, sizeof(cell.qmi_answer), "queued");
+	cell.qmi_pending = true;
+	printf("modem: qmi: a hand-made request is queued: %s\n", cell.qmi_request);
+	return 0;
+}
+
 static int
 cell_sms_send_sysctl(__unused struct sysctl_oid *oid, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
 {
@@ -4025,6 +4748,7 @@ cell_sms_send_sysctl(__unused struct sysctl_oid *oid, __unused void *arg1, __unu
 	strlcpy(cell.sms_request, text, sizeof(cell.sms_request));
 	cell.sms_pending = true;
 	snprintf(cell.sms_status, sizeof(cell.sms_status), "queued");
+	printf("modem: sms: a request of %zu bytes from user space is queued for the modem's thread\n", strlen(cell.sms_request));
 	return 0;
 }
 
@@ -4032,7 +4756,7 @@ cell_sms_send_sysctl(__unused struct sysctl_oid *oid, __unused void *arg1, __unu
 static int
 cell_int_sysctl(__unused struct sysctl_oid *oid, __unused void *arg1, int which, struct sysctl_req *req)
 {
-	int v = which == 0 ? (cell_started ? 1 : 0) : which == 1 ? cell.registered : which == 2 ? cell.bars : cell.dbm;
+	int v = which == 0 ? (cell_started ? 1 : 0) : which == 1 ? cell.registered : which == 2 ? cell.bars : which == 4 ? (data.up ? 1 : 0) | (cl6.up ? 2 : 0) : cell.dbm;
 
 	return SYSCTL_OUT(req, &v, sizeof(v));
 }
@@ -4050,19 +4774,22 @@ SYSCTL_DECL(_kern_hackios);
 SYSCTL_PROC(_kern_hackios, OID_AUTO, cellular_up, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, cell_int_sysctl, "I", "1 once the modem is brought up");
 SYSCTL_PROC(_kern_hackios, OID_AUTO, cellular_registered, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 1, cell_int_sysctl, "I", "1 while registered on a network");
 SYSCTL_PROC(_kern_hackios, OID_AUTO, cellular_bars, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 2, cell_int_sysctl, "I", "signal bars 0..4");
+SYSCTL_PROC(_kern_hackios, OID_AUTO, cellular_data, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 4, cell_int_sysctl, "I", "mobile data: 1 the IPv4 session is up, 2 the IPv6 one");
 SYSCTL_PROC(_kern_hackios, OID_AUTO, cellular_dbm, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 3, cell_int_sysctl, "I", "signal strength in dBm");
 SYSCTL_PROC(_kern_hackios, OID_AUTO, cellular_operator, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, cell_operator_sysctl, "A", "the network's name");
 SYSCTL_PROC(_kern_hackios, OID_AUTO, modem_state, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, cell_state_sysctl, "A", "the cellular modem: off, starting, registered ...");
 SYSCTL_PROC(_kern_hackios, OID_AUTO, modem_bars, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, cell_bars_sysctl, "I", "signal bars 0..4");
-SYSCTL_PROC(_kern_hackios, OID_AUTO, modem_sms_send, CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_LOCKED, 0, 0, cell_sms_send_sysctl, "A", "write NUMBER TEXT to send an SMS");
+SYSCTL_PROC(_kern_hackios, OID_AUTO, modem_qmi, CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, 0, 0, cell_qmi_sysctl, "A", "a QMI request by hand: SERVICE MSGID PORT HEXBYTES; read for the answer");
+SYSCTL_PROC(_kern_hackios, OID_AUTO, modem_sms_send, CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, 0, 0, cell_sms_send_sysctl, "A", "write NUMBER TEXT to send an SMS");
 SYSCTL_PROC(_kern_hackios, OID_AUTO, modem_sms_status, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, cell_sms_status_sysctl, "A", "the last SMS request: queued, sent, failed");
+SYSCTL_PROC(_kern_hackios, OID_AUTO, modem_sms_ring, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, cell_sms_ring_sysctl, "A", "the messages received: N, a tab, NUMBER: TEXT, one a line");
 SYSCTL_PROC(_kern_hackios, OID_AUTO, modem_sms_last, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, cell_sms_last_sysctl, "A", "the count and the latest message received");
 
 static const char gsm7_basic[128] =
-    "@\xa3$\xa5\xe8\xe9\xf9\xec\xf2\xc7\n\xd8\xf8\r\xc5\xe5" "\x94_\x96\x93\x99\x95\x96\x9a\x92\x9b\x9c\x9d\x9e\x9f" " !\"#\xa4%&'()*+,-./0123456789:;<=>?"
+    "@\xa3$\xa5\xe8\xe9\xf9\xec\xf2\xc7\n\xd8\xf8\r\xc5\xe5" "\x94_\x96\x93\x99\x95\x96\x9a\x92\x9b\x9c\x9d\x9e\x9f\x9f\x9f" " !\"#\xa4%&'()*+,-./0123456789:;<=>?"
     "\xa1" "ABCDEFGHIJKLMNOPQRSTUVWXYZ\xc4\xd6\xd1\xdc\xa7\xbf" "abcdefghijklmnopqrstuvwxyz\xe4\xf6\xf1\xfc\xe0";
 
-/* an SMS-DELIVER (3GPP TS 23.040) as text: the sender and the message (GSM 7-bit default alphabet or UCS-2; the accented letters are shown as '?') */
+/* an SMS-DELIVER (3GPP TS 23.040) as text: the sender and the message (GSM 7-bit default alphabet, the common accented letters as UTF-8, or UCS-2 with non-ASCII shown as '?') */
 static void
 sms_decode(const uint8_t *pdu, uint32_t n)
 {
@@ -4082,6 +4809,7 @@ sms_decode(const uint8_t *pdu, uint32_t n)
 	first = pdu[at++];
 	if ((first & 3) != 0) {
 		snprintf(cell.sms_last, sizeof(cell.sms_last), "(not a deliver message, type %u)", first & 3);
+		strlcpy(cell.sms_ring[cell.sms_received % 8], cell.sms_last, sizeof(cell.sms_ring[0]));
 		cell.sms_received++;
 		return;
 	}
@@ -4124,10 +4852,35 @@ sms_decode(const uint8_t *pdu, uint32_t n)
 	}
 	udl = pdu[at++];
 	if ((dcs & 0x0c) == 0x08) {             /* UCS-2 */
-		for (uint32_t i = 0; i + 1 < udl && at + i + 1 < n && out < sizeof(text) - 1; i += 2) {
+		/* UCS-2 (UTF-16 in practice: an emoji is a surrogate pair) as UTF-8 */
+		for (uint32_t i = 0; i + 1 < udl && at + i + 1 < n && out + 5 < sizeof(text); i += 2) {
 			uint32_t c = (uint32_t)(pdu[at + i] << 8 | pdu[at + i + 1]);
 
-			text[out++] = c >= 0x20 && c < 0x7f ? (char)c : (c == 10 ? '\n' : '?');
+			if (c >= 0xd800 && c < 0xdc00 && i + 3 < udl && at + i + 3 < n) {
+				uint32_t low = (uint32_t)(pdu[at + i + 2] << 8 | pdu[at + i + 3]);
+
+				if (low >= 0xdc00 && low < 0xe000) {
+					c = 0x10000 + ((c - 0xd800) << 10) + (low - 0xdc00);
+					i += 2;
+				}
+			}
+			if (c < 0x20 && c != 10) {
+				text[out++] = '?';
+			} else if (c < 0x80) {
+				text[out++] = (char)c;
+			} else if (c < 0x800) {
+				text[out++] = (char)(0xc0 | c >> 6);
+				text[out++] = (char)(0x80 | (c & 0x3f));
+			} else if (c < 0x10000) {
+				text[out++] = (char)(0xe0 | c >> 12);
+				text[out++] = (char)(0x80 | (c >> 6 & 0x3f));
+				text[out++] = (char)(0x80 | (c & 0x3f));
+			} else {
+				text[out++] = (char)(0xf0 | c >> 18);
+				text[out++] = (char)(0x80 | (c >> 12 & 0x3f));
+				text[out++] = (char)(0x80 | (c >> 6 & 0x3f));
+				text[out++] = (char)(0x80 | (c & 0x3f));
+			}
 		}
 	} else {
 		uint32_t acc = 0, bits = 0, got = 0, i = 0;
@@ -4140,7 +4893,25 @@ sms_decode(const uint8_t *pdu, uint32_t n)
 			{
 				uint8_t c = (uint8_t)(acc & 0x7f);
 
-				text[out++] = (c < 0x20 && c != 10 && c != 13) || c >= 0x7f ? '?' : (char)gsm7_basic[c] < 0x7f && (char)gsm7_basic[c] >= 0x20 ? gsm7_basic[c] : (c == 10 ? '\n' : '?');
+				/* the accented letters of the default alphabet as UTF-8 (è é ù ì ò Ç É ä ö ñ ü à), the rest of the odd ones (the escape table too) as '?' */
+				static const struct { uint8_t gsm, second; } accents[] = { { 0x04, 0xa8 }, { 0x05, 0xa9 }, { 0x06, 0xb9 }, { 0x07, 0xac }, { 0x08, 0xb2 }, { 0x09, 0x87 }, { 0x1f, 0x89 },
+					{ 0x7b, 0xa4 }, { 0x7c, 0xb6 }, { 0x7d, 0xb1 }, { 0x7e, 0xbc }, { 0x7f, 0xa0 } };
+				bool accent = false;
+
+				for (unsigned a = 0; a < sizeof(accents) / sizeof(accents[0]) && out + 3 < sizeof(text); a++) {
+					if (accents[a].gsm == c) {
+						text[out++] = (char)0xc3;
+						text[out++] = (char)accents[a].second;
+						accent = true;
+					}
+				}
+				if (!accent && c == 0x11) {
+					text[out++] = '_';              /* (the second row of the alphabet: only the underscore is shown) */
+					accent = true;
+				}
+				if (!accent) {
+					text[out++] = (c < 0x20 && c != 10 && c != 13) || c >= 0x7f ? '?' : (char)gsm7_basic[c] < 0x7f && (char)gsm7_basic[c] >= 0x20 ? gsm7_basic[c] : (c == 10 ? '\n' : '?');
+				}
 				acc >>= 7;
 				bits -= 7;
 				got++;
@@ -4149,6 +4920,7 @@ sms_decode(const uint8_t *pdu, uint32_t n)
 	}
 	text[out] = 0;
 	snprintf(cell.sms_last, sizeof(cell.sms_last), "%s: %s", from, text);
+	strlcpy(cell.sms_ring[cell.sms_received % 8], cell.sms_last, sizeof(cell.sms_ring[0]));
 	cell.sms_received++;
 	say("modem: sms: RECEIVED from %s (%u characters)\n", from, out);
 }
@@ -4187,6 +4959,7 @@ cell_tick(void)
 	uint64_t now = mhi_op_nanoseconds(NULL);
 	static uint64_t screen_said;
 
+	cl6_tick(now);
 	if (now >= screen_said) {
 		say("modem: screen: the frame the panel shows is at %#llx, %llu bytes a row\n", loader_screen[0], loader_screen[1]);
 		screen_said = now + 30000000000ull;
@@ -4200,10 +4973,63 @@ cell_tick(void)
 			say("modem: sms: new messages are reported\n");
 		}
 	}
+	if (cell.qmi_pending) {
+		char *p = cell.qmi_request, *end;
+		uint32_t service = (uint32_t)strtoul(p, &end, 10), message, port, n = 0;
+		uint8_t tlv[300];
+		int e;
+
+		p = end;
+		message = (uint32_t)strtoul(p, &end, 16);
+		p = end;
+		port = (uint32_t)strtoul(p, &end, 10);
+		p = end;
+		for (int high = -1; *p != 0 && n < sizeof(tlv); p++) {
+			int v = *p >= '0' && *p <= '9' ? *p - '0' : *p >= 'a' && *p <= 'f' ? *p - 'a' + 10 : *p >= 'A' && *p <= 'F' ? *p - 'A' + 10 : -1;
+
+			if (v < 0) {
+				continue;
+			}
+			if (high < 0) {
+				high = v;
+			} else {
+				tlv[n++] = (uint8_t)(high << 4 | v);
+				high = -1;
+			}
+		}
+		qmi_src_port = port == 6 ? QMI_PORT6 : QMI_PORT;
+		say("modem: qmi: hand-made request: service %u, message %#x, client port %#x, %u TLV bytes\n", service, message, qmi_src_port, n);
+		e = qmi_call(service, (uint16_t)message, tlv, n, 45000);
+		qmi_src_port = QMI_PORT;
+		if (e != 0) {
+			snprintf(cell.qmi_answer, sizeof(cell.qmi_answer), "no answer (%d)", e);
+		} else {
+			uint32_t at = 0;
+
+			snprintf(cell.qmi_answer, sizeof(cell.qmi_answer), "result %u error %u;", qmi_reply.result, qmi_reply.error);
+			at = (uint32_t)strlen(cell.qmi_answer);
+			for (uint32_t t = 0; t + 3 <= qmi_reply.length && at + 40 < sizeof(cell.qmi_answer);) {
+				uint32_t len = qmi_reply.data[t + 1] | qmi_reply.data[t + 2] << 8;
+
+				if (t + 3 + len > qmi_reply.length) {
+					break;
+				}
+				at += (uint32_t)snprintf(cell.qmi_answer + at, sizeof(cell.qmi_answer) - at, " [%02x/%u:", qmi_reply.data[t], len);
+				for (uint32_t i = 0; i < len && i < 160 && at + 4 < sizeof(cell.qmi_answer); i++) {
+					at += (uint32_t)snprintf(cell.qmi_answer + at, sizeof(cell.qmi_answer) - at, "%02x", qmi_reply.data[t + 3 + i]);
+				}
+				at += (uint32_t)snprintf(cell.qmi_answer + at, sizeof(cell.qmi_answer) - at, "]");
+				t += 3 + len;
+			}
+		}
+		say("modem: qmi: hand-made request answered: %s\n", cell.qmi_answer);
+		cell.qmi_pending = false;
+	}
 	if (cell.sms_pending) {
 		char to[24], *text = cell.sms_request;
 		size_t k = 0;
 
+		say("modem: sms: the modem's thread takes the request (%zu bytes)\n", strlen(cell.sms_request));
 		while (*text != 0 && *text != ' ' && k < sizeof(to) - 1) {
 			to[k++] = *text++;
 		}
@@ -4222,6 +5048,30 @@ cell_tick(void)
 			snprintf(cell.sms_status, sizeof(cell.sms_status), "failed (write: NUMBER TEXT)");
 		}
 		cell.sms_pending = false;
+	}
+	if (cell_route_pending) {
+		uint8_t t[16], ack[6];
+		uint32_t k = 0;
+
+		if (cell_route_format == 6) {
+			/* a transferred message has no SMSC field in front (it starts at the first octet): one empty one is put there for the decoder */
+			uint8_t pdu[sizeof(cell_route_pdu) + 1];
+
+			pdu[0] = 0;
+			memcpy(pdu + 1, cell_route_pdu, cell_route_len);
+			sms_decode(pdu, cell_route_len + 1);
+		} else {
+			say("modem: sms: a message of format %u (not 3GPP) is not decoded\n", cell_route_format);
+		}
+		if (cell_route_ack) {
+			/* WMS Send Ack: the transaction id, protocol 1 (3GPP), success */
+			ack[0] = (uint8_t)cell_route_tid; ack[1] = (uint8_t)(cell_route_tid >> 8); ack[2] = (uint8_t)(cell_route_tid >> 16); ack[3] = (uint8_t)(cell_route_tid >> 24);
+			ack[4] = 1;
+			ack[5] = 1;
+			tlv_put(t, &k, 0x01, ack, 6);
+			say("modem: sms: acknowledgement: %s (result %u error %u)\n", qmi_call(5, 0x0037, t, k, 3000) == 0 ? "answered" : "NO REPLY", qmi_reply.result, qmi_reply.error);
+		}
+		cell_route_pending = false;
 	}
 	if (cell_mt_pending) {
 		uint8_t t[8];
@@ -4731,11 +5581,13 @@ modem_reset_state(void)
 	mission_link_down = false;
 	mission_phase_two = true;
 	cell_started = false;
+	data_down();
 	cell.event_report_on = false;
 	cell.registered = 0;
 	cell.bars = 0;
 	cell.next_poll = 0;
 	cell_mt_pending = false;
+	cell_route_pending = false;
 	qmi_reply.have = false;
 }
 
@@ -4815,6 +5667,9 @@ hk_modem_init(void)
 		PE_parse_boot_argn("modem_sms", &k, sizeof(k));
 		option_sms = k == 1;
 		k = 0;
+		PE_parse_boot_argn("modem_sms_self", &k, sizeof(k));
+		option_sms_self = k == 1;
+		k = 0;
 		PE_parse_boot_argn("modem_tftp", &k, sizeof(k));
 		option_tftp = k == 1;
 		k = 0;
@@ -4823,6 +5678,9 @@ hk_modem_init(void)
 		if (PE_parse_boot_argn("modem_data_ep", &k, sizeof(k))) {
 			option_data_ep = k;
 		}
+		k = 2;
+		PE_parse_boot_argn("modem_data6", &k, sizeof(k));
+		option_data6 = k;
 		k = 1;
 		PE_parse_boot_argn("modem_data_qmap", &k, sizeof(k));
 		option_data_qmap = k != 0;

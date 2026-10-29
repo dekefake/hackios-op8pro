@@ -25,6 +25,8 @@ for t in "$@"; do
 	sb) $DYN -dynamiclib -install_name /hackios/lib/libhackios-sb.dylib -framework CoreFoundation -framework CoreGraphics -framework IOKit -lobjc -o obj/libhackios-sb.dylib src/inject_sb.c ;;
 	ui) $DYN -O2 -dynamiclib -install_name /hackios/lib/libhackios-ui.dylib -lobjc -o obj/libhackios-ui.dylib src/inject_ui.c ;;
 	cell) $DYN -O2 -o obj/hk_cell src/hk_cell.c ;;
+	im) $DYN -O1 -fobjc-arc -dynamiclib -install_name /hackios/lib/libhackios-im.dylib -framework Foundation -lobjc -o obj/libhackios-im.dylib src/inject_im.m ;;
+	smsd) $DYN -O2 -lsqlite3 -o obj/hk_smsd src/hk_smsd.c ;;
 	net_test) $DYN -fobjc-arc -framework Foundation -framework SystemConfiguration -o obj/net_test src/net_test.m ;;
 	time) $DYN -O2 -o obj/hk_time src/hk_time.c ;;
 	sysctl) $DYN -O2 -o obj/hk_sysctl src/hk_sysctl.c ;;

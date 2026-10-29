@@ -21,7 +21,7 @@ Settings / wifid / configd                     (iOS)
    |  SIOCGA80211 / SIOCSA80211 ioctls on any socket (apple80211req)
 bsd/dev/hk_apple80211.c    Apple80211 requests answered from the station boundary; events to wifid (class 6 subclass 1)
 bsd/dev/hk_sta.c           the station boundary (sys/hk_sta.h): one thread does scans/joins; remembers the last scan
-bsd/dev/hk_net.c           en0 on the kernel's interface KPI (no IONetworkingFamily), Ethernet framing
+bsd/dev/hk_net.c           en0 on the kernel's interface KPI (no IONetworkingFamily), Ethernet framing; unit 1 = en1 (the modem's mobile data, instantnoodle_modem.c)
 iokit/Kernel/HKWLAN.cpp    registry entries wifid and SystemConfiguration look for (IO80211Controller, IONetworkInterface)
 iokit/Kernel/MiniIONetworkStack.cpp   the service configd's interface namer waits for
 bsd/dev/hk_lx.c  +  wifi/lx/   the compatibility layer (a FreeBSD LinuxKPI-derived layer plus ours) ath11k builds on
