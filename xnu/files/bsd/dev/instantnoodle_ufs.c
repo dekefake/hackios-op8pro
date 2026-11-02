@@ -1705,24 +1705,54 @@ u8_ab_is_ours(const uint8_t *e)
 	return memcmp(head, "ANDROID!", 8) == 0 && *(uint32_t *)(head + 40) <= 2 && memcmp(head + 48, "HACKiOS", 8) == 0;
 }
 
+/*
+ * The boot menu's "Android" (hk_swap_slot=1; =2 only says what it would do, writing nothing), upstream's way (hakios-uefi, u-boot/files/cmd/hakios_slot.c) and the way ABL itself
+ * does it in HandleActiveSlotUnbootable(): only the ACTIVE slot's own A/B byte changes, unbootable on and successful off. At the next start ABL finds it unbootable and makes the
+ * other slot active by itself, type GUIDs and all. The other slot's byte and every GUID are left alone, which is what the exchange of 2026-10-28 got wrong. Refused unless the other
+ * slot would be taken: successful and not unbootable. Back: `fastboot --set-active=a`, or `bootctl set-active-boot-slot 0` in a rooted Android.
+ */
+enum { AB_LOOK, AB_UNBOOTABLE, AB_SUCCESSFUL };
+
+static int u8_ab_change(int what);
+
+int
+instantnoodle_ufs_android_once(bool only_look)
+{
+	return u8_ab_change(only_look ? AB_LOOK : AB_UNBOOTABLE);
+}
+
+/*
+ * hk_slot_ok=1: what Android's update_verifier and upstream's menu do at every start: the running slot marked successful, or ABL takes one off its retry count at every start and
+ * at 0 gives up on it and starts the other slot by itself (read on the phone 2026-11-02: boot_a's byte 0x37, retry 6, never successful). Nothing is written once it is marked.
+ */
+int
+instantnoodle_ufs_slot_good(void)
+{
+	return u8_ab_change(AB_SUCCESSFUL);
+}
+
 int
 instantnoodle_ufs_ab_swap(void)
+{
+	/*
+	 * DISABLED 2026-10-28. Exchanging only the A/B attribute bytes of boot_a and boot_b leaves them disagreeing with the type GUIDs that ABL's
+	 * `fastboot --set-active` toggles together with the attributes of every slotted partition; the phone then refused to boot (the OnePlus "image
+	 * destroyed" screen on both slots) until its partition table was rebuilt over EDL. Slots are changed with `fastboot --set-active=a|b`, or
+	 * with instantnoodle_ufs_android_once() above.
+	 */
+	u8_say("ab: the slot exchange is disabled (it corrupted the A/B state on 2026-10-28): nothing written\n");
+	return EPERM;
+}
+
+static int
+u8_ab_change(int what)
 {
 	static uint8_t ph[BLOCK], bh[BLOCK], pt[4 * BLOCK], bt[4 * BLOCK], nt[4 * BLOCK], chk[4 * BLOCK];
 	uint64_t entries_lba, alt, balt_entries;
 	uint32_t count, size, bytes, nblocks, hsize, a = ~0u, b = ~0u, crc;
-	uint8_t ba, bb;
+	uint8_t ba, bb, active_byte, other_byte, new_byte;
+	uint32_t active;
 
-	/*
-	 * DISABLED 2026-10-28. Exchanging only the A/B attribute bytes of boot_a and boot_b leaves them disagreeing with the type GUIDs that ABL's
-	 * `fastboot --set-active` toggles together with the attributes of every slotted partition; the phone then refused to boot (the OnePlus "image
-	 * destroyed" screen on both slots) until its partition table was rebuilt over EDL. Nothing below runs; slots are changed with
-	 * `fastboot --set-active=a|b`. A new version has to exchange attributes AND type GUIDs of all pairs, with an EDL undo ready.
-	 */
-	u8_say("ab: the slot exchange is disabled (it corrupted the A/B state on 2026-10-28): nothing written\n");
-	if (1) {
-		return EPERM;
-	}
 	if (!u8_backend) {
 		return ENXIO;
 	}
@@ -1837,13 +1867,32 @@ instantnoodle_ufs_ab_swap(void)
 			return EINVAL;
 		}
 		if (!((ours_a && (ba & 4)) || (ours_b && (bb & 4)))) {
-			u8_say("ab: Android's slot is the active one already (HackiOS was not started from its own slot): nothing written, the restart starts Android\n");
-			return 0;
+			u8_say("ab: Android's slot is the active one already (HackiOS was not started from its own slot): nothing written\n");
+			return what == AB_SUCCESSFUL ? EINVAL : 0;
 		}
 	}
+	active = (ba & 4) ? a : b;
+	active_byte = (ba & 4) ? ba : bb;
+	other_byte = (ba & 4) ? bb : ba;
+	if (what == AB_SUCCESSFUL) {
+		if ((active_byte & 0xc0) == 0x40) {
+			return 0;       /* (every start after the first: already so) */
+		}
+		new_byte = (uint8_t)((active_byte | 0x40) & ~0x80);
+	} else {
+		if ((other_byte & 0x80) != 0 || (other_byte & 0x40) == 0) {
+			u8_say("ab: the other slot's byte is %02x, not successful or unbootable: ABL would not take it: nothing written\n", other_byte);
+			return EINVAL;
+		}
+		new_byte = (uint8_t)((active_byte | 0x80) & ~0x40);
+	}
+	u8_say("ab: boot_%c, the active slot: its A/B byte goes from %02x to %02x (%s); the other stays %02x%s\n", active == a ? 'a' : 'b', active_byte, new_byte,
+	    what == AB_SUCCESSFUL ? "successful" : "unbootable", other_byte, what == AB_LOOK ? "; only a look: nothing written" : "");
+	if (what == AB_LOOK) {
+		return 0;
+	}
 	memcpy(nt, pt, bytes);
-	nt[(uint64_t)a * size + 54] = bb;
-	nt[(uint64_t)b * size + 54] = ba;
+	nt[(uint64_t)active * size + 54] = new_byte;
 	crc = u8_crc32(nt, bytes);
 	/* the backup copy first (its table, then its header), then the primary one */
 	for (int pass = 0; pass < 2; pass++) {
@@ -1868,7 +1917,7 @@ instantnoodle_ufs_ab_swap(void)
 		u8_say("ab: read back does not match: the phone may need `fastboot --set-active`\n");
 		return EIO;
 	}
-	u8_say("ab: slots exchanged: boot_a %02x, boot_b %02x\n", bb, ba);
+	u8_say("ab: done: boot_%c's A/B byte is %02x\n", active == a ? 'a' : 'b', new_byte);
 	return 0;
 }
 

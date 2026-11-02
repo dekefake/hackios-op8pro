@@ -23,13 +23,20 @@ for t in "$@"; do
 	case $t in
 	media) $DYN -O2 -dynamiclib -install_name /hackios/lib/libhackios-media.dylib -framework CoreFoundation -framework CoreMedia -framework CoreVideo -framework IOSurface -lobjc -o obj/libhackios-media.dylib src/inject_media.c src/camera_device.c src/camera_isp.c ;;
 	sb) $DYN -dynamiclib -install_name /hackios/lib/libhackios-sb.dylib -framework CoreFoundation -framework CoreGraphics -framework IOKit -lobjc -o obj/libhackios-sb.dylib src/inject_sb.c ;;
+	gl) M=/ws/xnu-deps/build/mesa/out; python3 mkeagl.py src/eagl_slots.txt $M/gl.xml $M/exported-gl.txt src/eagl.c > obj/eagl_gen.h; $DYN -dynamiclib -install_name /hackios/lib/libhackios-gl.dylib -Iobj -framework CoreFoundation -framework IOKit -framework IOSurface -lobjc $M/libOSMesa.8.dylib -o obj/libhackios-gl.dylib src/eagl.c src/gl_osmesa.c; rm -f obj/eagl_gen.h ;;
+	phone) $DYN -O2 -dynamiclib -install_name /hackios/lib/libhackios-phone.dylib -lobjc -o obj/libhackios-phone.dylib src/inject_phone.c ;;
+	call) $DYN -O2 -dynamiclib -install_name /hackios/lib/libhackios-call.dylib -framework CoreFoundation -lobjc -o obj/libhackios-call.dylib src/inject_call.c ;;
 	ui) $DYN -O2 -dynamiclib -install_name /hackios/lib/libhackios-ui.dylib -lobjc -o obj/libhackios-ui.dylib src/inject_ui.c ;;
 	cell) $DYN -O2 -o obj/hk_cell src/hk_cell.c ;;
 	im) $DYN -O1 -fobjc-arc -dynamiclib -install_name /hackios/lib/libhackios-im.dylib -framework Foundation -lobjc -o obj/libhackios-im.dylib src/inject_im.m ;;
+	commcenter) $DYN -O1 -fobjc-arc -framework Foundation -framework CallKit -lobjc -Wl,-sectcreate,__TEXT,__info_plist,src/hk_commcenter.info.plist -o obj/hk_commcenter src/hk_commcenter.m ;;  # (then, on the Mac: codesign -f -s - --entitlements userland/src/hk_commcenter.entitlements hk_commcenter: out/tree/flash.sh's callers do)
 	smsd) $DYN -O2 -lsqlite3 -o obj/hk_smsd src/hk_smsd.c ;;
 	net_test) $DYN -fobjc-arc -framework Foundation -framework SystemConfiguration -o obj/net_test src/net_test.m ;;
 	time) $DYN -O2 -o obj/hk_time src/hk_time.c ;;
 	sysctl) $DYN -O2 -o obj/hk_sysctl src/hk_sysctl.c ;;
+	lun) $DYN -O2 -o obj/hk_lun src/hk_lun.c ;;
+	location) $DYN -O1 -fobjc-arc -framework Foundation -framework CoreLocation -lobjc -o obj/hk_location src/hk_location.m ;;
+	objcdump) $DYN -O2 -lobjc -o obj/hk_objcdump src/hk_objcdump.c ;;
 	logcfg) $DYN -O2 -o obj/hk_logcfg src/hk_logcfg.c ;;
 	buddy) $DYN -O2 -framework CoreFoundation -o obj/hk_buddy src/hk_buddy.c ;;
 	wifijoin) $DYN -O2 -framework CoreFoundation -o obj/hk_wifijoin src/hk_wifijoin.c ;;
@@ -44,5 +51,5 @@ done
 cp obj/* /out/
 IN
 chmod +x /tmp/ubuild-inner.sh
-COPYFILE_DISABLE=1 tar -cf - userland/src | docker run --rm -i -v ${UBUILD_WS:-hk-ws-cam}:/ws:ro -v theos:/opt/theos:ro -v /tmp/ubuild-inner.sh:/inner.sh:ro -v "$out":/out hackios-kernel-builder /inner.sh $targets
+COPYFILE_DISABLE=1 tar -cf - userland/src userland/mkeagl.py | docker run --rm -i -v ${UBUILD_WS:-hk-ws-cam}:/ws:ro -v theos:/opt/theos:ro -v /tmp/ubuild-inner.sh:/inner.sh:ro -v "$out":/out hackios-kernel-builder /inner.sh $targets
 ls -l "$out"

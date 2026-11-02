@@ -15,7 +15,8 @@ Status (2026-10-26):
 | headphones / USB-C analog audio | not done | **not done** (FSA4480 + WCD938x RX + MBHC) |
 | speaker protection | replaced by a software "guard" | same, plus TFADSP protection not done |
 | haptics | Awinic AW86927 | Awinic AW8697 (see [input-peripherals.md](input-peripherals.md)) |
-| earpiece, Bluetooth audio, call audio | none | none |
+| earpiece, call audio | none | a call's sound through the DSP to the modem (`voice=3`), earpiece or speakers by iOS's button (`kern.hackios.voice_speaker`); see research/modem-sdx55.md |
+| Bluetooth audio | none | none |
 
 ## Layers
 
@@ -143,7 +144,8 @@ BUNDLE`), `RC_JOBS=rc.jobs.speakers|alerts|volume`.
 - USB-C analog headphones: FSA4480 + WCD938x RX + MBHC.
 - TFADSP protection: AFE module `0x1000B911` on `TERT_MI2S_RX`, VI on `TERT_MI2S_TX` (`0x1000B912`, topology
   `0x1000B909`), container messages via `AFE_PARAM_ID_TFADSP_RX_CFG`.
-- Mic: only the main microphone; others and noise suppression are not set up. Call audio and the earpiece: none.
+- Mic: only the main microphone; others and noise suppression are not set up. Call audio: see research/modem-sdx55.md; no calibration, so no echo cancelling and no volume step in a call.
+- OnePlus 8 Pro (2026-11-02, verified on the phone): `mic=4` had never been in its boot arguments, so `/dev/hk-mic` did not exist and nothing could record. With it, Voice Memos records with a live waveform and the kernel reads levels of -64 to -78 dBFS with 0 errors. It listens only while something records. `record_test` is unsigned here, so it is refused by iOS and records silence: that says nothing about the microphone.
 
 ## Files
 

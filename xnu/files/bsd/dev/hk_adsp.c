@@ -1873,7 +1873,7 @@ struct glink_packet {
  * carries APR, the audio services' own protocol (below; Android's apr_tal_rpmsg.c asks for no
  * particular intents: what the DSP sends there is a few hundred bytes, up to a few kilobytes).
  */
-enum { CHANNEL_QRTR, CHANNEL_APR, CHANNEL_PMIC, CHANNELS };
+enum { CHANNEL_QRTR, CHANNEL_APR, CHANNEL_PMIC, CHANNEL_SAT, CHANNELS };
 
 struct glink_channel {
 	const char *name;
@@ -1911,6 +1911,8 @@ static struct {
 		[CHANNEL_APR] = { .name = "apr_audio_svc", .ours = 2, .intents = { { 0x200, 8 }, { 0x1000, 4 }, { 0x2000, 2 } } },
 		/* the battery manager's (battmgr below): answers of a few dozen bytes, a name of 128 */
 		[CHANNEL_PMIC] = { .name = "PMIC_RTR_ADSP_APPS", .ours = 3, .intents = { { 0x200, 6 }, { 0x1000, 2 }, { 0, 0 } } },
+		/* the DSP's own road to the modem (voice_sat=1, instantnoodle_modem.c): empty without it, so that this side never opens it */
+		[CHANNEL_SAT] = { .name = "mhi_sat", .ours = 4, .intents = { { 0x200, 6 }, { 0x1000, 2 }, { 0, 0 } } },
 	},
 };
 
@@ -2499,6 +2501,102 @@ qrtr_control(const struct qrtr_header *header, const struct qrtr_control *contro
 	}
 }
 
+extern void hk_modem_sat_from_dsp(const void *data, uint32_t length);
+extern void hk_modem_qrtr_from_dsp(uint32_t type, uint32_t from_node, uint32_t from_port, uint32_t to_node, uint32_t to_port, bool confirm, const void *data, uint32_t length);
+
+/* the satellite's messages, to the DSP (from the modem's thread; the link's sending has its own lock) */
+bool hk_adsp_sat_open(void);
+bool
+hk_adsp_sat_open(void)
+{
+	return glink.channel[CHANNEL_SAT].open;
+}
+
+int hk_adsp_sat_send(const void *data, uint32_t length);
+int
+hk_adsp_sat_send(const void *data, uint32_t length)
+{
+	return glink_send(&glink.channel[CHANNEL_SAT], data, length);
+}
+
+static bool
+qrtr_bridge(void)
+{
+	static int known = -1;
+
+	if (known < 0) {
+		uint32_t value = 0;
+
+		known = PE_parse_boot_argn("voice_bridge", &value, sizeof(value)) && value != 0;
+	}
+	return known != 0;
+}
+
+/* From the modem's thread (the link's sending has its own lock: APR's commands come from many threads): for the DSP, as it was sent, with the sender's node and port. */
+void hk_adsp_qrtr_from_modem(uint32_t type, uint32_t from_node, uint32_t from_port, uint32_t to_node, uint32_t to_port, bool confirm, const void *data, uint32_t length);
+void
+hk_adsp_qrtr_from_modem(uint32_t type, uint32_t from_node, uint32_t from_port, uint32_t to_node, uint32_t to_port, bool confirm, const void *data, uint32_t length)
+{
+	uint32_t padded = (length + 3) & ~3u;
+	struct qrtr_header *packet;
+
+	if (!glink.channel[CHANNEL_QRTR].open) {
+		return;
+	}
+	packet = kalloc_data(sizeof(*packet) + padded, Z_WAITOK | Z_ZERO);
+	if (packet == NULL) {
+		return;
+	}
+	packet->version = 1;
+	packet->type = type;
+	packet->from_node = from_node;
+	packet->from_port = from_port;
+	packet->confirm = confirm;
+	packet->size = length;
+	packet->to_node = to_node;
+	packet->to_port = to_port;
+	memcpy(packet + 1, data, length);
+	{
+		int error = glink_send(&glink.channel[CHANNEL_QRTR], packet, (uint32_t)sizeof(*packet) + padded);
+
+		if (error != 0 || type == QRTR_DATA) {
+			static unsigned said;
+
+			if (said++ < 60) {
+				tell("voice: bridge: to the DSP, type %u from node %u port %#x to port %#x, %u bytes: %d\n", type, from_node, from_port, to_port, length, error);
+			}
+		}
+	}
+	kfree_data(packet, sizeof(*packet) + padded);
+}
+
+/* where the DSP's SSCTL listens (0: not told of yet) */
+uint32_t hk_adsp_ssctl_port(void);
+uint32_t
+hk_adsp_ssctl_port(void)
+{
+	for (unsigned i = 0; i < sizeof(qrtr_servers) / sizeof(qrtr_servers[0]); i++) {
+		if (qrtr_servers[i].there && qrtr_servers[i].service == 43) {
+			return qrtr_servers[i].port;
+		}
+	}
+	return 0;
+}
+
+/* The DSP's services told again, for the modem, which came up after they were announced. */
+void hk_adsp_qrtr_announce(void);
+void
+hk_adsp_qrtr_announce(void)
+{
+	for (unsigned i = 0; i < sizeof(qrtr_servers) / sizeof(qrtr_servers[0]); i++) {
+		if (qrtr_servers[i].there) {
+			uint32_t words[5] = { QRTR_NEW_SERVER, qrtr_servers[i].service, qrtr_servers[i].instance, qrtr_servers[i].node, qrtr_servers[i].port };
+
+			hk_modem_qrtr_from_dsp(QRTR_NEW_SERVER, qrtr_servers[i].node, QRTR_CONTROL, 0, QRTR_CONTROL, false, words, sizeof(words));
+		}
+	}
+}
+
 static void
 qrtr_input(const uint8_t *data, uint32_t length)
 {
@@ -2532,6 +2630,18 @@ qrtr_input(const uint8_t *data, uint32_t length)
 	if (qrtr_peer == 0) {
 		qrtr_peer = header.from_node;
 	}
+	{
+		/* the bridge to the modem (voice_bridge=1, instantnoodle_modem.c): what the DSP says for the modem's nodes, or to everybody about its services */
+		bool for_modem = header.to_node == 2 || header.to_node == 3;
+		bool told = header.to_port == QRTR_CONTROL && (header.type == QRTR_NEW_SERVER || header.type == QRTR_DEL_SERVER || header.type == QRTR_DEL_CLIENT || header.type == QRTR_BYE);
+
+		if (qrtr_bridge() && (for_modem || told)) {
+			hk_modem_qrtr_from_dsp(header.type, header.from_node, header.from_port, header.to_node, header.to_port, header.confirm != 0, data + at, header.size);
+			if (for_modem) {
+				return;
+			}
+		}
+	}
 	if (header.type == QRTR_RESUME_TX) {
 		return;
 	}
@@ -2546,6 +2656,12 @@ qrtr_input(const uint8_t *data, uint32_t length)
 
 		memcpy(&control, data + at, header.size < sizeof(control) ? header.size : sizeof(control));
 		qrtr_control(&header, &control);
+		return;
+	}
+	if (header.to_port == 0x4005u && header.size >= 14) {
+		const uint8_t *q = data + at;
+
+		tell("voice: the DSP on \"it is up\": %u bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n", header.size, q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7], q[8], q[9], q[10], q[11], q[12], q[13]);
 		return;
 	}
 	printf("adsp: qrtr: a datagram of %u bytes from node %u port %u to our port %u: nobody here listens there\n", header.size,
@@ -2586,6 +2702,7 @@ struct apr_header {
 static struct {
 	uint32_t opcode, token, length;
 	uint32_t words[64];
+	uint16_t port;
 	volatile bool there;
 } apr_answer;
 static uint32_t apr_in, apr_out, apr_next_token = 1;
@@ -2614,6 +2731,23 @@ apr_input(const uint8_t *data, uint32_t length)
 	}
 	payload = (header.size < length ? header.size : length) - header_length;
 	apr_in++;
+	/*
+	 * The voice services (MVM 9, CVS 10, CVP 11) answer a command that takes time twice: APR_RSP_ACCEPTED, then the result. The one waited for is the result. What they send of
+	 * themselves during a call goes to the log: there is no other way to see why a call is silent.
+	 */
+	if (header.from_service >= 9 && header.from_service <= 11) {
+		uint32_t w[4] = { 0, 0, 0, 0 };
+
+		memcpy(w, data + header_length, payload < sizeof(w) ? payload : sizeof(w));
+		if (header.opcode == 0x000100beu) {
+			tell("voice: service %u port %u: accepted %#x\n", header.from_service, header.from_port, w[0]);
+			return;
+		}
+		if (header.token != apr_waited_for || apr_waited_for == 0) {
+			tell("voice: service %u port %u says %#x (token %u, %u bytes): %#x %#x %#x %#x\n", header.from_service, header.from_port, header.opcode, header.token, payload, w[0], w[1], w[2], w[3]);
+			return;
+		}
+	}
 	if (header.token != apr_waited_for || apr_waited_for == 0) {
 		hk_apr_events_t events = apr_events;
 		uint32_t words[64];
@@ -2630,6 +2764,10 @@ apr_input(const uint8_t *data, uint32_t length)
 			return;
 		}
 	}
+	if (header.to_domain != APR_DOMAIN_APPS || header.from_domain != APR_DOMAIN_ADSP) {
+		/* (the modem's voice commands: is any of it through here?) */
+		tell("voice: APR not for us: from service %u of domain %u to %u of %u: opcode %#x\n", header.from_service, header.from_domain, header.to_service, header.to_domain, header.opcode);
+	}
 	if (apr_in <= 40) {
 		uint32_t w[4] = { 0, 0, 0, 0 };
 
@@ -2643,6 +2781,7 @@ apr_input(const uint8_t *data, uint32_t length)
 	apr_answer.length = payload;
 	apr_answer.opcode = header.opcode;
 	apr_answer.token = header.token;
+	apr_answer.port = header.from_port;
 	apr_answer.there = true;
 }
 
@@ -2704,6 +2843,7 @@ hk_adsp_apr(uint8_t service, uint16_t port, uint32_t token, uint32_t opcode, con
 				if (answer != NULL) {
 					answer->opcode = apr_answer.opcode;
 					answer->token = apr_answer.token;
+					answer->port = apr_answer.port;
 					answer->length = apr_answer.length;
 					memcpy(answer->words, apr_answer.words, sizeof(answer->words));
 				}
@@ -3135,6 +3275,8 @@ link_thread(__unused void *parameter, __unused wait_result_t result)
 				qrtr_input(packet->data, packet->length);
 			} else if (from == CHANNEL_PMIC) {
 				battmgr_input(packet->data, packet->length);
+			} else if (from == CHANNEL_SAT) {
+				hk_modem_sat_from_dsp(packet->data, packet->length);
 			} else {
 				apr_input(packet->data, packet->length);
 			}
@@ -3472,6 +3614,9 @@ hk_adsp_init(void)
 		/* all of it, on a thread of its own, and left up */
 		last_step = STEPS;
 		keep = true;
+		if (!option("voice_sat")) {
+			glink.channel[CHANNEL_SAT].name = "";
+		}
 		quiet = !option("adsp_loud");   /* (adsp_loud=1: every step's lines to the loader's log as well) */
 		pause_ms = 0;
 		listen_seconds = 1;

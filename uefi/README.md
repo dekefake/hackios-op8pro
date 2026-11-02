@@ -65,6 +65,6 @@ The result is `Build/instantnoodlepPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd` (3 
 
 ## The boot menu (volume up while the phone starts)
 
-`BootManagerLib/HackiosMenu.c` replaces Mu's boot manager menu: iOS (USB debug, default), iOS (no USB debug), Reboot to bootloader, Reboot to recovery, then the
+`BootManagerLib/HackiosMenu.c` replaces Mu's boot manager menu: iOS (USB debug, default), iOS (no USB debug), Android, Reboot to bootloader, Reboot to recovery, then the
 platform's own entries (Internal Storage, USB Storage, ...), at 3 times the console font, centred. The choice among ours is the volatile UEFI variable `HackiosBootMode` (0..4) which the loader
 reads (`xnuloader/loader.c`, `hackios_boot_mode()`).

@@ -141,6 +141,8 @@ int	hk_mhi_power_up(struct hk_mhi *host);
 int	hk_mhi_start_mission(struct hk_mhi *host);
 /* A buffer for the device's failure reason string (MHI_CMD_SFR_CFG). 0, or an errno. */
 int	hk_mhi_sfr_config(struct hk_mhi *host, uint64_t address, uint32_t length);
+int	hk_mhi_sat_context(struct hk_mhi *host, bool event, uint32_t id, uint64_t base, uint64_t size);
+int	hk_mhi_sat_command(struct hk_mhi *host, uint32_t number, bool start);
 void	hk_mhi_channel_state(struct hk_mhi *host, uint32_t number, uint32_t *context_state, uint64_t *context_rp, uint64_t *context_wp, uint32_t *host_rp, uint32_t *host_wp, uint32_t *elements);
 /* The device reset (MHICTRL.RESET), the channels stopped. */
 void	hk_mhi_power_down(struct hk_mhi *host);

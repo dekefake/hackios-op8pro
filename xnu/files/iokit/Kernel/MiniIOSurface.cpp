@@ -5,7 +5,7 @@
  * followed by the pixels. Every client that knows a surface has the whole of it mapped once.
  * Surfaces travel between processes as Mach send rights (IOSurfaceSendRight) or by number.
  *
- * What is not here: child surfaces, wrapping of client memory, purgeability, compression,
+ * What is not here: child surfaces, wrapping of client memory in pieces, purgeability, compression,
  * notifications. Calls that are not implemented are logged once and refused.
  */
 
@@ -151,6 +151,12 @@ static thread_call_t    gSurfaceClearing;
 static uint32_t         gSurfacesGivenAgain;    /* for MiniIOSurfaceCost() */
 /* boot-arg surf_clear=0: kept memory is given out as it is (to see what the clearing costs; a surface is then not all zeroes) */
 static TUNABLE(uint32_t, gSurfaceClear, "surf_clear", 1);
+/*
+ * boot-arg surf_wrap=1: surfaces around the client's pictures made (methodWrapClientImage); refused by default. Upstream's phone gained by it. Here it made no
+ * difference (2026-11-02, OnePlus 8 Pro, surf_wrap, glstill and fb_pri together: home swipes 102-105 frames a second with, 106 without; Settings' scroll 99-103, 101-104;
+ * Preferences 40-45% of a core, 33-37%), and it wires memory of the client's, so it is not on.
+ */
+static TUNABLE(uint32_t, gSurfaceWrap, "surf_wrap", 0);
 
 void
 MiniIOSurfaceClearKept(void)
@@ -593,7 +599,8 @@ surfaceCreate(OSDictionary * props, IOReturn * error, IOMemoryMap * scanout = NU
 	needed += offset;
 	alloc = dictNumber(props, "IOSurfaceAllocSize", 0);
 	if (alloc < needed) {
-		if (alloc != 0) {
+		/* (a surface around the owner's memory has the owner's size: a mask's last row is only as long as it is wide) */
+		if (alloc != 0 && wrapped == NULL) {
 			IOLog("MiniIOSurface: alloc size %u too small for %ux%u '%.4s', using %llu\n", alloc, width, height,
 			    (const char *) &format, needed);
 		}
@@ -930,6 +937,7 @@ class IOSurfaceRootUserClient : public IOUserClient
 
 	IOReturn methodInit(IOExternalMethodArguments * args);
 	IOReturn methodCreate(IOExternalMethodArguments * args);
+	IOReturn methodWrapClientImage(IOExternalMethodArguments * args);
 	IOReturn methodLookup(IOExternalMethodArguments * args);
 	IOReturn methodLookupFromPort(IOExternalMethodArguments * args);
 	IOReturn methodCreatePort(IOExternalMethodArguments * args);
@@ -1285,6 +1293,74 @@ IOSurfaceRootUserClient::methodCreate(IOExternalMethodArguments * args)
 	return ret;
 }
 
+/*
+ * A surface around a picture of the client's own (IOSurfaceWrapClientImage): what CoreAnimation's OpenGL ES renderer asks
+ * for each image it is to draw from -- a picture, a glyph mask, a gradient. While it was refused the window server asked
+ * about 4000 times a second, drew those images another way every frame, and 9% of its drawing thread's time went to the
+ * refusals alone (upstream hakios 759b620, measured on the POCO X5 Pro). The request is 32 bytes:
+ *
+ *     address (8), width, height, pixel format, bytes per element, bytes per row, size (4 each)
+ *
+ * with the size the owner's (a mask's last row only as long as it is wide). Made as a create with IOSurfaceAddress is:
+ * the surface's pixels are that memory itself, and the reply is a create's.
+ */
+IOReturn
+IOSurfaceRootUserClient::methodWrapClientImage(IOExternalMethodArguments * args)
+{
+	struct {
+		uint64_t address;
+		uint32_t width, height, format, bytesPerElement, bytesPerRow, size;
+	} request;
+	static const char * const keys[] = { "IOSurfaceWidth", "IOSurfaceHeight", "IOSurfacePixelFormat", "IOSurfaceBytesPerElement",
+		                             "IOSurfaceBytesPerRow", "IOSurfaceAllocSize" };
+	struct minisurf_client_ref * ref;
+	OSDictionary * props;
+	MiniIOSurface * s;
+	IOReturn ret = kIOReturnSuccess;
+	uint64_t began = mach_absolute_time();
+
+	if (args->structureInput == NULL || args->structureInputSize < sizeof(request)) {
+		return kIOReturnBadArgument;
+	}
+	memcpy(&request, args->structureInput, sizeof(request));
+	if (request.address == 0 || request.size == 0) {
+		return kIOReturnBadArgument;
+	}
+	props = OSDictionary::withCapacity(8);
+	OSNumber * address = OSNumber::withNumber(request.address, 64);
+	if (props == NULL || address == NULL) {
+		OSSafeReleaseNULL(address);
+		OSSafeReleaseNULL(props);
+		return kIOReturnNoMemory;
+	}
+	props->setObject("IOSurfaceAddress", address);
+	address->release();
+	const uint32_t values[] = { request.width, request.height, request.format, request.bytesPerElement, request.bytesPerRow,
+		                    request.size };
+	for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]) && ret == kIOReturnSuccess; i++) {
+		OSNumber * n = OSNumber::withNumber(values[i], 32);
+
+		ret = n != NULL && props->setObject(keys[i], n) ? kIOReturnSuccess : kIOReturnNoMemory;
+		OSSafeReleaseNULL(n);
+	}
+	s = ret == kIOReturnSuccess ? surfaceCreate(props, &ret) : NULL;
+	props->release();
+	if (s == NULL) {
+		return ret;
+	}
+	IOLockLock(gSurfaceLock);
+	ref = addRef(s);
+	ret = ref ? returnSurface(ref, false, args) : kIOReturnNoMemory;
+	if (ref != NULL && ret != kIOReturnSuccess) {
+		dropRef(ref);
+	}
+	surfaceUnhold(s);                       /* the maker's hold; the client's own is in the ref */
+	IOLockUnlock(gSurfaceLock);
+	OSAddAtomic64((SInt64) (mach_absolute_time() - began), (SInt64 *) &gSurfaceMaking);
+	OSIncrementAtomic(&gSurfacesMade);
+	return ret;
+}
+
 IOReturn
 IOSurfaceRootUserClient::methodLookup(IOExternalMethodArguments * args)
 {
@@ -1630,6 +1706,11 @@ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
 		return methodInit(args);
 	case kSurfaceMethodCreate:
 		return methodCreate(args);
+	case kSurfaceMethodWrapClientImage:
+		if (gSurfaceWrap) {
+			return methodWrapClientImage(args);
+		}
+		break;
 	case kSurfaceMethodLookup:
 		return methodLookup(args);
 	case kSurfaceMethodLookupFromPort:

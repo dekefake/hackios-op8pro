@@ -873,6 +873,53 @@ hk_audio_dsp_memory(uintptr_t *memory, uint64_t *dsp_address, uint32_t *bytes)
 	return ok;
 }
 
+/*
+ * Memory of somebody else's, in one piece, shown to the DSP for good (the mailbox of a call's sound, hk_mic.c), from 1 MB into the window: a page table's 2 MB, past our periods. The stream
+ * has to stay up for it (one more user, never given back). What the DSP is given without going through here finds a fault, or the phone in CrashDump: the DSP takes the stream from bits
+ * 32 up of an address, so 0x105800000 was stream 1 at 0x5800000 (unmapped: the DSP stopped answering), and 0xffc00000 stream 0 (no such stream: "APPS_TCU" in the crash's OCIMEM log, 2026-11-02).
+ */
+#define DSP_MAP_OFFSET          0x100000u
+bool
+hk_audio_dsp_map(uint64_t phys, uint32_t bytes, uint64_t *dsp_address)
+{
+	bool ok;
+
+	_Static_assert(SHARED_BYTES <= DSP_MAP_OFFSET, "the periods reach the mailbox's place");
+	if (bytes > DSP_MAP_OFFSET || (phys & 4095) != 0) {
+		return false;
+	}
+	lck_mtx_lock(&hk_smmu_lock);
+	ok = shared_get(3);        /* (a user of its own: the microphone gives back 1, the speakers 0) */
+	if (ok && space.passed) {
+		*dsp_address = phys | AUDIO_STREAM_BITS;
+	} else if (ok) {
+		uint64_t *third = (uint64_t *)(space.tables + 8192);
+		unsigned first = (AUDIO_ADDRESSES >> 12 & 0x1ff) + DSP_MAP_OFFSET / 4096;
+
+		for (unsigned page = 0; page < bytes / 4096; page++) {
+			third[first + page] = (phys + 4096ull * page) | AUDIO_PTE;
+		}
+		for (vm_offset_t line = space.tables + 8192; line < space.tables + 3 * 4096; line += 64) {
+			__asm__ volatile ("dc civac, %0" : : "r" (line));
+		}
+		__asm__ volatile ("dsb sy");
+		put(&apps_smmu_context, "tlbiasid", SMMU_CB_TLBIASID, space.context);
+		put(&apps_smmu_context, "tlbsync", SMMU_CB_TLBSYNC, 1);
+		*dsp_address = (AUDIO_ADDRESSES + DSP_MAP_OFFSET) | AUDIO_STREAM_BITS;
+	}
+	lck_mtx_unlock(&hk_smmu_lock);
+	return ok;
+}
+
+/* What the SMMU has refused the DSP so far: for a call's sound as for the stream's. */
+void
+hk_audio_dsp_faults(void)
+{
+	lck_mtx_lock(&hk_smmu_lock);
+	space_faults();
+	lck_mtx_unlock(&hk_smmu_lock);
+}
+
 void
 hk_audio_dsp_memory_put(void)
 {
@@ -1358,6 +1405,34 @@ guard_off(bool unheard)
 	}
 }
 
+/* A call's sound (hk_mic.c, voice=3): the port and the amplifiers kept up as if iOS were playing; the DSP's voice path mixes into the port. */
+static volatile bool voice_hold;
+
+void hk_sound_voice_hold(bool hold);
+void
+hk_sound_voice_hold(bool hold)
+{
+	voice_hold = hold;
+}
+
+/* The route wanted (a call: hk_mic.c): the watcher below changes it, the amplifiers stopped for the moment it takes. */
+static volatile uint32_t route_wanted = HK_SPEAKER_BOTH;
+
+void
+hk_sound_route(uint32_t route)
+{
+	route_wanted = route;
+}
+
+/* (+1, so that 0 is nothing asked: only this thread talks to the chips) */
+static volatile uint32_t earpiece_gain_wanted;
+
+void
+hk_sound_earpiece_gain(uint32_t gain)
+{
+	earpiece_gain_wanted = gain + 1;
+}
+
 /*
  * The amplifiers on while there is sound, at the volume iOS has set (hk_audio_volume(): how
  * far under the loudest, sound_below under Android's level), and off while iOS's volume is 0;
@@ -1374,8 +1449,42 @@ watch(void)
 	pause_ms = 0;                           /* (the bring-up's pauses: a start after parking is to be quick) */
 
 	uint64_t quiet_since = now_us();
+	uint32_t route_now = HK_SPEAKER_BOTH;
 
 	while (!stopping) {
+		if (voice_hold) {
+			last_sound_us = now_us();
+		}
+		if (route_wanted != route_now && !given_up) {
+			uint32_t route = route_wanted;
+
+			if (on) {
+				hk_speaker_stop();
+			}
+			/* (a route that cannot be had: as it was, and not asked again) */
+			if (!hk_speaker_route(route)) {
+				say("sound: the route %u could not be set\n", route);
+			}
+			route_now = route;
+			if (on && !voice_hold) {
+				/* (the call is over, nothing is playing: they stay off until iOS plays something, rather than three seconds on the speakers for nothing) */
+				guard_off(false);
+				on = false;
+			} else if (on && (!hk_speaker_start() || !hk_speaker_volume(below + extra, 1))) {
+				say("sound: THE AMPLIFIERS DID NOT START AGAIN AFTER A CHANGE OF ROUTE\n");
+				guard_off(true);
+				on = false;
+				given_up = true;
+			}
+		}
+		if (earpiece_gain_wanted != 0) {
+			uint32_t gain = earpiece_gain_wanted - 1;
+
+			earpiece_gain_wanted = 0;
+			if (!given_up && !hk_speaker_earpiece_gain(gain)) {
+				say("sound: the earpiece's gain %u was not set (not its route?)\n", gain);
+			}
+		}
 		uint64_t now = now_us(), sounded = last_sound_us;
 		uint32_t extra_now, generation_now;
 		bool muted_now;

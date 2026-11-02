@@ -23,7 +23,7 @@ Order inside each section is by priority. Update an item when you change its sta
 | T04 | Motion, light and proximity sensors (screen rotation, auto-brightness) | Not Started | P1 |
 | T05 | Bluetooth | Working in RAM runs (owner-verified); gaps listed | P1 |
 | T47 | 8 Pro: Wi-Fi auto-join, sleep, AirDrop, sensors, charging | Open (see section) | P1 |
-| T06 | Cellular modem, telephony, SMS | In progress (flashed image 43: LTE registration, SIM PIN, **mobile data on en1 (verified)**, SMS send, SMS receive with iOS notifications (verified: banner, lock screen, Messages list and conversation), bars, RTC date; open: calls/VoLTE/VoWiFi, tethering, IPv6) | P1 |
+| T06 | Cellular modem, telephony, SMS | In progress (image 44, built and RAM-tested, not flashed: **Settings > Cellular, the status bar's LTE and bars, SIM and operator through CoreTelephony** (stand-in for CommCenter, research/modem-sdx55.md); flashed image 43: LTE registration, SIM PIN, **mobile data on en1 (verified)**, SMS send, SMS receive with iOS notifications (verified: banner, lock screen, Messages list and conversation), bars, RTC date; open: calls/VoLTE/VoWiFi, tethering, IPv6) | P1 |
 | T07 | OnePlus 8 cameras | Partial (power-up and bus rungs, sensor never answers) | P1 |
 | T08 | Headphones / USB-C audio | Not Started | P1 |
 | T09 | Fingerprint / biometric authentication | Not Started | P1 |
@@ -146,7 +146,8 @@ Order inside each section is by priority. Update an item when you change its sta
 - **Files:** `instantnoodle_camera.c`, `instantnoodle_i2c.c`, `userland/src/camera_*.c`, `tools/camsensor.py`.
 - **Refs:** K03; [input-peripherals.md](subsystems/input-peripherals.md).
 
-### T08 Headphones / USB-C audio, earpiece — Audio · Not Started · P1
+### T08 Headphones / USB-C audio — Audio · Not Started · P1
+- **2026-11-02: the earpiece for calls is built (route and amplifier verified on the phone without sound; not heard yet): see research/modem-sdx55.md.** Only for calls: iOS's own sound has no receiver route. A call at the ear has no proximity sensor (T47: behind the SLPI), so the screen stays on and a cheek can touch it.
 - **Facts:** USB-C analog headset: FSA4480 switch (on the speakers' I2C bus, deliberately not addressed), WCD938x RX path, MBHC detection. TFA9874 "receiver" profile exists for the earpiece.
 - **Next:** MBHC/FSA4480 detection, RX path in `hk_mic.c`-style DSP bring-up; route change in `HKAudio.driver`.
 - **Refs:** [audio.md](subsystems/audio.md); K04.

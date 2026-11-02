@@ -48,6 +48,13 @@
  * OnePlus's impedance check), which the speakers' guard stands in for; the amplifiers' current and
  * voltage sense, which they send back on the interface's other data line, is not read.
  *
+ * Routes (instantnoodle_speaker_route(), asked by hk_sound.c): the amplifier at 0x34 drives the earpiece. Android's
+ * "handset" path is that one chip alone with the container's profile "receiver" (TFA_CHIP_SELECTOR 1), against both chips
+ * with "speaker" (selector 3) for everything else. The two profiles set the same six fields to opposite values: LPM1MODE,
+ * TDMDCE, DCA (the boost converter: off for the earpiece), TDMSPKG (the gain), INPLEV (the input attenuation), LNMODE. They
+ * are written with the chip in powerdown, as NXP's driver does when it changes a profile. What Android adds to it, the
+ * calibrated voice processing in the DSP, is not there.
+ *
  * Layouts: tfa9874_tfafieldnames.h and tfa98xx_parameters.h (the container) of the same driver, in
  * LineageOS's android_kernel_oneplus_sm8250, techpack/audio/asoc/codecs/tfa98xx-v6.
  */
@@ -119,6 +126,7 @@ static struct amplifier {
 #define BF_PWDN                 0x0000
 #define BF_I2CR                 0x0010
 #define BF_AMPE                 0x0030
+#define BF_DCA                  0x0040
 #define BF_MANSCONF             0x0120
 #define BF_AUDFS                0x0203
 #define BF_FRACTDEL             0x0255
@@ -126,6 +134,7 @@ static struct amplifier {
 #define BF_NOCLK                0x1070
 #define BF_CLKS                 0x1170
 #define BF_MANSTATE             0x1433
+#define BF_TDMSPKG              0x6163          /* the gain, by INPLEV (the profiles: "receiver" 13, "speaker" 4) */
 #define BF_RST                  0x9000          /* NXP's TFA2_BF_RST: the DSP's reset, set by tfa98xx_init_v6 for every TFA2 */
 #define REG_REV                 0x03
 #define REG_KEY_HIDDEN          0x0f
@@ -219,7 +228,26 @@ set_field(struct amplifier *a, uint16_t field, uint16_t value)
 		return false;
 	}
 	new = (uint16_t)((old & ~mask) | ((value << (field >> 4 & 15)) & mask));
-	return new == old || put(a, reg, new, readable(reg));
+	if (new == old) {
+		return true;
+	}
+	/*
+	 * Only the field is compared: the chip's own state machine may change another one of the register in the meantime. With the bit clock already running (a change of route during a
+	 * call) PWDN off read back 0x0018 for 0x0010: AMPE had come on by itself, and the whole register's check took both amplifiers away until the next boot (2026-11-02).
+	 */
+	if (!put(a, reg, new, false)) {
+		return false;
+	}
+	if (readable(reg)) {
+		uint16_t back = 0;
+
+		if (!get(a, reg, &back) || ((back ^ new) & mask) != 0) {
+			say("speaker: %s: register %#04x reads back %#06x\n", a->where, reg, back);
+			hold_in_reset("a bit field did not read back as written");
+			return false;
+		}
+	}
+	return true;
 }
 
 /* as NXP's tfaRunWriteRegister: the masked bits of the register */
@@ -395,6 +423,53 @@ write_container(struct amplifier *a, uint64_t list, uint32_t length, const char 
 	return false;
 }
 
+/* ---- the routes ------------------------------------------------------------------------------------------- */
+
+#define PROFILE_FIELDS          8
+
+/* what the earpiece's chip has to be told to change its route: the container is given back after the set-up */
+static struct {
+	uint16_t field, value;
+} route_fields[2][PROFILE_FIELDS];              /* by route: [HK_SPEAKER_BOTH] "speaker", [HK_SPEAKER_EARPIECE] "receiver" */
+static uint32_t route_field_count[2];
+static uint32_t route_now = HK_SPEAKER_BOTH;
+
+/* The bit fields of a profile of the device's list, up to its defaults; false if it has none or more than room for. */
+static bool
+remember_profile(struct amplifier *a, uint64_t list, uint32_t length, const char *profile_name, uint32_t route)
+{
+	uint32_t offset, item_offset;
+	uint8_t type;
+
+	route_field_count[route] = 0;
+	for (uint32_t i = 0; i < length; i++) {
+		if (!descriptor(list + 12 + 4 * i, &offset, &type) || type != DSC_PROFILE || offset + 8 > cnt_size) {
+			continue;
+		}
+		const char *name = string_at(offset + 4);
+		uint32_t items = cnt[offset];
+
+		if (name == NULL || strcmp(name, profile_name) != 0 || items == 0 || offset + 8 + 4ull * (items - 1) > cnt_size) {
+			continue;
+		}
+		for (uint32_t k = 0; k + 1 < items; k++) {
+			if (!descriptor(offset + 8 + 4 * k, &item_offset, &type) || type == DSC_DEFAULT) {
+				break;
+			}
+			if (type != DSC_BITFIELD || item_offset + 4 > cnt_size || route_field_count[route] == PROFILE_FIELDS) {
+				say("speaker: %s: the profile \"%s\" has more in it than a route is thought to need\n", a->where, name);
+				route_field_count[route] = 0;
+				return false;
+			}
+			route_fields[route][route_field_count[route]].field = le16(item_offset + 2);
+			route_fields[route][route_field_count[route]].value = le16(item_offset);
+			route_field_count[route]++;
+		}
+		return route_field_count[route] != 0;
+	}
+	return false;
+}
+
 /* ---- prepare, start, stop -------------------------------------------------------------------------------- */
 
 /* NXP's "optimal settings" per revision of the TFA9874 (tfa_init_v6.c: tfa9874_specific) */
@@ -490,6 +565,11 @@ prepare_one(struct amplifier *a)
 		hold_in_reset("the container's items could not be written");
 		return false;
 	}
+	if (a == &amplifiers[0] && (!remember_profile(a, list, length, "speaker", HK_SPEAKER_BOTH) ||
+	    !remember_profile(a, list, length, "receiver", HK_SPEAKER_EARPIECE))) {
+		say("speaker: %s: no profiles to change its route with: it stays on the speakers\n", a->where);
+		route_field_count[HK_SPEAKER_EARPIECE] = 0;
+	}
 	/* nothing so far leaves powerdown: make sure of it */
 	if (!get_field(a, BF_PWDN, &value) || !get_field(a, BF_MANSTATE, &state) || value != 1 || state != STATE_POWERDOWN) {
 		say("speaker: %s: PWDN %u, state %u after the set-up\n", a->where, value, state);
@@ -552,7 +632,7 @@ instantnoodle_speaker_start(void)
 			say("speaker: %s is not set up: not started\n", a->where);
 			return false;
 		}
-		if (a->started) {
+		if (a->started || (route_now == HK_SPEAKER_EARPIECE && a != &amplifiers[0])) {
 			continue;
 		}
 		say("speaker: the amplifier %s is started as Android's driver starts it\n", a->where);
@@ -579,6 +659,52 @@ instantnoodle_speaker_start(void)
 		say("speaker: THE AMPLIFIER %s IS OPERATING (state 9): what reaches it is heard\n", a->where);
 	}
 	return true;
+}
+
+/*
+ * Only with both powered down (hk_sound.c stops them first): the earpiece's chip gets the fields of the route's profile; the
+ * other is simply not started for the earpiece (instantnoodle_speaker_start()).
+ */
+bool
+instantnoodle_speaker_route(uint32_t route)
+{
+	struct amplifier *a = &amplifiers[0];
+
+	if (broken || !a->prepared || amplifiers[0].started || amplifiers[1].started || route > HK_SPEAKER_EARPIECE) {
+		return false;
+	}
+	if (route == route_now) {
+		return true;
+	}
+	if (route_field_count[route] == 0) {
+		say("speaker: no profile for the route %u: it stays as it is\n", route);
+		return false;
+	}
+	say("speaker: the route is now %s\n", route == HK_SPEAKER_EARPIECE ? "the earpiece (0x34 alone, profile \"receiver\")" :
+	    "both speakers (profile \"speaker\")");
+	for (uint32_t i = 0; i < route_field_count[route]; i++) {
+		if (!set_field(a, route_fields[route][i].field, route_fields[route][i].value)) {
+			return false;
+		}
+	}
+	route_now = route;
+	return true;
+}
+
+/*
+ * The earpiece's gain, only while it is the route, as a test while the level of a call is judged by ear (TDMSPKG, whose scale
+ * NXP's sources do not give; the container's value for the earpiece is 13). Nothing else uses it.
+ */
+bool
+instantnoodle_speaker_earpiece_gain(uint32_t gain)
+{
+	struct amplifier *a = &amplifiers[0];
+
+	if (broken || !a->prepared || route_now != HK_SPEAKER_EARPIECE || gain > 15) {
+		return false;
+	}
+	say("speaker: the earpiece's TDMSPKG is now %u\n", gain);
+	return set_field(a, BF_TDMSPKG, (uint16_t)gain);
 }
 
 /* Nothing to set on the chips: the level is the samples' (hk_guard_digital()). */

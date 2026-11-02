@@ -14,7 +14,7 @@ Nothing is marked "works" merely because a driver exists: evidence is stated. Fo
 | K01 | Graphics | Metal is experimental; most Metal features and apps untested | Partial | S2 | off by default | not applicable |
 | K02 | Security | No fingerprint / biometric unlock | Unsupported | S2 | yes | yes |
 | K03 | Camera | No cameras | Unsupported | S2 | yes | works (no video) |
-| K04 | Audio | No headphones/USB-C audio, earpiece, call audio; one mic only | Unsupported / Partial | S2 | yes | partly |
+| K04 | Audio | No headphones/USB-C audio; one mic only; a call has no echo cancelling or volume control | Unsupported / Partial | S2 | yes | partly |
 | K05 | Connectivity | Bluetooth works with gaps (name "(null)", device type blank); Wi-Fi gaps and unverified sleep | Partial / Unverified | S2 | yes | yes |
 | K06 | Telephony | No cellular, calls, SMS, voicemail | Unsupported | S1 | yes | yes |
 | K07 | Sensors | No accelerometer/gyro/compass/light/proximity/barometer | Unsupported | S2 | yes | yes |
@@ -85,7 +85,7 @@ No driver, `biometrickitd`/`pearld` denied, no Secure Enclave. Passcode is not s
 
 ## K04 Audio — OnePlus 8 · **Partial**
 - **Works:** speakers (heard), UI sounds/ringtones/alerts/notification sounds, volume keys, main microphone (clap test).
-- **Unsupported:** USB-C analog headphones (no detection, no RX path), earpiece, call audio, Bluetooth audio, secondary microphones, noise suppression.
+- **Unsupported:** USB-C analog headphones (no detection, no RX path), Bluetooth audio, secondary microphones, noise suppression.
 - **Caveats:** amplifiers default off in the kernel (`sound_amps=0`; the profile passes 1); speaker protection is a software guard, not the DSP algorithm; level is 12 dB under stock maximum (`sound_below=96`); the first sound after an unpark has not been listened to;
   the amp health polarity is only checked via MANALARM/MANSTATE. Work: T08, T24. Evidence: [audio.md](subsystems/audio.md).
 
@@ -99,7 +99,7 @@ No driver, `biometrickitd`/`pearld` denied, no Secure Enclave. Passcode is not s
 - **Cause of the TKIP/-3903 failure** was found and fixed (wifi.md). Evidence level high for the listed joins.
 
 ## K06 Cellular, calls, SMS, voicemail — all · Telephony · **Partial on the 8 Pro (2026-10-29: modem, LTE, data and SMS send work: K47)**, unsupported on the POCO · S1 for a phone
-No baseband IOKit drivers; CommCenter (non-cellular variant) is denied after it crashes on missing `AppleIPAppender`/`AppleBasebandPCI`; `vmd` denied (spun a core). Phone/Messages apps cannot place or receive. Work: T06. Also NFC (`nfcd` denied): T34.
+(2026-10-29: Settings > Cellular, the status bar's LTE and bars and the SIM/operator data now work through `hk_commcenter`, a stand-in for CommCenter: T06.) No baseband IOKit drivers; the stock CommCenter (non-cellular variant) is denied after it crashes on missing `AppleIPAppender`/`AppleBasebandPCI`; `vmd` denied (spun a core). Phone/Messages apps cannot place or receive. Work: T06. Also NFC (`nfcd` denied): T34.
 
 ## K07 Sensors — all · **Unsupported** · S2
 No screen rotation, motion, compass, proximity, light, barometer; no auto-brightness (`BLControl` waits 5 s for an ALS at window-server start and gives up). The sensors sit behind the audio DSP (SEE, QMI 400) and the path is not built. Work: T04.
@@ -192,6 +192,7 @@ The physical phone still runs loader 0.5 without the new `getvar:iphont` extensi
 
 ## K47 Cellular: voice calls, tethering — OnePlus 8 Pro · Connectivity · **Partial** · S2
 - **Works (2026-10-29, verified on the phone with screenshots):** LTE registration, bars, **mobile data over native IPv6 with iOS's own IPv4 (NAT64/CLAT46)**, **SMS receive** (UTF-8/emoji, banner and lock-screen notification, tap opens the conversation) and **SMS send from the Messages app** (native: no "Not Delivered", no restart; long and non-GSM texts as concatenated UCS-2/GSM parts).
-- **Not done:** voice calls and VoLTE/VoWiFi (no audio path, CommCenter denied: the Phone app cannot call); **tethering (Personal Hotspot)**: iOS's `misd` (MobileInternetSharing, with `bootpd` and PF) is in the image, but it needs an access point (Wi-Fi AP mode: our ath11k layer is station-only, plus a WPA2 authenticator) or Bluetooth PAN, a service the carrier bundle would allow (CommCenter), and an XPC request to misd whose format is not known (see T06); Settings > Cellular.
+- **2026-11-02:** the Phone application opens and `hk_commcenter` is a CallKit provider: an incoming call that does not exist rings, answers and ends on screen (no network involved). Real calls work both ways with **sound on the loudspeaker** (verified on a real 3G call, later that day). Not done: earpiece, volume and mute, audio tuning, VoLTE. Do Not Disturb sends incoming calls straight to missed.
+- **Not done:** voice calls and VoLTE/VoWiFi (no audio path); **tethering (Personal Hotspot)**: iOS's `misd` (MobileInternetSharing, with `bootpd` and PF) is in the image, but it needs an access point (Wi-Fi AP mode: our ath11k layer is station-only, plus a WPA2 authenticator) or Bluetooth PAN, a service the carrier bundle would allow (CommCenter), and an XPC request to misd whose format is not known (see T06); Settings > Cellular.
 - **Known limits:** when a message arrives while Messages is on the screen its list is not refreshed (leave and reopen it; incoming still goes through hk_smsd + a bulletin, not through imagent); the SIM stores no own number; the sessions after a modem restart are untested; MMS is not handled.
 - **Work:** T06. Docs: research/modem-sdx55.md.

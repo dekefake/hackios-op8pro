@@ -77,6 +77,8 @@ void instantnoodle_wifi_quiesce(void);             /* the device in reset and th
 /* The speakers' two TFA9874 amplifiers (bsd/dev/instantnoodle_speaker.c): hk_speaker.c's hk_speaker_*() on this board */
 bool instantnoodle_speaker_prepare(const uint8_t *container, uint64_t size);
 bool instantnoodle_speaker_start(void);
+bool instantnoodle_speaker_route(uint32_t route);       /* HK_SPEAKER_*, with both stopped */
+bool instantnoodle_speaker_earpiece_gain(uint32_t gain);
 bool instantnoodle_speaker_volume(uint32_t below, uint32_t step_ms);
 bool instantnoodle_speaker_healthy(void);
 uint32_t instantnoodle_speaker_monitor(bool tell);

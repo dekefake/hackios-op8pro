@@ -65,6 +65,12 @@ void hk_camera_quiesce(void);      /* whatever of them was switched on, off: at 
  * Android's driver sets them up, from Android's own configuration file (see there).
  */
 bool hk_speaker_prepare(const uint8_t *acf, uint64_t size);       /* found, reset, configured: powered down, muted */
+#define HK_SPEAKER_BOTH         0               /* where the sound goes: the speakers */
+#define HK_SPEAKER_EARPIECE     1               /* a call held to the ear (the OnePlus 8's; redwood has no such route) */
+bool hk_speaker_route(uint32_t route);     /* the amplifiers stopped: what the next hk_speaker_start() plays through */
+bool hk_speaker_earpiece_gain(uint32_t gain);
+void hk_sound_earpiece_gain(uint32_t gain); /* the same, for hk_speaker_earpiece_gain() */
+void hk_sound_route(uint32_t route);       /* asks the sound's watcher to change the route, stopping the amplifiers for it */
 bool hk_speaker_start(void);       /* powered up and unmuted at the lowest volume: only while the I2S clock runs */
 bool hk_speaker_volume(uint32_t below, uint32_t step_ms); /* below Android's level, in eighths of a dB; 6 dB a step */
 bool hk_speaker_healthy(void);     /* no fault reported; on one, both are powered down at once */
@@ -110,6 +116,7 @@ void hk_audio_record_fed(const int16_t *frames, uint32_t count);
 struct hk_apr_answer {
 	uint32_t opcode, token, length;         /* length: of the payload, in bytes */
 	uint32_t words[64];
+	uint16_t port;                          /* the port it came from: of a session just created, its handle */
 };
 typedef bool (*hk_apr_events_t)(uint8_t service, uint16_t port, uint32_t opcode, uint32_t token, const uint32_t *payload,
     uint32_t length);
@@ -125,6 +132,8 @@ void hk_sound_dsp_down(void);      /* before the DSP is shut down at the run's e
 void hk_sound_quiesce(void);       /* on a panic's way out: the amplifiers off, without sleeping */
 /* the microphones' part of the memory the DSP sees (hk_sound.c): false if it cannot be had; given back with _put() */
 bool hk_audio_dsp_memory(uintptr_t *memory, uint64_t *dsp_address, uint32_t *bytes);
+bool hk_audio_dsp_map(uint64_t phys, uint32_t bytes, uint64_t *dsp_address);
+void hk_audio_dsp_faults(void);
 void hk_audio_dsp_memory_put(void);
 /* a second handler of the DSP's events (the microphones'), asked when the first does not take one */
 void hk_adsp_apr_events_second(hk_apr_events_t handler);

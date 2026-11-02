@@ -185,6 +185,27 @@ static TUNABLE(uint32_t, gOnTheBeat, "fb_beat", 1);
  * to 10 (the phone, 15 October; fb_threads=1 is how it was).
  */
 static TUNABLE(uint32_t, gThreads, "fb_threads", 3);
+/*
+ * Boot-arg fb_pri=N: the scheduling priority of the threads that put frames on the panel (the presenter and its
+ * helpers); 0, the default, is the kernel's default for its threads. Upstream runs them at 92 (BASEPRI_PREEMPT): at the
+ * kernel's they lost the processors to the window server's own real-time threads under load, and a frame took 3.6 ms to
+ * put on the panel as a rule but 10.9 for one in ten (hakios cd8fdbb, on the POCO X5 Pro, which scales frames on the
+ * processors). Here the GPU scales them, and 92 made no measurable difference (2026-11-02: MiniIOSurface.cpp, surf_wrap).
+ */
+static TUNABLE(uint32_t, gThreadPriority, "fb_pri", 0);
+extern "C" uint32_t hk_fb_frames;                   /* kern.hackios.fb_frames (hk_cpufreq.c) */
+extern "C" kern_return_t kernel_thread_start_priority(thread_continue_t continuation, void * parameter, integer_t priority,
+    thread_t * new_thread);
+
+/* a thread of the panel's, at fb_pri */
+static kern_return_t
+panel_thread_start(thread_continue_t continuation, void * parameter, thread_t * thread)
+{
+	if (gThreadPriority >= 1 && gThreadPriority <= 95) {
+		return kernel_thread_start_priority(continuation, parameter, (integer_t) gThreadPriority, thread);
+	}
+	return kernel_thread_start(continuation, parameter, thread);
+}
 #define SWAP_QUEUE              2                       /* frames that may wait for the panel at most (fb_queue) */
 static TUNABLE(uint32_t, gQueue, "fb_queue", 2);
 static inline unsigned
@@ -2214,7 +2235,7 @@ IOMobileFramebuffer::start(IOService * provider)
 	fSwapLock = IOLockAlloc();
 	gPanelLock = IOLockAlloc();
 	gClientsLock = IOLockAlloc();
-	if (kernel_thread_start(&IOMobileFramebuffer::presenterMain, this, &thread) != KERN_SUCCESS) {
+	if (panel_thread_start(&IOMobileFramebuffer::presenterMain, this, &thread) != KERN_SUCCESS) {
 		IOLog("MiniIOMobileFramebuffer: no thread to put frames on the panel with\n");
 		return false;
 	}
@@ -2223,7 +2244,7 @@ IOMobileFramebuffer::start(IOService * provider)
 	fThreads = gThreads >= 1 && gThreads <= 8 ? gThreads : 1;
 	fHelperLock = IOLockAlloc();
 	for (unsigned i = 0; i + 1 < fThreads; i++) {
-		if (kernel_thread_start(&IOMobileFramebuffer::helperMain, this, &thread) != KERN_SUCCESS) {
+		if (panel_thread_start(&IOMobileFramebuffer::helperMain, this, &thread) != KERN_SUCCESS) {
 			fThreads = i + 1;
 			break;
 		}
@@ -3324,6 +3345,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 		record(recorded);
 	}
 	fSwapsShown++;
+	hk_fb_frames++;
 	if (gTouchLat) {
 		hk_tl("tl: v %u ready %llu shown %llu done %llu\n", swapWord(swap, SWAP_ID), micros(ready), micros(shown),
 		    micros(drawn));

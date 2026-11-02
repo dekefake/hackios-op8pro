@@ -11,7 +11,8 @@ K=$1; OUT=$2; L=${3:-out/loader-8pro.efi}
 ARGS="$(grep '^BOOTARGS=' common/devices/instantnoodlep.conf | sed 's/^BOOTARGS="//; s/"$//')"
 if [ -n "$STANDALONE_FB_SIZE" ]; then ARGS="${ARGS//fbwidth=1320 fbheight=2868/fbwidth=${STANDALONE_FB_SIZE%x*} fbheight=${STANDALONE_FB_SIZE#*x}}"; fi     # STANDALONE_FB_SIZE=1290x2796: the display size in place of the profile's
 ARGS="${ARGS//fb_hz=60/fb_hz=${STANDALONE_FB_HZ:-60}}"     # STANDALONE_FB_HZ=120: the panel's rate in place of the profile's fb_hz=60 (two fb_hz= in one line: the kernel and userland disagree)
-CMD="${STANDALONE_EXTRA--v} epoch=$(date +%s) sb_delay=8 $ARGS root_apfs=ufs_darwin ufs_write=1 hk_data=1 var_data=hfs var_data_format=1 var_store=1 hk_fast_halt=1 wifi_mac=$(tr -d ' \n\r' < fw-wifi/mac)"
+# (what the phone does by default is the loader's now: default_args of platform_instantnoodlep; the line says only what is this image's, and what it wants otherwise, as wifi=0)
+CMD="${STANDALONE_EXTRA--v} epoch=$(date +%s) wifi_mac=$(tr -d ' \n\r' < fw-wifi/mac)"
 python3 xnuloader/mkpayload.py -o out/standalone-payload.bin loader.efi=$L kernel=$K ramdisk=${SMALL_IMAGE:-userland/root-sa1.apfs} resident=userland/flashboot.apfs --cmdline "$CMD" > /dev/null
 python3 - "$OUT" <<'PY'
 import gzip, struct, subprocess, sys, os, zlib

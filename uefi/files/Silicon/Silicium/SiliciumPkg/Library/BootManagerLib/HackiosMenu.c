@@ -163,6 +163,10 @@ HackiosBootMenu (
   // that ABL's own `fastboot --set-active` moves with them, and left the phone refusing to boot until it was repaired over EDL (2026-10-28).
   // Slot changes are made with `fastboot --set-active=a|b`.
   //
+  // Mode 2 is back (2026-11-02) as "Android": the kernel only marks the active slot unbootable and ABL makes the other one active by itself,
+  // GUIDs and all (instantnoodle_ufs_android_once()). Back to iOS: `fastboot --set-active=a`.
+  //
+  AddItem ("Android",                     -1, 2);
   AddItem ("Reboot to bootloader",        -1, 3);
   AddItem ("Reboot to recovery",          -1, 4);
 

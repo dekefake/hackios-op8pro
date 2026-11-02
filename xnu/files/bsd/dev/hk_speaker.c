@@ -824,6 +824,18 @@ hk_speaker_prepare(const uint8_t *acf, uint64_t size)
 }
 
 bool
+hk_speaker_route(uint32_t route)
+{
+	return instantnoodle_board() ? instantnoodle_speaker_route(route) : route == HK_SPEAKER_BOTH;
+}
+
+bool
+hk_speaker_earpiece_gain(uint32_t gain)
+{
+	return instantnoodle_board() && instantnoodle_speaker_earpiece_gain(gain);
+}
+
+bool
 hk_speaker_start(void)
 {
 	if (instantnoodle_board()) {

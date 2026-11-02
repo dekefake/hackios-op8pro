@@ -114,6 +114,7 @@ get64(const uint8_t *at)
 	return ((uint64_t)high << 32 | low);
 }
 
+static struct hk_mhi_channel *waiting_channel;
 #define CTX_CFG		0
 #define CTX_TYPE	4
 #define CTX_INDEX	8
@@ -415,6 +416,8 @@ service_ring(struct hk_mhi *h, unsigned e)
 					h->sfr_status = code;           /* (the subsystem failure reason buffer's configuration, MHI_CMD_SFR_CFG) */
 				} else if ((ch = channel_numbered(h, command >> 24)) != NULL) {
 					ch->command_status = code;
+				} else if (waiting_channel != NULL && waiting_channel->config->number == command >> 24) {
+					waiting_channel->command_status = code;         /* (a channel of the DSP's: hk_mhi_sat_command()) */
 				}
 				h->commands.rp = next(&h->commands, at);
 				break;
@@ -662,6 +665,47 @@ command(struct hk_mhi *h, struct hk_mhi_channel *ch, uint32_t type)
 		say(h, "mhi: channel %u: command %#x completed with %#x", ch->config->number, type, ch->command_status);
 		error = EIO;
 	}
+	return (error);
+}
+
+/*
+ * For channels another processor drives (the audio DSP's, "offload" in the device tree; instantnoodle_modem.c's satellite): their context entries say only where that one keeps the real
+ * context ("generic", type 0xA: Android's mhi_satellite.c, mhi_device_configure()), and the channel is started or reset by a command as any other. Not on a channel of this host's.
+ */
+int
+hk_mhi_sat_context(struct hk_mhi *h, bool event, uint32_t id, uint64_t base, uint64_t size)
+{
+	uint8_t *ctx;
+
+	if (!h->allocated || id >= (event ? h->config.event_count : h->config.max_channels)) {
+		return (EINVAL);
+	}
+	ctx = event ? event_context(h, id) : channel_context(h, id);
+	put32(ctx + 0, 0);
+	put32(ctx + 4, 0xa);
+	put32(ctx + 8, 0);
+	put64(ctx + 12, base);
+	put64(ctx + 20, size);
+	put64(ctx + 28, 0);
+	put64(ctx + 36, 0);
+	return (0);
+}
+
+int
+hk_mhi_sat_command(struct hk_mhi *h, uint32_t number, bool start)
+{
+	static struct hk_mhi_channel_config config;
+	static struct hk_mhi_channel channel;
+	int error;
+
+	if (!h->allocated || !h->powered) {
+		return (ENXIO);
+	}
+	h->ops->lock(h->context);
+	config.number = number;
+	channel.config = &config;
+	error = command(h, &channel, start ? MHI_TYPE_START_CHAN : MHI_TYPE_RESET_CHAN);
+	h->ops->unlock(h->context);
 	return (error);
 }
 

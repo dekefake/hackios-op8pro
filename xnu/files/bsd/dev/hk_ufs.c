@@ -244,6 +244,43 @@ static bool ufs_write_out, ufs_write_was_native;        /* the list is out for w
 static uint64_t ufs_writes, ufs_write_bytes, ufs_write_errors, ufs_write_refused;
 
 SYSCTL_DECL(_kern_hackios);
+
+/*
+ * kern.hackios.ufs_peek: one block of 4 KiB of a logical unit that /dev has no node for, for backing up a partition table before it is touched: root only, read only; new value
+ * { uint32 lun; uint32 zero; uint64 block }, old value the block. Only on the OnePlus 8 Pro's own storage, and only LUNs instantnoodle_ufs_read() takes.
+ */
+static int
+ufs_sysctl_peek(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	struct { uint32_t lun, zero; uint64_t block; } where;
+	uint8_t *data;
+	int error;
+
+	if (!ufs_8pro) {
+		return ENXIO;
+	}
+	if (req->oldptr == USER_ADDR_NULL) {
+		req->oldidx = 4096;
+		return 0;
+	}
+	if (req->newptr == USER_ADDR_NULL || req->newlen != sizeof(where) || req->oldlen < 4096 || (error = SYSCTL_IN(req, &where, sizeof(where))) != 0) {
+		return EINVAL;
+	}
+	if (where.lun > 5 || where.zero != 0 || where.block >> 32 != 0) {
+		return EINVAL;
+	}
+	data = kalloc_data(4096, Z_WAITOK);
+	if (data == NULL) {
+		return ENOMEM;
+	}
+	error = instantnoodle_ufs_read((uint8_t)where.lun, where.block * 4096, data, 4096);
+	if (error == 0) {
+		error = SYSCTL_OUT(req, data, 4096);
+	}
+	kfree_data(data, 4096);
+	return error;
+}
+SYSCTL_PROC(_kern_hackios, OID_AUTO, ufs_peek, CTLTYPE_OPAQUE | CTLFLAG_RW | CTLFLAG_LOCKED, 0, 0, ufs_sysctl_peek, "S", "one block of a logical unit, read only");
 SYSCTL_QUAD(_kern_hackios, OID_AUTO, ufs_requests, CTLFLAG_RD | CTLFLAG_LOCKED, &ufs_requests,
     "requests the phone's storage has answered through the loader");
 SYSCTL_QUAD(_kern_hackios, OID_AUTO, ufs_errors, CTLFLAG_RD | CTLFLAG_LOCKED, &ufs_errors,
@@ -1885,15 +1922,24 @@ ufs_8pro_setup(void)
 		return false;
 	}
 	/*
-	 * hk_swap_slot=1 (the standalone boot menu's "Android, other slot, once": the loader put it in place of hk_fast_halt=1): the A/B bytes of boot_a and boot_b are exchanged in the GPT
+	 * hk_swap_slot=1 (the standalone boot menu's "Android": the loader put it in place of hk_fast_halt=1; =2 only looks): the active slot marked unbootable, ABL does the rest. Was: the A/B bytes of boot_a and boot_b are exchanged in the GPT
 	 * and the phone restarts at once, into the other slot (instantnoodle_ufs.c, instantnoodle_ufs_ab_swap()). If it cannot be done, iOS boots as it was.
 	 */
-	if (PE_parse_boot_argn("hk_swap_slot", &check, sizeof(check)) && check == 1) {
-		int swapped = instantnoodle_ufs_ab_swap();
+	if (PE_parse_boot_argn("hk_swap_slot", &check, sizeof(check)) && (check == 1 || check == 2)) {
+		int swapped = instantnoodle_ufs_android_once(check == 2);
 
-		ufs_st_say("ufs: ufs_8pro: the other slot made active: %s (%d)\n", swapped == 0 ? "done, restarting" : "NOT DONE, iOS goes on", swapped);
-		if (swapped == 0) {
+		ufs_st_say("ufs: ufs_8pro: to Android: %s (%d)\n", check == 2 ? "only a look, iOS goes on" : swapped == 0 ? "done, restarting" : "NOT DONE, iOS goes on", swapped);
+		if (swapped == 0 && check == 1) {
 			loader_return_restart();
+		}
+		check = 0;
+	}
+	check = 0;
+	if (PE_parse_boot_argn("hk_slot_ok", &check, sizeof(check)) && check == 1) {
+		int marked = instantnoodle_ufs_slot_good();
+
+		if (marked != 0) {
+			ufs_st_say("ufs: ufs_8pro: this slot could not be marked successful (%d): iOS goes on\n", marked);
 		}
 		check = 0;
 	}

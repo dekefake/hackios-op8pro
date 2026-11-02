@@ -33,6 +33,8 @@ int instantnoodle_ufs_read(uint8_t lun, uint64_t offset, uint8_t *dst, uint64_t 
 int instantnoodle_ufs_write(uint8_t lun, uint64_t offset, const uint8_t *src, uint64_t len);
 int instantnoodle_ufs_write_window(uint64_t first, uint64_t end);
 int instantnoodle_ufs_ab_swap(void);
+int instantnoodle_ufs_android_once(bool only_look);
+int instantnoodle_ufs_slot_good(void);
 void instantnoodle_ufs_down(void);
 uint32_t instantnoodle_ufs_gpt(struct instantnoodle_ufs_part *out, uint32_t max);
 bool ufshc_available(void);

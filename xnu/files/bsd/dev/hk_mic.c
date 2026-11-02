@@ -81,6 +81,8 @@
 #include <pexpert/pexpert.h>
 #include <sys/conf.h>
 #include <sys/hk_audio.h>
+#include <sys/sysctl.h>
+#include <sys/errno.h>
 #include <sys/instantnoodle.h>
 #include <sys/hk_input.h>
 #include <sys/systm.h>
@@ -2006,11 +2008,446 @@ mic_thread(__unused void *parameter, __unused wait_result_t result)
 	thread_terminate(current_thread());
 }
 
+/*
+ * The sound of a call, in steps, boot-arg voice=N (Android's dsp/voice_mhi.c and dsp/q6voice.c; nothing of it has made a sound yet):
+ *   1  ask the DSP's voice service (MVM) its version: a question only;
+ *   2  ... and tell it where the mailbox it shares with the modem is, once the modem is up (VSS_IPKTEXG_CMD_SET_MAILBOX_MEMORY_CONFIG): 128 KB in one piece, as the device tree's
+ *      mailbox_region, which the DSP sees by physical address and the modem through its window (hk_modem_map_contig()). The modem's channel for it, AUDIO_VOICE_0 (80), is an offload
+ *      channel: the DSP drives it, not us.
+ */
+extern bool hk_modem_map_contig(uint64_t phys, size_t size, uint64_t *iova);
+extern uint32_t hk_modem_generation(void);
+extern void hk_modem_dma_sync(void *address, size_t size);
+extern uint64_t kvtophys(vm_offset_t va);
+extern void IOSleep(unsigned int milliseconds);
+#define VOICE_MAILBOX_BYTES     0x20000u
+#define VOICE_MAILBOX_ALIGN     0x400000u
+#define APR_SVC_ADSP_MVM        0x09
+#define VSS_IVERSION_CMD_GET    0x00011378u
+#define VSS_IVERSION_RSP_GET    0x00011379u
+#define VSS_IPKTEXG_CMD_SET_MAILBOX_MEMORY_CONFIG 0x0001333Bu
+
+/*
+ *   3  ... and, while a call is up (kern.hackios.voice_call, hk_commcenter), the sessions: MVM and CVS passive, under the name the modem's voice has on this SoC, VOICEMMODE1's VSID; CVP full
+ *      control from the microphone's port to the speakers' (the OnePlus 8's: TX_CDC_DMA_TX_3 and TERT_MI2S_RX), no calibration (Android registers it; there is none here); the same
+ *      commands in the same order as dsp/q6voice.c's voc_start_voice_call(). The two ports are kept up by the microphone's and the speakers' own paths. The amplifiers' software guard does
+ *      not see this sound (it is the DSP's), so the volume step stays low. Earpiece: not set up; the sound of a call is on the speakers.
+ */
+#define APR_SVC_ADSP_CVS        0x0A
+#define APR_SVC_ADSP_CVP        0x0B
+/* kern.hackios.voice_call's value says the session's name, until it is known which one this modem's voice has: 1 VoiceMMode1's VSID, 2 Android's default, 3 Voice2's, 4 VoLTE's default */
+static const char * const voice_names[] = { "", "11C05000", "default modem voice", "10DC1000", "default volte voice" };
+#define VOICE_TX_PORT           0xb037
+#define VOICE_RX_PORT           0x1004
+extern void hk_sound_voice_hold(bool hold);
+static volatile bool voice_ready, voice_running;
+static volatile int voice_wanted;
+static uint16_t voice_mvm, voice_cvs, voice_cvp;
+static volatile bool voice_speaker;             /* kern.hackios.voice_speaker: this call on the speakers, not the earpiece */
+static volatile bool voice_mute_wanted;         /* kern.hackios.voice_mute: the microphone of this call */
+static bool voice_muted;                        /* as the DSP was last told */
+
+static bool
+voice_command(const char *what, uint8_t service, uint16_t port, uint32_t opcode, const void *payload, uint32_t length, uint16_t *handle)
+{
+	struct hk_apr_answer answer;
+
+	bzero(&answer, sizeof(answer));
+	if (!hk_adsp_apr(service, port, 0, opcode, payload, length, 2000, &answer)) {
+		say("voice: %s: no answer\n", what);
+		return false;
+	}
+	if (answer.opcode != APR_BASIC_RSP_RESULT || answer.words[1] != 0) {
+		say("voice: %s: REFUSED (opcode %#x: %#x %#x)\n", what, answer.opcode, answer.words[0], answer.words[1]);
+		return false;
+	}
+	if (handle != NULL) {
+		*handle = answer.port;
+	}
+	say("voice: %s: done%s\n", what, handle != NULL ? " (a handle)" : "");
+	return true;
+}
+
+/* a parameter of the vocproc, in the command: no memory handle, no address, the size, the module, the parameter, its size, the data */
+static bool
+voice_param(const char *what, uint32_t module, uint32_t param, const void *data, uint16_t size)
+{
+	struct __attribute__((packed)) {
+		uint32_t mem_handle;
+		uint64_t mem_address;
+		uint32_t mem_size;
+		uint32_t module, param;
+		uint16_t size, reserved;
+		uint8_t data[64];
+	} command;
+
+	bzero(&command, sizeof(command));
+	command.mem_size = 12u + size;
+	command.module = module;
+	command.param = param;
+	command.size = size;
+	memcpy(command.data, data, size);
+	return voice_command(what, APR_SVC_ADSP_CVP, voice_cvp, 0x0001133Du /* VSS_ICOMMON_CMD_SET_PARAM_V2 */, &command, 16u + 12u + size, NULL);
+}
+
+static void
+voice_start(void)
+{
+	char name[20];
+	struct __attribute__((packed)) {
+		uint16_t direction, tx_port;
+		uint32_t tx_topology;
+		uint16_t rx_port;
+		uint32_t rx_topology, profile, mode;
+		uint16_t ec_port;
+		char name[20];
+	} create;
+	struct { uint32_t channels, bits; uint8_t map[8]; } channel_info;
+	struct __attribute__((packed)) { uint32_t port; uint16_t channels, bits; uint32_t rate; uint8_t map[8]; } media;
+	struct __attribute__((packed)) { uint16_t direction; uint32_t value; uint16_t ramp; } volume;
+	uint16_t two[2];
+
+	const char *session = voice_names[voice_wanted >= 1 && voice_wanted <= 4 ? voice_wanted : 1];
+
+	say("voice: a call: the sound's path up, as \"%s\"\n", session);
+	strlcpy(name, session, sizeof(name));
+	ios_wants = 1;
+	/* (before the amplifiers are held up, so that they are started for the earpiece) */
+	hk_sound_route(voice_speaker ? HK_SPEAKER_BOTH : HK_SPEAKER_EARPIECE);
+	hk_sound_voice_hold(true);
+	IOSleep(600);
+	two[0] = 1;
+	if (!voice_command("MVM passive session", APR_SVC_ADSP_MVM, 0, 0x000110FFu, name, sizeof(name), &voice_mvm) ||
+	    /* (one the DSP would not destroy after the last call is still ours: see voice_stop()) */
+	    (voice_cvs == 0 && !voice_command("CVS passive session", APR_SVC_ADSP_CVS, 0, 0x00011140u, name, sizeof(name), &voice_cvs)) ||
+	    !voice_command("dual control", APR_SVC_ADSP_MVM, voice_mvm, 0x00011327u, two, sizeof(two[0]), NULL)) {
+		return;
+	}
+	bzero(&create, sizeof(create));
+	create.direction = 2;
+	create.tx_port = VOICE_TX_PORT;
+	create.tx_topology = 0x00010F70u;       /* VSS_IVOCPROC_TOPOLOGY_ID_NONE */
+	create.rx_port = VOICE_RX_PORT;
+	create.rx_topology = 0x00010F77u;       /* ..._RX_DEFAULT */
+	create.profile = 0x0001135Eu;           /* VSS_ICOMMON_CAL_NETWORK_ID_NONE */
+	create.mode = 0x00010F7Cu;              /* VSS_IVOCPROC_VOCPROC_MODE_EC_INT_MIXING */
+	create.ec_port = 0xffff;
+	/* (no name: Android gives the vocproc none) */
+	if (!voice_command("CVP session, microphone to speakers", APR_SVC_ADSP_CVP, 0, 0x00013169u, &create, sizeof(create), &voice_cvp)) {
+		return;
+	}
+	/* as Android on this phone (kprobes on apr_send_pkt on a real call, 2026-11-02): one channel to the speakers, centre, in ALSA's format numbers (6 S24_LE, 2 S16_LE); no MFC, no device channels */
+	bzero(&channel_info, sizeof(channel_info));
+	channel_info.channels = 1;
+	channel_info.bits = 6;
+	channel_info.map[0] = 3;
+	voice_param("rx channels", 0x0001316Eu, 0x0001328Fu, &channel_info, sizeof(channel_info));
+	bzero(&channel_info, sizeof(channel_info));
+	channel_info.channels = 1;
+	channel_info.bits = 2;
+	channel_info.map[0] = 1;
+	voice_param("tx channels", 0x0001316Eu, 0x0001328Eu, &channel_info, sizeof(channel_info));
+	bzero(&channel_info, sizeof(channel_info));
+	channel_info.channels = 1;
+	channel_info.bits = 6;
+	channel_info.map[0] = 3;
+	voice_param("echo reference channels", 0x0001316Eu, 0x00013290u, &channel_info, sizeof(channel_info));
+	bzero(&media, sizeof(media));
+	media.port = VOICE_RX_PORT;
+	media.channels = 1;
+	media.bits = 6;
+	media.rate = 48000;
+	media.map[0] = 3;
+	voice_param("rx port's format", 0x0001316Eu, 0x00013254u, &media, sizeof(media));
+	bzero(&media, sizeof(media));
+	media.port = VOICE_TX_PORT;
+	media.channels = 1;
+	media.bits = 2;
+	media.rate = 48000;
+	media.map[0] = 1;
+	voice_param("tx port's format", 0x0001316Eu, 0x00013253u, &media, sizeof(media));
+	voice_command("topology commit", APR_SVC_ADSP_CVP, voice_cvp, 0x00013198u, NULL, 0, NULL);
+	if (!voice_command("CVP enable", APR_SVC_ADSP_CVP, voice_cvp, 0x000100C6u, NULL, 0, NULL) ||
+	    !voice_command("CVP attached to MVM", APR_SVC_ADSP_MVM, voice_mvm, 0x0001123Eu, &voice_cvp, sizeof(voice_cvp), NULL)) {
+		return;
+	}
+	{
+		uint32_t tty = 0;
+		struct __attribute__((packed)) { uint16_t direction, flag, ramp; } mute = { 0, 0, 20 };
+
+		voice_command("TTY off", APR_SVC_ADSP_CVS, voice_cvs, 0x00011196u, &tty, sizeof(tty), NULL);
+		mute.flag = voice_mute_wanted ? 1 : 0;
+		voice_muted = voice_mute_wanted;
+		voice_command(voice_muted ? "muted" : "not muted", APR_SVC_ADSP_CVS, voice_cvs, 0x0001138Bu, &mute, sizeof(mute), NULL);
+	}
+	/* as Android's call (the DSP refuses it without Android's calibration, which only costs a line of the log) */
+	volume.direction = 1;
+	volume.value = 5;
+	volume.ramp = 20;
+	voice_command("volume step", APR_SVC_ADSP_CVP, voice_cvp, 0x000112C2u, &volume, sizeof(volume), NULL);
+	if (voice_command("START VOICE", APR_SVC_ADSP_MVM, voice_mvm, 0x00011190u, NULL, 0, NULL)) {
+		say("voice: the sound's path is up\n");
+	}
+	hk_audio_dsp_faults();
+}
+
+static void
+voice_stop(void)
+{
+	say("voice: the call is over: the sound's path down\n");
+	hk_audio_dsp_faults();
+	if (voice_mvm != 0) {
+		voice_command("stop voice", APR_SVC_ADSP_MVM, voice_mvm, 0x00011192u, NULL, 0, NULL);
+		if (voice_cvp != 0) {
+			voice_command("CVP detached", APR_SVC_ADSP_MVM, voice_mvm, 0x0001123Fu, &voice_cvp, sizeof(voice_cvp), NULL);
+		}
+	}
+	if (voice_cvp != 0) {
+		voice_command("CVP disable", APR_SVC_ADSP_CVP, voice_cvp, 0x000110E1u, NULL, 0, NULL);
+		voice_command("CVP destroyed", APR_SVC_ADSP_CVP, voice_cvp, 0x0001003Cu, NULL, 0, NULL);
+	}
+	/*
+	 * After a real call the DSP may refuse this for a moment (status 2, the modem's side still closing), and then the next call's CVS session is refused too (status 9), that call has
+	 * no sound, and the modem crashes on its own command timing out (2026-11-02). So: again a little later, and if it still will not go, the handle is kept for the next call.
+	 */
+	if (voice_cvs != 0) {
+		bool gone = false;
+
+		for (unsigned tries = 0; tries < 4 && !gone; tries++) {
+			if (tries != 0) {
+				IOSleep(500);
+			}
+			gone = voice_command("CVS destroyed", APR_SVC_ADSP_CVS, voice_cvs, 0x0001003Cu, NULL, 0, NULL);
+		}
+		if (gone) {
+			voice_cvs = 0;
+		} else {
+			say("voice: the CVS session stays, for the next call\n");
+		}
+	}
+	if (voice_mvm != 0) {
+		voice_command("MVM destroyed", APR_SVC_ADSP_MVM, voice_mvm, 0x0001003Cu, NULL, 0, NULL);
+	}
+	voice_mvm = voice_cvp = 0;
+	voice_speaker = false;                  /* (the next call starts at the earpiece, as on an iPhone) */
+	voice_mute_wanted = false;
+	voice_muted = false;
+	hk_sound_route(HK_SPEAKER_BOTH);
+	hk_sound_voice_hold(false);
+	ios_wants = 0;
+}
+
+static void
+voice_thread(__unused void *parameter, __unused wait_result_t result)
+{
+	struct hk_apr_answer answer;
+	uint32_t voice = 0, mailbox_generation = 0, mailbox_mapped_generation = 0, mailbox_wait = 0;
+	vm_offset_t mailbox_memory = 0;
+	uint64_t mailbox_dsp = 0, mailbox_iova = 0;
+
+	PE_parse_boot_argn("voice", &voice, sizeof(voice));
+	bzero(&answer, sizeof(answer));
+	if (hk_adsp_apr(APR_SVC_ADSP_MVM, 0, 0, VSS_IVERSION_CMD_GET, NULL, 0, 1000, &answer) && answer.opcode == VSS_IVERSION_RSP_GET) {
+		char version[33];
+
+		bzero(version, sizeof(version));
+		memcpy(version, answer.words, answer.length < 32 ? answer.length : 32);
+		say("voice: the DSP's voice service answers: version \"%s\"\n", version);
+	} else {
+		say("voice: no version from the DSP's voice service (opcode %#x, %u bytes, %#x %#x)\n", answer.opcode, answer.length, answer.words[0], answer.words[1]);
+	}
+	if (voice >= 2) {
+		struct __attribute__((packed)) {
+			uint64_t adsp, pcie;
+			uint32_t size;
+		} config;
+		vm_offset_t memory = 0;
+		uint64_t iova = 0;
+		unsigned waited = 0;
+
+		{
+			static const uint32_t aligns[] = { VOICE_MAILBOX_ALIGN, 0x100000, VOICE_MAILBOX_BYTES, 0 };
+
+			/* (as well aligned as there is, below 4 GB; the device tree asks 4 MB) */
+			for (unsigned i = 0; i < sizeof(aligns) / sizeof(aligns[0]) && memory == 0; i++) {
+				kern_return_t got = kmem_alloc_contig(kernel_map, &memory, VOICE_MAILBOX_BYTES, PAGE_MASK, (ppnum_t)((1ull << 32 >> PAGE_SHIFT) - 1),
+				    aligns[i] != 0 ? (ppnum_t)((aligns[i] >> PAGE_SHIFT) - 1) : 0, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT);
+
+				if (got != KERN_SUCCESS) {
+					say("voice: the mailbox below 4 GB, aligned to %#x: none (%d)\n", aligns[i], got);
+					memory = 0;
+				}
+			}
+		}
+		if (memory == 0) {
+			say("voice: no memory for the mailbox\n");
+			thread_terminate(current_thread());
+		}
+		/*
+		 * Below 4 GB, as the device tree's mailbox_region (alloc-ranges 0..0xffffffff, no-map): above it the modem's voice got as far as VSS_IMEMORY_CMD_MAP_PHYSICAL and the DSP stopped
+		 * answering anybody. Out of the processor's caches now and untouched from here on: Android never maps it for the processor, and a line of ours written back later would overwrite the DSP's.
+		 */
+		hk_modem_dma_sync((void *)memory, VOICE_MAILBOX_BYTES);
+		say("voice: the mailbox's memory: %#llx\n", kvtophys(memory));
+		while (!hk_modem_map_contig(kvtophys(memory), VOICE_MAILBOX_BYTES, &iova) && waited < 300) {
+			IOSleep(1000);
+			waited++;
+		}
+		if (iova == 0) {
+			say("voice: the modem did not come up in %u s: no mailbox\n", waited);
+			thread_terminate(current_thread());
+		}
+		if (!hk_audio_dsp_map(kvtophys(memory), VOICE_MAILBOX_BYTES, &config.adsp)) {
+			say("voice: the mailbox could not be shown to the DSP: not told of it\n");
+			thread_terminate(current_thread());
+		}
+		mailbox_memory = memory;
+		mailbox_dsp = config.adsp;
+		mailbox_generation = mailbox_mapped_generation = hk_modem_generation();
+		mailbox_iova = iova;
+		config.pcie = iova;
+		config.size = VOICE_MAILBOX_BYTES;
+		bzero(&answer, sizeof(answer));
+		if (hk_adsp_apr(APR_SVC_ADSP_MVM, 0, 0, VSS_IPKTEXG_CMD_SET_MAILBOX_MEMORY_CONFIG, &config, sizeof(config), 1000, &answer) && answer.opcode == APR_BASIC_RSP_RESULT &&
+		    answer.words[0] == VSS_IPKTEXG_CMD_SET_MAILBOX_MEMORY_CONFIG) {
+			say("voice: the mailbox (%u KB at %#llx, %#llx for the DSP, %#llx for the modem, after %u s): the DSP says %#x\n", VOICE_MAILBOX_BYTES / 1024, kvtophys(memory), config.adsp, iova, waited, answer.words[1]);
+		} else {
+			say("voice: no answer about the mailbox (opcode %#x, %u bytes, %#x %#x)\n", answer.opcode, answer.length, answer.words[0], answer.words[1]);
+		}
+	}
+	if (voice >= 3) {
+		voice_ready = true;
+		say("voice: ready for calls (kern.hackios.voice_call)\n");
+		for (;;) {
+			bool wanted = voice_wanted != 0;
+
+			if (!voice_running && mailbox_memory != 0 && mailbox_generation != hk_modem_generation()) {
+				/*
+				 * The modem has started again: its window is a new one, and the old address of the mailbox means nothing in it; nor is there a CVS session left to keep. Told until
+				 * the DSP answers, every 5 s (it can be slow to answer after a modem's crash), and mapped once.
+				 */
+				uint32_t generation = hk_modem_generation();
+
+				voice_cvs = 0;
+				if (mailbox_mapped_generation != generation && hk_modem_map_contig(kvtophys(mailbox_memory), VOICE_MAILBOX_BYTES, &mailbox_iova)) {
+					mailbox_mapped_generation = generation;
+					mailbox_wait = 0;
+				}
+				if (mailbox_mapped_generation == generation && mailbox_wait-- == 0) {
+					struct __attribute__((packed)) {
+						uint64_t adsp, pcie;
+						uint32_t size;
+					} config = { mailbox_dsp, mailbox_iova, VOICE_MAILBOX_BYTES };
+					bool told;
+
+					bzero(&answer, sizeof(answer));
+					told = hk_adsp_apr(APR_SVC_ADSP_MVM, 0, 0, VSS_IPKTEXG_CMD_SET_MAILBOX_MEMORY_CONFIG, &config, sizeof(config), 1000, &answer);
+					say("voice: the modem has started again: the mailbox at %#llx for it: the DSP says %s\n", mailbox_iova, told ? "yes" : "nothing");
+					mailbox_wait = 50;
+					if (told) {
+						mailbox_generation = generation;
+					}
+				}
+			}
+			if (wanted && !voice_running) {
+				voice_running = true;
+				voice_start();
+			} else if (!wanted && voice_running) {
+				voice_stop();
+				voice_running = false;
+			} else if (wanted && voice_cvs != 0 && voice_muted != voice_mute_wanted) {
+				struct __attribute__((packed)) { uint16_t direction, flag, ramp; } mute = { 0, 0, 20 };
+
+				voice_muted = voice_mute_wanted;
+				mute.flag = voice_muted ? 1 : 0;
+				voice_command(voice_muted ? "muted" : "not muted", APR_SVC_ADSP_CVS, voice_cvs, 0x0001138Bu, &mute, sizeof(mute), NULL);
+			}
+			IOSleep(100);
+		}
+	}
+	thread_terminate(current_thread());
+}
+
+/* kern.hackios.voice_call: 1 while a call has been set up (hk_commcenter), 0 when it is over; read: whether the sound's path is up */
+static int
+voice_call_sysctl(__unused struct sysctl_oid *oid, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	int value = voice_running ? 1 : 0, error = sysctl_handle_int(oid, &value, 0, req);
+
+	if (error == 0 && req->newptr != USER_ADDR_NULL) {
+		if (!voice_ready) {
+			return ENXIO;
+		}
+		voice_wanted = value;
+	}
+	return error;
+}
+
+/* kern.hackios.voice_speaker: 1 this call is on the speakers, 0 at the earpiece (hk_commcenter); every call starts at the earpiece */
+static int
+voice_speaker_sysctl(__unused struct sysctl_oid *oid, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	int value = voice_speaker ? 1 : 0, error = sysctl_handle_int(oid, &value, 0, req);
+
+	if (error == 0 && req->newptr != USER_ADDR_NULL) {
+		if (!voice_ready) {
+			return ENXIO;
+		}
+		voice_speaker = value != 0;
+		if (voice_running) {
+			hk_sound_route(voice_speaker ? HK_SPEAKER_BOTH : HK_SPEAKER_EARPIECE);
+		}
+	}
+	return error;
+}
+
+/* kern.hackios.voice_mute: 1 the other side hears nothing of this call (hk_commcenter) */
+static int
+voice_mute_sysctl(__unused struct sysctl_oid *oid, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	int value = voice_mute_wanted ? 1 : 0, error = sysctl_handle_int(oid, &value, 0, req);
+
+	if (error == 0 && req->newptr != USER_ADDR_NULL) {
+		if (!voice_ready) {
+			return ENXIO;
+		}
+		voice_mute_wanted = value != 0;
+	}
+	return error;
+}
+
+/* kern.hackios.voice_earpiece_gain: 0..15, TDMSPKG of the earpiece's amplifier, to judge a call's level by ear (the container's is 13) */
+static int
+voice_earpiece_gain_sysctl(__unused struct sysctl_oid *oid, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	int value = 13, error = sysctl_handle_int(oid, &value, 0, req);
+
+	if (error == 0 && req->newptr != USER_ADDR_NULL) {
+		if (value < 0 || value > 15 || !voice_running) {
+			return EINVAL;
+		}
+		hk_sound_earpiece_gain((uint32_t)value);
+	}
+	return error;
+}
+SYSCTL_DECL(_kern_hackios);
+SYSCTL_PROC(_kern_hackios, OID_AUTO, voice_speaker, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, 0, 0, voice_speaker_sysctl, "I", "this call on the speakers rather than the earpiece");
+SYSCTL_PROC(_kern_hackios, OID_AUTO, voice_mute, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, 0, 0, voice_mute_sysctl, "I", "this call's microphone muted");
+SYSCTL_PROC(_kern_hackios, OID_AUTO, voice_earpiece_gain, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, 0, 0, voice_earpiece_gain_sysctl, "I", "the earpiece amplifier's TDMSPKG, a test");
+SYSCTL_PROC(_kern_hackios, OID_AUTO, voice_call, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, 0, 0, voice_call_sysctl, "I", "the sound of a call, on or off");
+
 void
 hk_mic_dsp_up(void)
 {
 	thread_t thread;
 
+	{
+		uint32_t voice = 0;
+
+		if (PE_parse_boot_argn("voice", &voice, sizeof(voice)) && voice != 0 && kernel_thread_start(voice_thread, NULL, &thread) == KERN_SUCCESS) {
+			thread_deallocate(thread);
+		}
+	}
 	if (!PE_parse_boot_argn("mic", &level, sizeof(level)) || level == 0) {
 		return;
 	}

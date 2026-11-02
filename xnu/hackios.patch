@@ -760,7 +760,7 @@ index 1d71c66629fb..3e1737c21b86 100644
 + * from a job description, which is why the kernel adds this one. Set once by our init (from
 + * etc/inject.conf) before it hands over to launchd.
 + */
-+static char exec_inject_conf[512];
++static char exec_inject_conf[1024];
 +SYSCTL_STRING(_kern, OID_AUTO, exec_inject, CTLFLAG_RW | CTLFLAG_LOCKED, exec_inject_conf, sizeof(exec_inject_conf),
 +    "LIBRARY NAME... [; LIBRARY NAME...]: programs started with the library inserted");
 +
@@ -4153,3 +4153,15 @@ index 20d9d47..df0f9d2 100644
  	if (!OSCompareAndSwap(0, 1, &system_inshutdown)) {
  		if ((howto & RB_QUICK) == RB_QUICK) {
  			goto force_reboot;
+diff --git a/pexpert/pexpert/arm64/boot.h b/pexpert/pexpert/arm64/boot.h
+--- a/pexpert/pexpert/arm64/boot.h
++++ b/pexpert/pexpert/arm64/boot.h
+@@ -23,7 +23,7 @@
+  * This value matches iBoot's IBOOT_MAX_ENV_VAR_DATA_SIZE.
+  * There are no iBoot headers so have to duplicate it here for now.
+  */
+-#define BOOT_LINE_LENGTH        608
++#define BOOT_LINE_LENGTH        1024
+ 
+ /*
+  * Video information..

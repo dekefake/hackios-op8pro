@@ -48,7 +48,7 @@ struct boot_video {
 	uint64_t v_baseAddr, v_display, v_rowBytes, v_width, v_height, v_depth;
 };
 
-#define BOOT_LINE_LENGTH 608
+#define BOOT_LINE_LENGTH 1024             /* 608 is XNU's own: ours is raised with it (pexpert/arm64/boot.h): the OnePlus 8 Pro's line outgrew it on 2026-11-02 and lost its tail in silence */
 
 struct boot_args {
 	uint16_t revision;
@@ -572,6 +572,7 @@ struct platform {
 	uint64_t store_first, store_last;
 	/* board_ arguments for this device's kernel (bsd/sys/hk_board.h): where its SoC differs from redwood's */
 	const char *board_args;
+	const char *default_args;       /* what this phone has without being asked: "NAME=VALUE ..."; each one is left out if the image's line names it (wifi=0), all if hk_defaults=0 */
 	/* no Android left to go back to (the port took its userdata): the boot menu offers none (flashboot.c) */
 	int no_android;
 };
@@ -649,6 +650,14 @@ static const struct platform platform_instantnoodlep = {
 	.store = "darwin", .store_type = BLOCK_DARWIN_TYPE, .store_uniq = BLOCK_DARWIN_UNIQ,
 	.store_first = BLOCK_DARWIN_FIRST, .store_last = BLOCK_DARWIN_LAST,
 	.board_args = "board_thermal_gpuss_0=0xf board_thermal_gpuss_1=0x108",
+	/*
+	 * Everything this phone has been checked to do is simply on (owner, 2026-11-02): an image's own line says only what is its own (the date, the Wi-Fi address) and what it wants
+	 * otherwise: "wifi=0" turns Wi-Fi off. docs/BOOT_ARGS.md lists them. The profile's BOOTARGS for runs over `xl` says hk_defaults=0 and spells out what it wants, as before.
+	 */
+	.default_args = "cpus=8 bootcpu=7 cpufreq=1 torch=3 cam=5 ufs_8pro=1 haptic=5 gpu=1 fb_push=2 fb_dcs=1 fb_hz=120 adsp=1 sound=4 sound_amps=1 sound_below=96 "
+	    "wifi=1 bt=6 bt_after=45 fbwidth=1290 fbheight=2796 root_apfs=ufs_darwin ufs_write=1 hk_data=1 var_data=hfs var_data_format=1 var_store=1 hk_fast_halt=1 "
+	    "sb_delay=8 modem=5 modem_quiet=3 modem_chans=2187 modem_bringup=1 modem_tftp=1 modem_blk=1024 modem_efs=1 modem_service=1 modem_qrtr=100000000 modem_secs=60 "
+	    "modem_data=1 modem_diag=0 mic=4 voice=3 voice_sat=1 hk_slot_ok=1",
 };
 
 /*
@@ -2989,6 +2998,75 @@ parse_number(const char *c, unsigned base)
 	return v;
 }
 
+/*
+ * The image's line, then those of the platform's default_args that it does not name. Made once: the boot menu's Android changes it in place (oneshot_cmdline_swap()) and the
+ * payload is parsed again after that.
+ */
+static int starts_with(const char *s, const char *prefix);
+
+static const char *
+with_defaults(const char *line)
+{
+	static char merged[BOOT_LINE_LENGTH];
+	static int made;
+	uint32_t n = 0;
+
+	if (made) {
+		return merged;
+	}
+	if (PLAT == NULL || PLAT->default_args == NULL) {
+		return line;
+	}
+	for (const char *c = line; *c; c++) {
+		if (starts_with(c, "hk_defaults=0") && (c == line || c[-1] == ' ')) {
+			return line;
+		}
+	}
+	for (const char *c = line; *c && n < sizeof(merged) - 1; c++) {
+		merged[n++] = *c;
+	}
+	for (const char *d = PLAT->default_args; *d;) {
+		const char *end = d;
+		uint32_t name = 0, length;
+		int named = 0;
+
+		while (*end && *end != ' ') {
+			end++;
+		}
+		length = (uint32_t)(end - d);
+		while (name < length && d[name] != '=') {
+			name++;
+		}
+		for (const char *c = line; *c && !named; c++) {
+			if (c == line || c[-1] == ' ') {
+				uint32_t k = 0;
+
+				while (k < name && c[k] == d[k]) {
+					k++;
+				}
+				named = k == name && (c[k] == '=' || c[k] == ' ' || c[k] == 0);
+			}
+		}
+		if (!named) {
+			if (n + length + 2 > sizeof(merged)) {
+				print("THE DEFAULTS DO NOT FIT THE COMMAND LINE: lost from here: %s\n", d);
+				break;
+			}
+			if (n != 0) {
+				merged[n++] = ' ';
+			}
+			for (uint32_t k = 0; k < length; k++) {
+				merged[n++] = d[k];
+			}
+		}
+		d = *end ? end + 1 : end;
+	}
+	merged[n] = 0;
+	made = 1;
+	return merged;
+}
+
+
 static int
 parse_payload(struct payload_info *pi, int verbose)
 {
@@ -3033,6 +3111,7 @@ parse_payload(struct payload_info *pi, int verbose)
 		}
 		p += sizeof(*e) + ((e->size + 15) & ~15u);
 	}
+	pi->cmdline = with_defaults(pi->cmdline);
 	return 1;
 }
 
@@ -3654,8 +3733,15 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		}
 		if (n < BOOT_LINE_LENGTH - 1) ba->commandLine[n++] = ' ';
 	}
-	for (const char *c = pi.cmdline; *c && n < BOOT_LINE_LENGTH - 1; c++) {
-		ba->commandLine[n++] = *c;
+	{
+		const char *c = pi.cmdline;
+
+		for (; *c && n < BOOT_LINE_LENGTH - 1; c++) {
+			ba->commandLine[n++] = *c;
+		}
+		if (*c) {
+			print("THE COMMAND LINE IS CUT OFF AT %d BYTES: lost from here: %s\n", (uint64_t)BOOT_LINE_LENGTH, c);
+		}
 	}
 
 	/* --- device tree ---------------------------------------------------- */
@@ -3896,6 +3982,18 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 			dt_end(&w);
 		}
 	}
+	/*
+	 * The OnePlus 8 Pro has a modem (an SDX55 behind PCIe, driven by the kernel: instantnoodle_modem.c), and iOS finds out
+	 * through the device tree: launchd's CommCenter jobs are limited to a tree with a "baseband" node, and MobileGestalt's
+	 * HasBaseband / cellular-data -- by which Settings shows its Cellular pane -- are false without one. As with the
+	 * Bluetooth node, which name and place iOS matches is not known: here and at the root of the tree.
+	 */
+	if (PLAT_IS_KONA()) {
+		dt_begin(&w, "baseband");
+		dt_prop_str(&w, "device_type", "baseband");
+		dt_prop_str(&w, "compatible", "baseband,sdx55");
+		dt_end(&w);
+	}
 	dt_begin(&w, "gic");
 	dt_prop_str(&w, "device_type", "interrupt-controller");
 	dt_prop_str(&w, "compatible", "arm,gic-v3");
@@ -3920,6 +4018,18 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		dt_begin(&w, names[n]);
 		dt_prop_str(&w, "device_type", "bluetooth");
 		dt_prop(&w, "local-mac-address", bluetooth_address, sizeof(bluetooth_address));
+		dt_end(&w);
+	}
+	/*
+	 * The OnePlus 8 Pro has a modem (an SDX55 behind PCIe, driven by the kernel: instantnoodle_modem.c), and iOS finds out
+	 * through the device tree: launchd's CommCenter jobs are limited to a tree with a "baseband" node, and MobileGestalt's
+	 * HasBaseband / cellular-data -- by which Settings shows its Cellular pane -- are false without one. As with the
+	 * Bluetooth node, which name and place iOS matches is not known: here and at the root of the tree.
+	 */
+	if (PLAT_IS_KONA()) {
+		dt_begin(&w, "baseband");
+		dt_prop_str(&w, "device_type", "baseband");
+		dt_prop_str(&w, "compatible", "baseband,sdx55");
 		dt_end(&w);
 	}
 	dt_end(&w);
@@ -4743,7 +4853,8 @@ ramfb_phone_screen(void)
  * (the log through `fastboot oem log`, and after a crash the link stays). 2: Android of the other A/B slot, once -- the kernel is started
  * with hk_swap_slot=1 in place of hk_fast_halt=1, exchanges the two slots' A/B bytes in the GPT and restarts at once
  * (instantnoodle_ufs.c, instantnoodle_ufs_ab_swap(); Android's HackiOS module makes this slot active again once it has come up,
- * common/flash/rearm) -- REMOVED 2026-10-28, see below: mode 2 now boots iOS. 3: the stock bootloader (fastboot). 4: recovery.
+ * common/flash/rearm) -- REMOVED 2026-10-28, see below; back on 2026-11-02 with a kernel that only marks the active slot unbootable and lets ABL do the
+ * rest (instantnoodle_ufs_android_once(); hk_swap_slot's name stayed). 3: the stock bootloader (fastboot). 4: recovery.
  */
 static uint8_t
 hackios_boot_mode(void)
@@ -4847,8 +4958,10 @@ efi_main(efi_handle image, efi_system_table *st)
 			 * "Android of the other slot" is gone (2026-10-28): its A/B exchange changed boot_a's and boot_b's attribute bytes and not the type GUIDs
 			 * that ABL's `fastboot --set-active` moves with them, and the phone would not boot until it was repaired over EDL. The menu no longer has the
 			 * entry; a variable that still says 2 boots iOS with the USB link up. Slots are changed with `fastboot --set-active=a|b`.
+			 *
+			 * Back on 2026-11-02, the other way (see hackios_boot_mode()'s comment). If the kernel cannot do it, iOS boots as it was.
 			 */
-			print("boot mode 2 (Android, other slot) is not supported any more: booting iOS\n");
+			print("boot mode 2: Android: %s\n", (uint64_t)(uintptr_t)(oneshot_cmdline_swap(pi.cmdline) ? "the kernel marks this slot unbootable, ABL does the rest" : "no hk_fast_halt=1 in the command line: booting iOS"));
 			usb_up = usb_start();
 		}
 		if (mode == 1) {

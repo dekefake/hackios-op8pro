@@ -519,6 +519,9 @@ sysctl_top(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int a
 	return SYSCTL_OUT(req, text, strlen(text) + 1);
 }
 
+/* frames put on the panel since boot (MiniIOMobileFramebuffer.cpp): two readings and the time between them are the frame rate, no log needed */
+uint32_t hk_fb_frames;
+SYSCTL_UINT(_kern_hackios, OID_AUTO, fb_frames, CTLFLAG_RD | CTLFLAG_LOCKED, &hk_fb_frames, 0, "frames put on the panel since boot");
 SYSCTL_PROC(_kern_hackios, OID_AUTO, top, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, NULL, 0, sysctl_top, "A",
     "processor time by process since the last read, in ms: the first eight");
 

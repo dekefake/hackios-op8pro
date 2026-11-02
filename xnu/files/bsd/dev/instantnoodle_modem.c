@@ -190,6 +190,13 @@ static bool option_ipa;                 /* modem_ipa=1: the IPA's QMI handshake 
 static bool option_efs;                 /* modem_efs=1: the EFS images (Sahara ids 16, 17, 20) are the phone's mdm1m9kefs partitions, not the firmware's empty stubs */
 static bool option_service;             /* modem_service=1: after the registration the thread stays, keeps the sysctls kern.hackios.modem_* true and sends/receives SMS */
 static bool cell_started;
+static bool qmi_find(uint32_t service, uint32_t *node, uint32_t *port);
+/* the modem's latest position report (QMI LOC 0x0024, its TLVs as they came; the modem's GNSS: userland/src/hk_location.m starts it, reads this and tells iOS) */
+static struct {
+	uint32_t count, length;
+	uint8_t data[512];
+} gps_report, gps_sats;
+static volatile uint32_t modem_generation;      /* how many runs of the modem have come up: what was set up for it (hk_mic.c's mailbox) is set up again */
 static volatile bool cell_mt_pending;  /* a new message is waiting in the card or the modem's memory (WMS event report) */
 static uint8_t cell_mt_storage;
 static uint32_t cell_mt_index;
@@ -602,6 +609,8 @@ static void
 pcie_off(void)
 {
 	pcie.up = false;
+	__asm__ volatile ("dmb ish" ::: "memory");
+	sleep_us(2000);         /* (a register access of another thread that had already looked at pcie.up: mhi_op_write()) */
 	instantnoodle_gpio_output(PIN_PERST, false, INSTANTNOODLE_PULL_DOWN, 2);
 	if (pcie.clocked) {
 		wr(pcie.phy + PHY_POWER_DOWN, 0);
@@ -887,6 +896,44 @@ smmu_off(void)
 	smmu.next = 0;
 	say("modem: smmu: the modem's stream and context %u put back as they were found\n", smmu.context);
 	lck_mtx_unlock(&hk_smmu_lock);
+}
+
+/*
+ * Memory somebody else has allocated, physically in one piece, entered in the modem's window (for the mailbox of a call's sound, bsd/dev/hk_mic.c: the audio DSP sees the same
+ * memory by its physical address). False while the window is not up.
+ */
+void hk_modem_dma_sync(void *address, size_t size);
+void
+hk_modem_dma_sync(void *address, size_t size)
+{
+	dma_sync(address, size);
+}
+
+uint32_t hk_modem_generation(void);
+uint32_t
+hk_modem_generation(void)
+{
+	return modem_generation;
+}
+
+bool hk_modem_map_contig(uint64_t phys, size_t size, uint64_t *iova);
+bool
+hk_modem_map_contig(uint64_t phys, size_t size, uint64_t *iova)
+{
+	size = (size + 4095) & ~(size_t)4095;
+	if (!smmu.on || !cell_started || smmu.next + size > DMA_SIZE - 4096) {
+		return false;
+	}
+	for (size_t off = 0; off < size; off += 4096) {
+		uint64_t at = smmu.next + off;
+		uint64_t *third = (uint64_t *)(smmu.tables + 4096 * (2 + (at >> 21)));
+
+		third[at >> 12 & 0x1ff] = (phys + off) | (option_nc ? DMA_PTE_NC : DMA_PTE_WB);
+	}
+	dma_sync((void *)smmu.tables, 4096 * DMA_TABLES);
+	*iova = DMA_IOVA + smmu.next;
+	smmu.next += size;
+	return true;
 }
 
 /* `size` bytes of kernel memory, zeroed, that the modem sees at *iova (aligned to `align`, a power of two): pages entered one by one in the third-level tables. NULL if there is no room. */
@@ -1353,14 +1400,20 @@ static uint32_t
 mhi_op_read(void *context, uint32_t offset)
 {
 	(void)context;
-	return rd(pcie.bar + offset);
+	return pcie.up ? rd(pcie.bar + offset) : 0xffffffffu;
 }
 
 static void
 mhi_op_write(void *context, uint32_t offset, uint32_t value)
 {
 	(void)context;
-	wr(pcie.bar + offset, value);
+	/*
+	 * Other threads get here (en1's uplink rings channel 100's doorbell): once the controller's clocks are off, an access to its BAR is an error on the bus that the
+	 * whole phone goes to CrashDump for (2026-11-02: SYSTEM_NOC at 0x64300624, the modem started again by hand with mobile data up).
+	 */
+	if (pcie.up) {
+		wr(pcie.bar + offset, value);
+	}
 }
 
 static void *
@@ -1697,6 +1750,12 @@ sahara_packet(const uint8_t *p, uint32_t length)
 	case SAHARA_RESET_RESP:
 		say("modem: sahara: command %u\n", cmd);
 		break;
+	case SAHARA_MEM_DEBUG:
+	case SAHARA_64BIT_MEM_DEBUG:
+		/* the modem has crashed and offers its memory (Sahara mode 2): not taken; it is asked to start again, or it waits here for ever and the phone has no network until the next boot */
+		say("modem: sahara: the modem offers a crash dump: not taken, it is reset (what it said: the \"sfr:\" line)\n");
+		sahara_word_packet(SAHARA_RESET, NULL, 0);
+		break;
 	default:
 		say("modem: sahara: UNEXPECTED command %u, %u bytes, first words %08x %08x %08x %08x\n", cmd, length, w[2], w[3], w[4], w[5]);
 		break;
@@ -1725,8 +1784,9 @@ static struct {
 	struct { uint32_t service, instance, node, port; } server[64];
 } qrtr;
 
+/* (from_node and confirm: what the bridge between the modem and the audio DSP forwards keeps its own: qrtr_bridge_drain()) */
 static int
-qrtr_send(uint32_t type, uint32_t from_port, uint32_t to_node, uint32_t to_port, const void *data, uint32_t length)
+qrtr_send_as(uint32_t from_node, bool confirm, uint32_t type, uint32_t from_port, uint32_t to_node, uint32_t to_port, const void *data, uint32_t length)
 {
 	/* the link of the node asked for (a broadcast, or an unknown node, goes by the default) */
 	for (unsigned r = 0; r < 4; r++) {
@@ -1751,11 +1811,11 @@ qrtr_send(uint32_t type, uint32_t from_port, uint32_t to_node, uint32_t to_port,
 		memset(packet, 0, 16 + padded);
 		packet[0] = 3;
 		packet[1] = (uint8_t)type;
-		packet[2] = 0;
+		packet[2] = confirm ? 1 : 0;
 		packet[3] = 0;
 		memcpy(packet + 4, &length, 4);
-		packet[8] = (uint8_t)QRTR_US;
-		packet[9] = 0;
+		packet[8] = (uint8_t)from_node;
+		packet[9] = (uint8_t)(from_node >> 8);
 		packet[10] = (uint8_t)(from_port == QRTR_CONTROL ? 0xfe : from_port);
 		packet[11] = (uint8_t)((from_port == QRTR_CONTROL ? 0xff : from_port >> 8));
 		packet[12] = (uint8_t)to_node;
@@ -1769,14 +1829,371 @@ qrtr_send(uint32_t type, uint32_t from_port, uint32_t to_node, uint32_t to_port,
 	memset(packet, 0, sizeof(*h) + padded);
 	h->version = 1;
 	h->type = type;
-	h->from_node = QRTR_US;
+	h->from_node = from_node;
 	h->from_port = from_port;
+	h->confirm = confirm;
 	h->size = length;
 	h->to_node = to_node;
 	h->to_port = to_port;
 	memcpy(packet + sizeof(*h), data, length);
 	qrtr.packets_out++;
 	return hk_mhi_send(&mhi, qrtr_channel, packet, sizeof(*h) + padded);
+}
+
+static int
+qrtr_send(uint32_t type, uint32_t from_port, uint32_t to_node, uint32_t to_port, const void *data, uint32_t length)
+{
+	return qrtr_send_as(QRTR_US, false, type, from_port, to_node, to_port, data, length);
+}
+
+/*
+ * The bridge between the modem and the audio DSP, boot-arg voice_bridge=1. In Android's device tree they are on different QRTR networks (modem net-id 3, DSP net-id 2) and the application
+ * processor's router forwards between them (net/qrtr, source: Android's; inferred from the device tree that a call's sound needs it: a call was silent with every voice command accepted, and
+ * neither side said anything). What the DSP sends for the modem's nodes comes here from the DSP link's thread (hk_modem_qrtr_from_dsp()) and goes out from the mission's thread: this
+ * side's sending is not to be entered twice. One writer, one reader. What the modem sends for the DSP's node: hk_adsp_qrtr_from_modem(), hk_adsp.c. The first lines of each say what crossed.
+ */
+#define BRIDGE_DSP_NODE         5u
+#define BRIDGE_SLOTS            32u
+#define BRIDGE_BYTES            1536u
+extern void hk_adsp_qrtr_from_modem(uint32_t type, uint32_t from_node, uint32_t from_port, uint32_t to_node, uint32_t to_port, bool confirm, const void *data, uint32_t length);
+extern void hk_adsp_qrtr_announce(void);
+static bool option_bridge;
+static unsigned bridge_said;
+static struct {
+	uint32_t type, from_node, from_port, to_node, to_port, length;
+	bool confirm;
+	uint8_t data[BRIDGE_BYTES];
+} bridge[BRIDGE_SLOTS];
+static volatile uint32_t bridge_in, bridge_out;
+
+void hk_modem_qrtr_from_dsp(uint32_t type, uint32_t from_node, uint32_t from_port, uint32_t to_node, uint32_t to_port, bool confirm, const void *data, uint32_t length);
+void
+hk_modem_qrtr_from_dsp(uint32_t type, uint32_t from_node, uint32_t from_port, uint32_t to_node, uint32_t to_port, bool confirm, const void *data, uint32_t length)
+{
+	uint32_t in = bridge_in;
+
+	if (!option_bridge) {
+		return;
+	}
+	if (in - bridge_out >= BRIDGE_SLOTS || length > BRIDGE_BYTES) {
+		say("modem: bridge: dropped %u bytes from the DSP (%u waiting)\n", length, in - bridge_out);
+		return;
+	}
+	bridge[in % BRIDGE_SLOTS].type = type;
+	bridge[in % BRIDGE_SLOTS].from_node = from_node;
+	bridge[in % BRIDGE_SLOTS].from_port = from_port;
+	bridge[in % BRIDGE_SLOTS].to_node = to_node;
+	bridge[in % BRIDGE_SLOTS].to_port = to_port;
+	bridge[in % BRIDGE_SLOTS].confirm = confirm;
+	bridge[in % BRIDGE_SLOTS].length = length;
+	memcpy(bridge[in % BRIDGE_SLOTS].data, data, length);
+	__atomic_store_n(&bridge_in, in + 1, __ATOMIC_RELEASE);
+}
+
+/*
+ * Each told that the other is up, once the modem runs, as Android's sysmon does (mainline Linux: remoteproc/qcom_sysmon.c, ssctl_send_event(): SSCTL, service 43, message 0x23, TLV 1 the
+ * subsystem's name, TLV 2 the event, 3 after power-up, TLV 0x10 how it came about, 0 forced). Hypothesis (2026-11-02): the DSP started first, never heard that the modem exists, and so answers
+ * nothing of its voice commands. The modem's name for the DSP is "adsp"; the DSP's for the modem is one of the two below, by what Android's device tree calls an external modem.
+ */
+extern uint32_t hk_adsp_ssctl_port(void);
+#define SSCTL_SERVICE           43u
+#define BRIDGE_CLIENT_PORT      0x4005u
+
+static uint32_t
+ssctl_event(uint8_t *q, uint16_t transaction, const char *name)
+{
+	uint32_t n = (uint32_t)strlen(name), at = 7;
+
+	q[0] = 0;
+	q[1] = (uint8_t)transaction;
+	q[2] = (uint8_t)(transaction >> 8);
+	q[3] = 0x23;
+	q[4] = 0;
+	q[at++] = 0x01;
+	q[at++] = (uint8_t)(n + 1);
+	q[at++] = 0;
+	q[at++] = (uint8_t)n;
+	memcpy(q + at, name, n);
+	at += n;
+	q[at++] = 0x02;
+	q[at++] = 4;
+	q[at++] = 0;
+	q[at++] = 3;
+	q[at++] = 0;
+	q[at++] = 0;
+	q[at++] = 0;
+	q[at++] = 0x10;
+	q[at++] = 4;
+	q[at++] = 0;
+	q[at++] = 0;
+	q[at++] = 0;
+	q[at++] = 0;
+	q[at++] = 0;
+	q[5] = (uint8_t)(at - 7);
+	q[6] = 0;
+	return at;
+}
+
+static void
+qrtr_bridge_tell_up(void)
+{
+	static bool told;
+	static const char * const dsp_names[] = { "esoc0", "modem" };
+	uint8_t q[64];
+	uint32_t dsp = hk_adsp_ssctl_port();
+
+	if (told || !cell_started || dsp == 0) {
+		return;
+	}
+	told = true;
+	{
+		/*
+		 * The modem's nodes introduced to the DSP, and the DSP to the modem: the DSP answers node 2 and has never sent anything to node 3, where the modem's voice commands come from
+		 * (hypothesis: it has no route to it; a router learns a neighbour from its HELLO). And the modem's services told again now that the DSP knows the nodes.
+		 */
+		uint32_t hello[5] = { QRTR_HELLO, 0, 0, 0, 0 };
+
+		for (unsigned r = 0; r < 4; r++) {
+			if (qrtr_routes[r].used) {
+				say("modem: bridge: node %u says hello to the DSP\n", qrtr_routes[r].node);
+				hk_adsp_qrtr_from_modem(QRTR_HELLO, qrtr_routes[r].node, QRTR_CONTROL, BRIDGE_DSP_NODE, QRTR_CONTROL, false, hello, sizeof(hello));
+			}
+		}
+		say("modem: bridge: the DSP says hello to the modem: %d\n", qrtr_send_as(BRIDGE_DSP_NODE, false, QRTR_HELLO, QRTR_CONTROL, 2, QRTR_CONTROL, hello, sizeof(hello)));
+		for (unsigned i = 0; i < qrtr.servers && i < 64; i++) {
+			uint32_t again[5] = { QRTR_NEW_SERVER, qrtr.server[i].service, qrtr.server[i].instance, qrtr.server[i].node, qrtr.server[i].port };
+
+			hk_adsp_qrtr_from_modem(QRTR_NEW_SERVER, qrtr.server[i].node, QRTR_CONTROL, BRIDGE_DSP_NODE, QRTR_CONTROL, false, again, sizeof(again));
+		}
+	}
+	for (unsigned i = 0; i < 2; i++) {
+		uint32_t n = ssctl_event(q, (uint16_t)(0x100 + i), dsp_names[i]);
+
+		say("modem: bridge: telling the DSP that \"%s\" is up (its SSCTL, port %u)\n", dsp_names[i], dsp);
+		hk_adsp_qrtr_from_modem(QRTR_DATA, QRTR_US, BRIDGE_CLIENT_PORT, BRIDGE_DSP_NODE, dsp, false, q, n);
+	}
+	for (unsigned i = 0; i < qrtr.servers && i < 64; i++) {
+		if (qrtr.server[i].service == SSCTL_SERVICE) {
+			uint32_t n = ssctl_event(q, 0x200, "adsp");
+
+			say("modem: bridge: telling the modem that the DSP is up (node %u port %u): %d\n", qrtr.server[i].node, qrtr.server[i].port,
+			    qrtr_send(QRTR_DATA, BRIDGE_CLIENT_PORT, qrtr.server[i].node, qrtr.server[i].port, q, n));
+		}
+	}
+}
+
+/*
+ * The audio DSP's own road to the modem, boot-arg voice_sat=1: Android's drivers/bus/mhi/devices/mhi_satellite.c. Seen on Android on this phone (2026-11-02, kprobes on a real call): no voice
+ * command of the modem's passes this processor's QRTR, the DSP and the modem talk over MHI channels of their own, ADSP_0 (50), ADSP_1 (51), ADSP_2 (70), ADSP_3 (71), event ring 4, "offload"
+ * in the device tree. This processor only lets them: on the GLINK channel "mhi_sat" it tells the DSP where the modem is (the BAR, the event ring, M0, the mission mode), and does what the DSP
+ * asks: maps memory into the modem's window, writes context entries that say where the DSP keeps the real ones, starts channels; each message is answered with the same elements
+ * made completions, the message's sequence number in reply_seq.
+ */
+#define SAT_DEVICE_ID           (0x0306u << 16 | 2u << 12 | 1u << 4 | 0u)       /* MHI_SAT_CREATE_DEVICE_ID: device 0306, domain 2, bus 1, slot 0 ("0306_02.01.00" on Android) */
+#define SAT_EVENT_RING          4u
+#define SAT_SLOTS               8u
+#define SAT_BYTES               1024u
+#define SAT_ID_CMD              0xc
+#define SAT_ID_EVT              0xe
+#define SAT_MHI_M0              2u
+#define SAT_MHI_EE_AMSS         2u
+#define SAT_CC_SUCCESS          1u
+#define SAT_CC_BAD_TRE          0x11u
+extern bool hk_adsp_sat_open(void);
+extern int hk_adsp_sat_send(const void *data, uint32_t length);
+
+struct __attribute__((packed)) sat_header {
+	uint16_t major, minor, id, seq, reply_seq, payload;
+	uint32_t device;
+	uint8_t reserved[8];
+};
+struct __attribute__((packed)) sat_tre {
+	uint64_t pointer;
+	uint32_t word[2];
+};
+static bool option_sat;
+static uint16_t sat_seq;
+static unsigned sat_said;
+static struct {
+	uint32_t length;
+	uint8_t data[SAT_BYTES];
+} sat_in[SAT_SLOTS];
+static volatile uint32_t sat_in_head, sat_in_tail;
+
+void hk_modem_sat_from_dsp(const void *data, uint32_t length);
+void
+hk_modem_sat_from_dsp(const void *data, uint32_t length)
+{
+	uint32_t head = sat_in_head;
+
+	if (head - sat_in_tail >= SAT_SLOTS || length > SAT_BYTES) {
+		say("modem: sat: dropped %u bytes from the DSP\n", length);
+		return;
+	}
+	sat_in[head % SAT_SLOTS].length = length;
+	memcpy(sat_in[head % SAT_SLOTS].data, data, length);
+	__atomic_store_n(&sat_in_head, head + 1, __ATOMIC_RELEASE);
+}
+
+static void
+sat_send(uint16_t id, uint16_t reply_seq, void *message, uint32_t length)
+{
+	struct sat_header *header = message;
+
+	sat_seq = sat_seq + 1 == 0xffff ? 0 : sat_seq + 1;
+	header->major = 1;
+	header->minor = 0;
+	header->id = id;
+	header->seq = sat_seq;
+	header->reply_seq = reply_seq;
+	header->payload = (uint16_t)(length - sizeof(*header));
+	header->device = SAT_DEVICE_ID;
+	bzero(header->reserved, sizeof(header->reserved));
+	int error = hk_adsp_sat_send(message, length);
+
+	if (error != 0) {
+		say("modem: sat: not sent to the DSP: %d\n", error);
+	}
+}
+
+/* on the mission's thread */
+static bool sat_hello;                  /* the DSP has been told of this run of the modem */
+
+/*
+ * The modem has gone: the DSP is told as Android tells it (mhi_satellite.c, mhi_sat_send_sys_err(): one command, type 0xff), so that it lets go of the channels it had, and
+ * the next run's hello finds it ready. Its answer is not waited for: the modem is not there to serve anything it would ask.
+ */
+static void
+sat_modem_gone(void)
+{
+	struct {
+		struct sat_header header;
+		struct sat_tre tre;
+	} __attribute__((packed)) message;
+
+	if (!sat_hello) {
+		return;
+	}
+	sat_hello = false;
+	bzero(&message, sizeof(message));
+	message.tre.word[1] = 0xffu << 16;
+	say("modem: sat: the DSP told that the modem has gone\n");
+	sat_send(SAT_ID_CMD, 0xffff, &message, sizeof(message));
+}
+
+static bool
+sat_poll(void)
+{
+	bool any = false;
+
+	if (!sat_hello && cell_started && hk_adsp_sat_open()) {
+		struct {
+			struct sat_header header;
+			struct sat_tre tre[3];
+		} __attribute__((packed)) message;
+
+		sat_hello = true;
+		bzero(&message, sizeof(message));
+		message.tre[0].pointer = BAR_PHYS;
+		message.tre[0].word[0] = SAT_EVENT_RING << 16 | 1u;
+		message.tre[0].word[1] = 0x6eu << 16;
+		message.tre[1].word[0] = SAT_MHI_M0 << 24;
+		message.tre[1].word[1] = 0x20u << 16;
+		message.tre[2].word[0] = SAT_MHI_EE_AMSS << 24;
+		message.tre[2].word[1] = 0x40u << 16;
+		say("modem: sat: hello to the DSP: the modem at %#lx, event ring %u, M0, mission mode\n", BAR_PHYS, SAT_EVENT_RING);
+		sat_send(SAT_ID_EVT, 0xffff, &message, sizeof(message));
+		any = true;
+	}
+	while (sat_in_tail != __atomic_load_n(&sat_in_head, __ATOMIC_ACQUIRE)) {
+		uint8_t *data = sat_in[sat_in_tail % SAT_SLOTS].data;
+		uint32_t length = sat_in[sat_in_tail % SAT_SLOTS].length;
+		struct sat_header *header = (struct sat_header *)data;
+
+		any = true;
+		if (length < sizeof(*header) || length != sizeof(*header) + header->payload || header->major != 1) {
+			say("modem: sat: a message that is none (%u bytes)\n", length);
+		} else if (header->id == SAT_ID_CMD) {
+			struct sat_tre *tre = (struct sat_tre *)(data + sizeof(*header));
+
+			for (uint32_t i = 0; i < header->payload / sizeof(*tre); i++, tre++) {
+				uint32_t type = tre->word[1] >> 16 & 0xff, number = tre->word[1] >> 24, code = SAT_CC_BAD_TRE;
+				uint64_t pointer = tre->pointer, answer = 0;
+				uint32_t size = tre->word[0];
+				bool event = (tre->word[1] & 1) != 0;
+
+				switch (type) {
+				case 0x65: {    /* map: the memory of the DSP's rings into the modem's window */
+					uint64_t iova = 0, start = pointer & ~(uint64_t)4095;
+
+					if (hk_modem_map_contig(start, (size_t)(pointer - start) + size, &iova)) {
+						answer = iova + (pointer - start);
+						code = SAT_CC_SUCCESS;
+					}
+					break;
+				}
+				case 0x64:      /* a context entry */
+					if (hk_mhi_sat_context(&mhi, event, number, pointer, size) == 0) {
+						code = SAT_CC_SUCCESS;
+					}
+					break;
+				case 0x12:      /* start a channel */
+					if (hk_mhi_sat_command(&mhi, number, true) == 0) {
+						code = SAT_CC_SUCCESS;
+					}
+					break;
+				case 0x10:      /* reset a channel */
+					hk_mhi_sat_command(&mhi, number, false);
+					code = SAT_CC_SUCCESS;
+					break;
+				default:
+					break;
+				}
+				if (sat_said++ < 80) {
+					say("modem: sat: the DSP asks %#x: %#llx, %u bytes, id %u%s: %s, %#llx\n", type, pointer, size, number, event ? " (event)" : "", code == SAT_CC_SUCCESS ? "done" : "FAILED", answer);
+				}
+				tre->pointer = answer;
+				tre->word[0] = code << 24;
+				tre->word[1] = 0x21u << 16;
+			}
+			sat_send(SAT_ID_EVT, header->seq, data, length);
+		} else if (sat_said++ < 80) {
+			say("modem: sat: from the DSP: id %#x, seq %u, %u bytes\n", header->id, header->seq, header->payload);
+		}
+		__atomic_store_n(&sat_in_tail, sat_in_tail + 1, __ATOMIC_RELEASE);
+	}
+	return any;
+}
+
+/* on the mission's thread: true if there was something (a control message for "the modem" goes to each of its nodes we know) */
+static bool
+qrtr_bridge_drain(void)
+{
+	bool any = false;
+
+	qrtr_bridge_tell_up();
+
+	while (bridge_out != __atomic_load_n(&bridge_in, __ATOMIC_ACQUIRE)) {
+		typeof(&bridge[0]) b = &bridge[bridge_out % BRIDGE_SLOTS];
+		int error = 0;
+
+		if (b->to_port == QRTR_CONTROL) {
+			for (unsigned r = 0; r < 4; r++) {
+				if (qrtr_routes[r].used) {
+					error = qrtr_send_as(b->from_node, b->confirm, b->type, b->from_port, qrtr_routes[r].node, b->to_port, b->data, b->length);
+				}
+			}
+		} else {
+			error = qrtr_send_as(b->from_node, b->confirm, b->type, b->from_port, b->to_node, b->to_port, b->data, b->length);
+		}
+		if (bridge_said++ < 200) {
+			say("modem: bridge: DSP -> modem: type %u, node %u port %#x to node %u port %#x, %u bytes: %02x %02x %02x %02x %02x %02x %02x %02x: %d\n", b->type, b->from_node, b->from_port, b->to_node, b->to_port, b->length,
+			    b->data[0], b->data[1], b->data[2], b->data[3], b->data[4], b->data[5], b->data[6], b->data[7], error);
+		}
+		__atomic_store_n(&bridge_out, bridge_out + 1, __ATOMIC_RELEASE);
+		any = true;
+	}
+	return any;
 }
 
 /* a QMI client over QRTR: our one port, the reply of the request in flight */
@@ -2059,6 +2476,9 @@ qrtr_packet(const uint8_t *d, uint32_t length, uint32_t dl_channel)
 				qrtr_routes[r].ul = dl_channel - 1;
 				qrtr_routes[r].v2 = d[0] == 3;
 				say("modem: qrtr: node %u is reached on channels %u/%u with version %u headers\n", h.from_node, dl_channel - 1, dl_channel, d[0] == 3 ? 2 : 1);
+				if (option_bridge) {
+					hk_adsp_qrtr_announce();        /* (the DSP's services, for this node too: they came before it) */
+				}
 				known = true;
 				if (option_tftp) {
 					for (uint32_t instance = 0; instance < 11; instance++) {
@@ -2075,6 +2495,33 @@ qrtr_packet(const uint8_t *d, uint32_t length, uint32_t dl_channel)
 		qrtr_v2 = d[0] == 3;
 		say("modem: qrtr: the modem's datagrams have %s headers\n", qrtr_v2 ? "version 2" : "version 1");
 		qrtr.node = h.from_node;
+	}
+	if (option_bridge && (h.to_node == BRIDGE_DSP_NODE ||
+	    (h.to_port == QRTR_CONTROL && (h.type == QRTR_NEW_SERVER || h.type == QRTR_DEL_SERVER || h.type == QRTR_DEL_CLIENT || h.type == QRTR_BYE)))) {
+		static unsigned said;
+
+		static unsigned said_data;
+
+		if (h.type != QRTR_NEW_SERVER && h.type != QRTR_DEL_SERVER && h.type != QRTR_DEL_CLIENT ? said_data++ < 200 : said++ < 4) {
+			const uint8_t *q = d + at;
+
+			say("modem: bridge: modem -> DSP: type %u, node %u port %#x to node %u port %#x, %u bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n", h.type, h.from_node, h.from_port, h.to_node, h.to_port, h.size,
+			    q[0], h.size > 1 ? q[1] : 0, h.size > 2 ? q[2] : 0, h.size > 3 ? q[3] : 0, h.size > 4 ? q[4] : 0, h.size > 5 ? q[5] : 0, h.size > 6 ? q[6] : 0, h.size > 7 ? q[7] : 0, h.size > 8 ? q[8] : 0, h.size > 9 ? q[9] : 0, h.size > 10 ? q[10] : 0, h.size > 11 ? q[11] : 0);
+		}
+		if (h.type == QRTR_DATA && h.to_port == 9) {
+			/* the modem's voice commands, whole: APR, a header of 32 bytes and what the opcode takes */
+			char hex[3 * 96 + 1];
+			uint32_t n = h.size < 96 ? h.size : 96;
+
+			for (uint32_t i = 0; i < n; i++) {
+				snprintf(hex + 3 * i, 4, "%02x ", d[at + i]);
+			}
+			say("modem: bridge: APR from the modem: %s\n", hex);
+		}
+		hk_adsp_qrtr_from_modem(h.type, h.from_node, h.from_port, BRIDGE_DSP_NODE, h.to_port, h.confirm != 0, d + at, h.size);
+		if (h.to_node == BRIDGE_DSP_NODE) {
+			return;         /* (for the DSP alone; what is said to everybody is for us too) */
+		}
 	}
 	if (h.type == QRTR_RESUME_TX) {
 		return;
@@ -2171,6 +2618,12 @@ qrtr_packet(const uint8_t *d, uint32_t length, uint32_t dl_channel)
 		}
 		return;
 	}
+	if (h.type == QRTR_DATA && h.to_port == BRIDGE_CLIENT_PORT) {
+		const uint8_t *q = d + at;
+
+		say("modem: bridge: the modem on \"the DSP is up\": %u bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n", h.size, q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7], q[8], q[9], q[10], q[11], q[12], q[13]);
+		return;
+	}
 	if (h.type == QRTR_DATA && h.to_port == TFTP_PORT) {
 		tftp_packet(h.from_node, h.from_port, d + at, h.size);
 		return;
@@ -2197,6 +2650,35 @@ qrtr_packet(const uint8_t *d, uint32_t length, uint32_t dl_channel)
 					snprintf(hex + 3 * i, 4, "%02x ", q[7 + i]);
 				}
 				say("modem: qmi: INDICATION %#06x from node %u port %u (%u bytes): %s\n", q[3] | q[4] << 8, h.from_node, h.from_port, tl, hex);
+			}
+			{
+				uint32_t loc_node, loc_port;
+
+				if (qmi_find(16, &loc_node, &loc_port) && h.from_port == loc_port) {
+					/* the location service's: a position report is kept as it came, for hk_location (kern.hackios.gps_report); nothing else of it is ours */
+					if ((q[3] | q[4] << 8) == 0x0024) {
+						gps_report.length = tl < sizeof(gps_report.data) ? tl : (uint32_t)sizeof(gps_report.data);
+						memcpy(gps_report.data, q + 7, gps_report.length);
+						__atomic_fetch_add(&gps_report.count, 1, __ATOMIC_RELEASE);
+					} else if ((q[3] | q[4] << 8) == 0x0025) {
+						gps_sats.length = tl < sizeof(gps_sats.data) ? tl : (uint32_t)sizeof(gps_sats.data);
+						memcpy(gps_sats.data, q + 7, gps_sats.length);
+						__atomic_fetch_add(&gps_sats.count, 1, __ATOMIC_RELEASE);
+					} else if ((q[3] | q[4] << 8) != 0x0026) {
+						static unsigned others;
+
+						if (others++ < 40) {
+							char hex[3 * 24 + 1];
+							uint32_t m = tl < 24 ? tl : 24;
+
+							for (uint32_t i = 0; i < m; i++) {
+								snprintf(hex + 3 * i, 4, "%02x ", q[7 + i]);
+							}
+							printf("modem: gps: from the location service: %#06x (%u bytes): %s\n", q[3] | q[4] << 8, tl, hex);
+						}
+					}
+					return;
+				}
 			}
 			if ((q[3] | q[4] << 8) == 0x003a) {
 				/* NAS operator name data: TLV 0x10 is the service provider name (display condition, length, name) */
@@ -2862,6 +3344,7 @@ mission_pump(uint32_t ms, const volatile bool *stop)
 		}
 		if (!alive) {
 			mission_link_down = true;
+			cell_started = false;   /* (kern.hackios.cellular_up, at once: hk_commcenter ends iOS's call on it; "mission: over" comes some 40 s later) */
 			return;
 		}
 		hk_mhi_interrupt(&mhi, -1);
@@ -4542,6 +5025,7 @@ modem_bringup(void)
 		if (nas_registration(&registration, &radio) == 0 && registration == 1) {
 			say("modem: bringup: THE MODEM IS REGISTERED ON A NETWORK\n");
 			cell_started = true;
+			modem_generation++;
 			cell.registered = 1;
 			if (option_data) {
 				data_bringup();
@@ -4779,6 +5263,34 @@ SYSCTL_PROC(_kern_hackios, OID_AUTO, cellular_dbm, CTLTYPE_INT | CTLFLAG_RD | CT
 SYSCTL_PROC(_kern_hackios, OID_AUTO, cellular_operator, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, cell_operator_sysctl, "A", "the network's name");
 SYSCTL_PROC(_kern_hackios, OID_AUTO, modem_state, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, cell_state_sysctl, "A", "the cellular modem: off, starting, registered ...");
 SYSCTL_PROC(_kern_hackios, OID_AUTO, modem_bars, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, cell_bars_sysctl, "I", "signal bars 0..4");
+/* kern.hackios.gps_report: { count, length, the TLVs } of the modem's latest position report */
+static int
+gps_report_sysctl(__unused struct sysctl_oid *oid, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	return SYSCTL_OUT(req, &gps_report, sizeof(gps_report));
+}
+static int
+gps_sats_sysctl(__unused struct sysctl_oid *oid, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	return SYSCTL_OUT(req, &gps_sats, sizeof(gps_sats));
+}
+SYSCTL_PROC(_kern_hackios, OID_AUTO, gps_sats, CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, 0, 0, gps_sats_sysctl, "S", "the modem's latest list of satellites");
+SYSCTL_PROC(_kern_hackios, OID_AUTO, gps_report, CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, 0, 0, gps_report_sysctl, "S", "the modem's latest position report");
+
+/* kern.hackios.modem_restart: write 1: a test of the recovery: the mission ends as if the link had gone, and the modem is started again from scratch (modem_thread()) */
+static int
+cell_restart_sysctl(__unused struct sysctl_oid *oid, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	int value = 0, error = sysctl_handle_int(oid, &value, 0, req);
+
+	if (error == 0 && req->newptr != USER_ADDR_NULL && value == 1) {
+		say("modem: restart asked for by hand: the mission ends as if the link had gone\n");
+		mission_link_down = true;
+		cell_started = false;
+	}
+	return error;
+}
+SYSCTL_PROC(_kern_hackios, OID_AUTO, modem_restart, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, 0, 0, cell_restart_sysctl, "I", "write 1: start the modem again from scratch, a test");
 SYSCTL_PROC(_kern_hackios, OID_AUTO, modem_qmi, CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, 0, 0, cell_qmi_sysctl, "A", "a QMI request by hand: SERVICE MSGID PORT HEXBYTES; read for the answer");
 SYSCTL_PROC(_kern_hackios, OID_AUTO, modem_sms_send, CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, 0, 0, cell_sms_send_sysctl, "A", "write NUMBER TEXT to send an SMS");
 SYSCTL_PROC(_kern_hackios, OID_AUTO, modem_sms_status, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, cell_sms_status_sysctl, "A", "the last SMS request: queued, sent, failed");
@@ -5135,7 +5647,15 @@ mission_run(uint32_t seconds)
 		say("modem: mission: loopback: %s\n", loopback_echoes != 0 ? "THE MODEM ECHOED IT" : "no echo in 1.5 s");
 	}
 	if (option_chans >> 1 & 1) {
-		diag_enable();
+		uint32_t masks = 1;
+
+		/* modem_diag=0: the DIAG channel stays open but the modem is not asked for its messages (with all masks set it streams them for ever: MHI traffic and parsing on both sides) */
+		PE_parse_boot_argn("modem_diag", &masks, sizeof(masks));
+		if (masks != 0) {
+			diag_enable();
+		} else {
+			say("modem: diag: messages not asked for (modem_diag=0)\n");
+		}
 	}
 	say("modem: mission: QRTR is listened to for %u s\n", seconds);
 	if (option_ipa) {
@@ -5195,6 +5715,9 @@ mission_run(uint32_t seconds)
 	} else {
 		qmi_survey();
 	}
+	unsigned idle = 0;
+	bool busy;
+
 	for (until = mhi_op_nanoseconds(NULL) + (uint64_t)seconds * 1000000000ull; mhi_op_nanoseconds(NULL) < until;) {
 		static uint64_t hello_at;
 
@@ -5217,11 +5740,12 @@ mission_run(uint32_t seconds)
 			round++;
 			hello_at = mhi_op_nanoseconds(NULL) + 3000000000ull;
 		}
-		if (rd(pcie.bar) == 0xffffffffu) {
+		if (rd(pcie.bar) == 0xffffffffu || mission_link_down) {
 			say("modem: mission: the link is down\n");
 			break;
 		}
 		hk_mhi_interrupt(&mhi, -1);
+		busy = sahara_in.tail != sahara_in.head || data_in.tail != data_in.head;
 		while (sahara_in.tail != sahara_in.head) {
 			uint32_t at = sahara_in.tail % SAHARA_QUEUE;
 
@@ -5233,7 +5757,19 @@ mission_run(uint32_t seconds)
 		if (option_service && cell_started) {
 			cell_tick();
 		}
-		sleep_us(500);
+		/*
+		 * How long until the next look: 500 us while the modem or the data path has something (the pickup of what the modem sends waits on this loop; what goes
+		 * to it does not), 2 ms after 100 ms of nothing and 10 ms after two seconds. At 500 us for ever this was 2000 wake-ups a second with the phone idle and
+		 * its screen off, a large part of kernel_task's half a core (2026-11-02).
+		 */
+		if (option_bridge && qrtr_bridge_drain()) {
+			busy = true;
+		}
+		if (option_sat && sat_poll()) {
+			busy = true;
+		}
+		idle = busy ? 0 : idle + 1;
+		sleep_us(idle < 200 ? 500 : idle < 1000 ? 2000 : 10000);
 	}
 	for (unsigned c = 0; c < 0; c++) {
 		static const unsigned numbers[6] = { 2, 3, 32, 33, 20, 21 };
@@ -5613,6 +6149,7 @@ modem_thread(void *arg, wait_result_t wr_unused)
 		snprintf(cell.state, sizeof(cell.state), "restarting (the link went away, round %u)", round + 1);
 		cell.registered = 0;
 		cell_started = false;
+		sat_modem_gone();
 		delay_for_interval(5000000, NSEC_PER_USEC);      /* 5 s (and the system's sleep, if it comes now, gets through first) */
 		modem_reset_state();
 	}
@@ -5671,6 +6208,18 @@ hk_modem_init(void)
 		option_sms_self = k == 1;
 		k = 0;
 		PE_parse_boot_argn("modem_tftp", &k, sizeof(k));
+		{
+			uint32_t bridge_on = 0;
+
+			PE_parse_boot_argn("voice_bridge", &bridge_on, sizeof(bridge_on));
+			option_bridge = bridge_on != 0;
+			{
+				uint32_t sat_on = 0;
+
+				PE_parse_boot_argn("voice_sat", &sat_on, sizeof(sat_on));
+				option_sat = sat_on != 0;
+			}
+		}
 		option_tftp = k == 1;
 		k = 0;
 		PE_parse_boot_argn("modem_data", &k, sizeof(k));
@@ -5743,6 +6292,11 @@ hk_modem_init(void)
 	if (kernel_thread_start(modem_thread, NULL, &thread) != KERN_SUCCESS) {
 		printf("modem: no thread\n");
 		return;
+	}
+	{
+		extern void thread_set_thread_name(thread_t thread, const char *name);
+
+		thread_set_thread_name(thread, "modem");	/* (to be told apart in a sample of kernel_task's threads) */
 	}
 	thread_deallocate(thread);
 	printf("modem: steps up to %u, on a thread beside the system's start\n", last_step);
