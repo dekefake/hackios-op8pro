@@ -4317,6 +4317,16 @@ usb_wait(uint8_t endpoint)
 			USB->abort_xfer(endpoint);
 			return -1;
 		}
+		/*
+		 * ... and with none running, a reply (an upload: get_staged) the host never takes is given up after 10 s, not
+		 * waited for for ever: a host killed in the middle of an upload left the OnePlus 8 Pro's loader stuck here, on USB
+		 * but answering nothing, until somebody pulled the cable (2026-11-07; the 8 Pro arms no watchdog). Only for what
+		 * this side sends (endpoint IN): a command not yet sent is waited for as long as it takes.
+		 */
+		if (endpoint == USB_EP_IN && READ_SYSREG(CNTVCT_EL0) - began > 10 * freq) {
+			USB->abort_xfer(endpoint);
+			return -1;
+		}
 		if (msg == UsbDeviceEventTransferNotification && data.transfer.endpoint_index == endpoint) {
 			return data.transfer.status == UsbDeviceTransferStatusCompleteOK ? (int64_t)data.transfer.bytes_completed : -1;
 		}
