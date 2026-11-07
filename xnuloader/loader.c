@@ -710,7 +710,10 @@ static const struct platform platform_instantnoodlep = {
 	    "modem_data=1 modem_diag=0 mic=4 voice=3 voice_sat=1 hk_slot_ok=1 "
 	    /* Metal for the whole system (hkmetal.m, docs/metal.md): Maps, Photos and every app on both home pages checked on
 	     * the phone 2026-11-07; metal=0 on the image's line opts out */
-	    "metal=2 metal_profile=1",
+	    "metal=2 metal_profile=1 "
+	    /* the sensor DSP (hk_slpi.c, hk_fastrpc.c): accelerometer, gyroscope, light, proximity; the screen turns with the
+	     * phone (inject.c). Checked on the phone 2026-11-07 (RAM images 177-184, with Camera.app); slpi=0 opts out */
+	    "slpi=1",
 };
 
 /*

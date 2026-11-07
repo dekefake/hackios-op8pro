@@ -6,20 +6,17 @@ anything that has aged into the right permanent page.
 
 **Last updated: 2026-11-07** (sections 0a, 0b); before that 2026-11-02 (section 0, OnePlus 8 Pro cellular); before that 2026-10-26 ~04:55 MSK by the scheduler session (sections 2, 3, 4, 7 for the scheduler; the rest as the documentation session left it at ~03:30). **Checked state** = what I ran/read on that date; **historical** = taken from earlier session notes and flagged as such.
 
-## 0b. OnePlus 8 Pro, 2026-11-07 later: built and committed, NOT yet run (the phone is unreachable)
+## 0b. OnePlus 8 Pro, 2026-11-07 later (RAM images 175-185, kernel `data75`, loader 15; nothing flashed, boot_a still image 145)
 
-- **The phone is off the USB bus** since 05:58: after Camera.app ended a RAM run (cause below), its loader stayed on USB answering nothing
-  (an interrupted `get_staged` left it waiting for the host to take an upload); a libusb reset from the Mac then took it off the bus, and
-  the loader waits for a cable change. **It needs a hand: unplug/replug, or Power+VolUp.** Loader 13 (`out/loader-8pro-uefimenu13.efi`)
-  gives such an upload up after 10 s.
-- **Next run, one boot:** `/private/tmp/.../scratchpad/test175.sh` = `KERNEL=data73 LOADER=out/loader-8pro-uefimenu13.efi
-  UEFI_FD=out/uefi-8pro-menu4.fd out/tree/ram.sh 175 slpi=1 slpi_delay=20 slpi_dsplog=1 als=1`, then Camera.app (no kernel return?
-  colours with the new tuning? tap-to-focus), the log for `orientation:`, `proximity:`, `ambient light:`, `frpc: dsp:` (why no mag).
-  If the kernel returns: `fastboot getvar result` and `fastboot get_staged` FIRST; never `xl log`/`oem log` (it throws the kernel log away).
-- **What is in it** (kernel `data73`, userland in `out/tree/r42`): the camera/FastRPC SMMU clash fixed; focus by exposure-time lens position;
-  the 8 Pro's colour tuning (`fw/camera-imx689.isp`, `camera-imx471.isp`, vendor data, untracked); backboardd orientation from the
-  accelerometer, a proximity service, an ALS service (`als=1`); `kern.hackios.sensor_values`; SEE proximity messages 773/774;
-  `slpi_dsplog=1`. Details: subsystems/input-peripherals.md, research/ios-userland.md 1.5a, TODO T07/T47 (AirDrop assessment there).
+- **Verified:** Camera.app opens, switches back/front six times and closes with the sensor DSP on (two bugs fixed: mediaserverd's filter
+  thumbnails, the camera's io_map leak that panicked the kernel); the front camera's colour tuning; orientation (face up) from the
+  accelerometer; `slpi=1` by default (loader 15). Loader 14+ gives the whole returned log and the panic text ("== PANIC LOG ==").
+- **Off by default because they crash backboardd:** `als=1` (CoreBrightness wants ALSSensorType/Orientation/Placement/crgb), `prox=1`
+  (NSNull sensor wrapper). Next: answer those properties / find what the wrapper wants (research/ios-userland.md 1.5a).
+- **Not seen (needs a hand):** the screen turning, tap-to-focus (back camera), proximity. Compass: SEE never registers a mag; the DSP's own
+  log (`slpi_dsplog=1`) does not come yet (only the root process got init2; no lines).
+- **After a kernel return:** `fastboot getvar result` then `fastboot get_staged` before anything else (never `xl screenshot`/`oem log` first).
+- **To flash** these to boot_a needs the owner's OK (rule 1); the bundle would be kernel data75 + loader 15 + `out/tree/r42`.
 
 ## 0a. OnePlus 8 Pro, 2026-11-06/07: Metal for the whole system, GPS fields, the sensor DSP started on
 

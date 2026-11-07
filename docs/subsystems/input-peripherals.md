@@ -136,17 +136,22 @@ iOS position 268 for a close scene, 22 at the far end in run 1); the owner: auto
 focus, a higher code is further, so iOS position = 1000 - code. Not measured: where infinity lies, the userland's AF range (AF_NEAR 16..AF_FAR 768, redwood's) against the code range
 0..1000, why the climb is slow (a step of 48 and frames of waiting each; the driver's own ramp is under 5 ms a step), why tap-to-focus does not converge. OIS: not done.
 
-**OnePlus 8 Pro, 2026-11-07 (built; not yet seen on the phone):**
+**OnePlus 8 Pro, 2026-11-07 (verified on the phone, RAM images 181-184, unless marked):**
+- *mediaserverd died whenever Camera.app opened* (CMCapture `-[BWMultiFilterThumbnailNode prepareForCurrentConfigurationToBecomeLive]`, a nil
+  filter descriptor: the filters' lookup tables want the Metal device mediaserverd is kept from): `inject_media.c` leaves that node unprepared.
+  The filter strip has no thumbnails; the camera opens, switches and closes.
+- *The kernel panicked after a few camera starts with slpi=1*: every start mapped its SMMU context page with `ml_io_map()` (permanent) and
+  leaked its page tables until io_map's range ran out ("kmem_alloc ... failed with 3" under fp_smmu_up()); now mapped once, tables freed.
 - *Camera.app ended the kernel's run* (RAM image 174, `slpi=1`): the IFE's eight streams take match registers 9.., of which the hypervisor refuses four
   (their SMRs read 0 after the write); a refused one still reads free, so the sensor DSP's FastRPC (`hk_fastrpc.c`, started after the camera's first
   stream) took register 10, and the camera's stop then "put back as found" all eight, writing 0 over it. `instantnoodle_camera.c` now gives a refused
   register back at once and puts back only registers that still hold what it wrote (`fp_put_back_matches()`); `hk_fastrpc.c` checks its own before
   each call and rewrites it if lost (`mmu_keep()`).
-- *Focus by the frame's own lens position:* the kernel stamps each frame with where the lens was while it was exposed (`HK_CAMERA_FOCUS_STAMPED`,
+- *Focus by the frame's own lens position (built; not yet seen: the back camera lay against the table):* the kernel stamps each frame with where the lens was while it was exposed (`HK_CAMERA_FOCUS_STAMPED`,
   `HK_CAMERA_FOCUS_MOVED` in `hk_camera.h`, both copies); the userland measures sharpness only on frames exposed where it sent the lens. Before, the
   frames still in the ring from before a move were measured as the new place's, and a tap's sweep settled where the picture was blurred
   (logs/lens/scan1.live: best 1.52 at 48, settled at 36 with 0.026). Redwood's frames have no STAMPED bit and keep the old frame counting.
-- *Colour tuning:* the image had no `.isp` files for the 8 Pro (identity colour matrix, no lens shading). `tools/camtuning.py` now reads Qualcomm's
+- *Colour tuning (front camera verified: a white ceiling is neutral grey, evenly lit):* the image had no `.isp` files for the 8 Pro (identity colour matrix, no lens shading). `tools/camtuning.py` now reads Qualcomm's
   V2.0.0 tuning files: `camera-imx689.isp` and `camera-imx471.isp` (from the phone's `com.qti.tuned.semco_imx689.bin` / `truly_imx471.bin`,
   vendor data, not in git) in `out/tree/r42/fw/`; `camera_device.c` picks them by sensor on `board=instantnoodle`. The front camera's own file has
   an identity colour matrix (its tuning does colour elsewhere), so only its lens shading and white balance lights change.
@@ -178,12 +183,14 @@ FAT (`image/`, `hk_fw_partition_file()` in `instantnoodle_modem.c`; nothing bund
 - **Orientation (2026-11-07, built, not yet seen):** backboardd turns the screen by CoreMotion's `CMDeviceOrientationManager`; `inject.c`
   `orientation_start()` answers its three methods from `kern.hackios.sensor_values` (a struct per kind: events, values, timestamp) when the
   kernel has an accelerometer, else leaves CoreMotion's (`orient=0`: not at all). How backboardd uses it: research/ios-userland.md 1.5a.
-- **Proximity (2026-11-07, built, not yet seen):** `inject.c` `proximity_start()` makes backboardd a service of DeviceUsagePage 0xff00 /
+- **Orientation verified (2026-11-07, RAM images 177-185):** face up reported (5) with the phone on a table; turning not seen yet (needs a hand).
+  `slpi=1` is in loader 15's default arguments.
+- **Proximity (2026-11-07; `prox=1` only: it makes backboardd abort, see BOOT_ARGS):** `inject.c` `proximity_start()` makes backboardd a service of DeviceUsagePage 0xff00 /
   DeviceUsage 8 once the DSP has a proximity sensor (waits up to 3 minutes for it), and sends kIOHIDEventTypeProximity with mask 0x40 (near the
   receiver) or 0 on each change of SEE's near/far, read 5 times a second (`prox=0`: none). The kernel keeps SEE's proximity events (message
   773/774, inferred from sns_proximity.proto: field 1 near 1 / far 0, field 2 raw ADC) in `kern.hackios.sensor_values`; until now only its
   configuration event (769) had been seen, so whether 773 is what arrives is not known yet.
-- **Ambient light (2026-11-07, built, not yet seen; `als=1` only):** a service of (0xff00, 4) in backboardd and kIOHIDEventTypeAmbientLightSensor
+- **Ambient light (2026-11-07; `als=1` only: it makes backboardd crash, see BOOT_ARGS; SEE's data[0] is the lux, 19.7 by day, verified):** a service of (0xff00, 4) in backboardd and kIOHIDEventTypeAmbientLightSensor
   events, SEE's lux (data[0], inferred) as the level and as field 0xc000b (the illuminance: what CoreBrightness itself writes there when it
   rewrites an event, 20F66 0x1af009b14). Off by default: with an ALS iOS turns auto-brightness on, and a wrong reading would hold the screen
   at its dimmest.

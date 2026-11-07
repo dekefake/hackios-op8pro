@@ -233,7 +233,7 @@ Rules of thumb: a bare `./xl enter` or a bad arg can hang a phone; **never pass 
 
 | Boot-arg | Meaning |
 |---|---|
-| `slpi` | 1: start the sensor DSP (SLPI), its SEE client and FastRPC listener. |
+| `slpi` | 1 (default on the OnePlus 8 Pro since loader 15, 2026-11-07): start the sensor DSP (SLPI), its SEE client and FastRPC listener; 0 opts out. |
 | `slpi_delay` | Seconds after the root is mounted before starting (default 30). |
 | `slpi_step` / `slpi_upto` | Run steps 1..N and stop / pause after step N (like `adsp_step`). |
 | `slpi_settle_ms` | ms after the DSP says up before the next step (default 300). |
@@ -247,8 +247,8 @@ Rules of thumb: a bare `./xl enter` or a bad arg can hang a phone; **never pass 
 | `slpi_frpc_trace` | 1: log every FastRPC call served. |
 | `slpi_dsplog` | 1: ask the DSP for its own log lines (adspmsgd_adsp1 init2, as Android's adspmsgd); they are logged as `frpc: dsp:`. |
 
-| `als` | 1: an ambient light sensor service in backboardd (auto-brightness) from the sensor DSP's light sensor (userland `inject.c`; off by default until verified). |
-| `prox` | 0: no proximity service in backboardd (userland `inject.c`; default: one, from the sensor DSP's proximity sensor). |
+| `als` | 1: an ambient light sensor service in backboardd (auto-brightness; userland `inject.c`). **Crashes backboardd** today: CoreBrightness asks the service for ALSSensorType, Orientation, Placement and crgb and dies on their absence (RAM image 175); off by default. |
+| `prox` | 1: a proximity service in backboardd (userland `inject.c`). **Crashes backboardd** today ("-[NSNull applyUIMode:]": its sensor controller cannot wrap a virtual service, RAM image 176); off by default. |
 | `orient` | 0: backboardd's device orientation stays CoreMotion's (userland `inject.c`; default: from the accelerometer when there is one). |
 
 Sysctls: `kern.hackios.sensors` (the sensors SEE reported and their last values), `kern.hackios.sensor_values` (the same as a struct, for `inject.c`), `kern.hackios.fastrpc` (listener state, calls served), `kern.hackios.slpi_charger`.
