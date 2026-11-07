@@ -226,6 +226,12 @@ way to the loader (backboardd sets level 0 at shutdown; the loader's menu stays 
   (hooked: CoreBrightness's own colour module never takes this ALS for its adaptation). The switch is kept by `inject.c` (preference
   `TrueTone` of `com.hackios.display`); while on, the colour sensor's temperature (SEE `rgb`, 3900-4300 K under the room's lamps) sets a white
   point halfway from D65 towards it (4500-7500 K, Bradford adaptation) as matrix location 3: seen 5226 K for 3948 K light.
+- **True Tone flicker in Maps (fixed 2026-11-07, RAM images 208-210; the owner's look still due):** two causes. (1) Frames the GPU did not
+  scale into a panel framebuffer (a swap of more than one layer, a surface drawn into again after `panelReady`, none free in time) were
+  copied by the kernel without the matrix: `MiniIOMobileFramebuffer.cpp` `tintRefresh()`/`tintPixel()` now put those copies through the
+  same product, in linear light, with integer tables (at most 2 of 255 from the shader's result, in dark tones). (2) The sensor's
+  temperature wobbles 100 K and more a second, and each step was a jump of the white point: `true_tone_apply()` filters it (~5 s), ignores
+  changes under 40 K and fades in steps of 15 % (at least 12 K). Seen: the matrix's blue gain 0.715 -> 0.692 in small steps.
 - **Auto-Brightness:** Settings shows it where MobileGestalt's `ambient-light-sensor` is true, which is an IOService of PrimaryUsagePage
   0xff00 / PrimaryUsage 4 (`MiniALSServiceStart()` publishes one with slpi=1; MobileGestalt's cache had to be removed once to see it);
   CoreBrightness's auto-brightness runs on the ALS HID service (`inject.c` `als_start()`, made at once so that CoreBrightness finds it when

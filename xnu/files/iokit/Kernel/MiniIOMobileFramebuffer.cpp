@@ -180,6 +180,13 @@ static TUNABLE(uint32_t, gDiff, "fb_diff", 0);
  * panel is worked out from the four of the picture around where it falls (bilinear).
  */
 static TUNABLE(uint32_t, gFilter, "fb_filter", 1);
+/*
+ * Boot-arg fb_same=1: a swap of exactly what is on the panel already is copied and pushed all the same. By default it is not:
+ * the window server swaps up to 58 times a second with nothing new in it (Maps at rest, 2026-11-07: 38 frames composited in
+ * 27 s, 1592 swaps) -- each a full scaled copy by the processors into the panel's memory and a transfer to a panel that keeps
+ * its picture by itself (command mode).
+ */
+static TUNABLE(uint32_t, gSameFrames, "fb_same", 0);
 static TUNABLE(uint32_t, gRefreshHz, "fb_hz", kFBRefreshHz);
 static TUNABLE(uint32_t, gOnTheBeat, "fb_beat", 1);
 /*
@@ -197,6 +204,8 @@ static TUNABLE(uint32_t, gThreads, "fb_threads", 3);
  */
 static TUNABLE(uint32_t, gThreadPriority, "fb_pri", 0);
 extern "C" uint32_t hk_fb_frames;                   /* kern.hackios.fb_frames (hk_cpufreq.c) */
+extern "C" uint32_t hk_fb_same;                     /* kern.hackios.fb_same (hk_cpufreq.c) */
+extern "C" uint32_t hk_fb_panel[4];                 /* kern.hackios.fb_panel (hk_cpufreq.c) */
 extern "C" uint32_t hk_fb_layers[7];                /* kern.hackios.fb_layers (hk_cpufreq.c) */
 extern "C" kern_return_t kernel_thread_start_priority(thread_continue_t continuation, void * parameter, integer_t priority,
     thread_t * new_thread);
@@ -2072,6 +2081,8 @@ public:
 	bool            fRecDone;
 	bool            fRecWrapped;            /* (rec_ring) the memory has been full once: frames go over the oldest */
 	uint32_t        fStatRaced;             /* frames whose surface the GPU was given work on while being copied */
+	uint32_t        fShownSig[SWAP_LAYERS][11];     /* show(): what the frame on the panel was made of (sameFrame()) */
+	uint32_t        fStatSame;              /* swaps that would have put the same frame there again (not pushed) */
 	uint8_t *       fBuffer[2];             /* fb_push=2: the two framebuffers, and which is written next */
 	uint64_t        fBufferPhys[2];
 	IOMemoryMap *   fBufferMap;             /* ... the second one's mapping, kept */
@@ -2284,6 +2295,10 @@ IOMobileFramebuffer::start(IOService * provider)
 			}
 		}
 	}
+	hk_fb_panel[0] = fWidth;
+	hk_fb_panel[1] = fHeight;
+	hk_fb_panel[2] = fPanelWidth;
+	hk_fb_panel[3] = fPanelHeight;
 	if (gFBSubtype != 0) {
 		IORegistryEntry * node = IORegistryEntry::fromPath("/product", gIODTPlane);
 
@@ -2455,11 +2470,169 @@ sample_at(int64_t i, int64_t in, int64_t out)
  * scaling a whole frame takes one processor some 9 ms, so with boot-arg fb_threads=N it is shared
  * out between N of them, each with rows of its own and a row of blending of its own.
  */
+/*
+ * The display's colour matrix (Night Shift, True Tone: kFBMethodSetMatrix, below) for the frames copied here. The window
+ * server's GPU scales most frames through it (eagl.c, panel_tint()); a frame it did not scale (a swap of more layers
+ * than one, a surface drawn into again, no framebuffer free in time) was copied without it, and the screen lost its
+ * tint for that frame: True Tone "flickered" in Maps. Done the same way, in linear light (2.2) -- the same pictures
+ * either way -- without floating point: the product of the locations' matrices in 16.16, a table for every one of its
+ * nine terms (the term times the linear value of each byte), and one from linear (16 bits) back to a byte.
+ */
+static const uint32_t kTintLinear[256] = {
+	0, 0, 2, 4, 7, 11, 17, 24, 32, 42, 53, 65, 79, 94, 111, 129,
+	148, 169, 192, 216, 242, 270, 299, 330, 362, 396, 432, 469, 508, 549, 591, 635,
+	681, 729, 779, 830, 883, 938, 995, 1053, 1113, 1175, 1239, 1305, 1373, 1443, 1514, 1587,
+	1663, 1740, 1819, 1900, 1983, 2068, 2155, 2243, 2334, 2427, 2521, 2618, 2717, 2817, 2920, 3024,
+	3131, 3240, 3350, 3463, 3578, 3694, 3813, 3934, 4057, 4182, 4309, 4438, 4570, 4703, 4838, 4976,
+	5115, 5257, 5401, 5547, 5695, 5845, 5998, 6152, 6309, 6468, 6629, 6792, 6957, 7124, 7294, 7466,
+	7640, 7816, 7994, 8175, 8358, 8543, 8730, 8919, 9111, 9305, 9501, 9699, 9900, 10102, 10307, 10515,
+	10724, 10936, 11150, 11366, 11585, 11806, 12029, 12254, 12482, 12712, 12944, 13179, 13416, 13655, 13896, 14140,
+	14386, 14635, 14885, 15138, 15394, 15652, 15912, 16174, 16439, 16706, 16975, 17247, 17521, 17798, 18077, 18358,
+	18642, 18928, 19216, 19507, 19800, 20095, 20393, 20694, 20996, 21301, 21609, 21919, 22231, 22546, 22863, 23182,
+	23504, 23829, 24156, 24485, 24817, 25151, 25487, 25826, 26168, 26512, 26858, 27207, 27558, 27912, 28268, 28627,
+	28988, 29351, 29717, 30086, 30457, 30830, 31206, 31585, 31966, 32349, 32735, 33124, 33514, 33908, 34304, 34702,
+	35103, 35507, 35913, 36321, 36732, 37146, 37562, 37981, 38402, 38825, 39252, 39680, 40112, 40546, 40982, 41421,
+	41862, 42306, 42753, 43202, 43654, 44108, 44565, 45025, 45487, 45951, 46418, 46888, 47360, 47835, 48313, 48793,
+	49275, 49761, 50249, 50739, 51232, 51728, 52226, 52727, 53230, 53736, 54245, 54756, 55270, 55787, 56306, 56828,
+	57352, 57879, 58409, 58941, 59476, 60014, 60554, 61097, 61642, 62190, 62741, 63295, 63851, 64410, 64971, 65535
+};
+/* (the linear value half a step above each byte: where the next byte starts, rounded as the GPU's pow() does) */
+static const uint32_t kTintLinearNext[256] = {
+	0, 1, 2, 5, 9, 14, 20, 28, 37, 47, 59, 72, 86, 102, 119, 138,
+	159, 181, 204, 229, 256, 284, 314, 345, 379, 413, 450, 488, 528, 570, 613, 658,
+	705, 754, 804, 856, 910, 966, 1024, 1083, 1144, 1207, 1272, 1339, 1408, 1478, 1551, 1625,
+	1701, 1779, 1859, 1941, 2025, 2111, 2199, 2288, 2380, 2474, 2569, 2667, 2767, 2868, 2972, 3077,
+	3185, 3295, 3406, 3520, 3636, 3754, 3873, 3995, 4119, 4245, 4373, 4504, 4636, 4770, 4907, 5045,
+	5186, 5329, 5474, 5621, 5770, 5921, 6075, 6230, 6388, 6548, 6710, 6874, 7040, 7209, 7380, 7553,
+	7728, 7905, 8084, 8266, 8450, 8636, 8824, 9015, 9207, 9402, 9600, 9799, 10001, 10205, 10411, 10619,
+	10830, 11043, 11258, 11475, 11695, 11917, 12141, 12368, 12597, 12828, 13061, 13297, 13535, 13775, 14018, 14263,
+	14510, 14760, 15012, 15266, 15522, 15781, 16043, 16306, 16572, 16840, 17111, 17384, 17659, 17937, 18217, 18499,
+	18784, 19071, 19361, 19653, 19947, 20244, 20543, 20845, 21148, 21455, 21763, 22075, 22388, 22704, 23022, 23343,
+	23666, 23992, 24320, 24650, 24983, 25319, 25656, 25997, 26339, 26684, 27032, 27382, 27735, 28089, 28447, 28807,
+	29169, 29534, 29901, 30271, 30643, 31018, 31395, 31775, 32157, 32542, 32929, 33319, 33711, 34106, 34503, 34902,
+	35305, 35709, 36117, 36526, 36939, 37354, 37771, 38191, 38613, 39038, 39466, 39896, 40328, 40763, 41201, 41641,
+	42084, 42529, 42977, 43428, 43881, 44336, 44795, 45255, 45719, 46184, 46653, 47124, 47597, 48074, 48552, 49034,
+	49518, 50004, 50493, 50985, 51480, 51976, 52476, 52978, 53483, 53990, 54500, 55013, 55528, 56046, 56567, 57090,
+	57615, 58144, 58675, 59208, 59745, 60283, 60825, 61369, 61916, 62465, 63018, 63572, 64130, 64690, 65253, 65536
+};
+
+struct fb_color_matrices {
+	uint32_t generation;            /* one more at every SetMatrix */
+	uint32_t set;                   /* bit n: location n has a matrix */
+	uint64_t matrix[8][9];          /* the doubles, as bits */
+};
+static struct fb_color_matrices gColorMatrices;
+static uint32_t gTintGeneration = ~0u;
+static bool gTintOn;                    /* (the presenter's thread alone) the copies go through gTintTerm */
+static int32_t gTintTerm[9][256];       /* the matrix's term (row, column) times the linear value of each byte, 16 bits */
+static uint8_t * gTintByte;             /* 65536: a linear value of 16 bits as a byte */
+
+/* A double's bits, in 16.16 (only what a colour matrix holds: small numbers) */
+static int64_t
+tintFixed(uint64_t bits)
+{
+	int exponent = (int) (bits >> 52 & 0x7ff), shift = exponent - 1075 + 16;
+	int64_t mantissa = (int64_t) ((bits & ((1ULL << 52) - 1)) | (1ULL << 52)), value;
+
+	if (exponent == 0) {
+		return 0;
+	}
+	if (shift >= 0) {
+		value = shift > 10 ? (64LL << 16) : mantissa << shift;  /* (beyond 1024 times: not a colour matrix) */
+	} else {
+		value = shift <= -63 ? 0 : mantissa >> -shift;
+	}
+	value = value > (64LL << 16) ? (64LL << 16) : value;
+	return (bits >> 63) ? -value : value;
+}
+
+/* (the presenter, before copying a frame) gColorMatrices into the tables, if it changed */
+static void
+tintRefresh(void)
+{
+	int64_t product[9] = { 1 << 16, 0, 0, 0, 1 << 16, 0, 0, 0, 1 << 16 };
+	uint32_t generation = __atomic_load_n(&gColorMatrices.generation, __ATOMIC_ACQUIRE);
+	bool on = false;
+
+	if (generation == gTintGeneration) {
+		return;
+	}
+	gTintGeneration = generation;
+	/* (the same order as eagl.c's: each location's matrix after the ones below it) */
+	for (int l = 0; l < 8; l++) {
+		int64_t m[9], next[9];
+
+		if (!(gColorMatrices.set & (1u << l))) {
+			continue;
+		}
+		for (int i = 0; i < 9; i++) {
+			m[i] = tintFixed(gColorMatrices.matrix[l][i]);
+		}
+		for (int r = 0; r < 3; r++) {
+			for (int c = 0; c < 3; c++) {
+				next[3 * r + c] = (m[3 * r] * product[c] + m[3 * r + 1] * product[3 + c] + m[3 * r + 2] * product[6 + c]) >> 16;
+			}
+		}
+		memcpy(product, next, sizeof(product));
+	}
+	for (int i = 0; i < 9; i++) {
+		int64_t want = (i % 4 == 0) ? (1 << 16) : 0, off = product[i] - want;
+
+		on = on || off > 131 || off < -131;     /* (0.002, as eagl.c) */
+	}
+	if (on && gTintByte == NULL) {
+		gTintByte = (uint8_t *) IOMalloc(65536);
+		if (gTintByte != NULL) {
+			uint32_t at = 0;
+
+			for (uint32_t v = 0; v < 256; v++) {
+				for (; at < kTintLinearNext[v] && at < 65536; at++) {
+					gTintByte[at] = (uint8_t) v;
+				}
+			}
+			for (; at < 65536; at++) {
+				gTintByte[at] = 255;
+			}
+		}
+	}
+	if (on && gTintByte != NULL) {
+		for (int i = 0; i < 9; i++) {
+			for (int v = 0; v < 256; v++) {
+				gTintTerm[i][v] = (int32_t) ((product[i] * (int64_t) kTintLinear[v]) >> 16);
+			}
+		}
+	}
+	gTintOn = on && gTintByte != NULL;
+}
+
+/* (show()) the colour matrix's generation: a new one is a new frame, even of the same pixels */
+static inline uint32_t
+tintGeneration(void)
+{
+	return __atomic_load_n(&gColorMatrices.generation, __ATOMIC_RELAXED);
+}
+
+/* One pixel (B, G, R from the low byte up, as the window server's surfaces and the panel have them) through the matrix */
+static inline uint32_t
+tintPixel(uint32_t p)
+{
+	uint32_t b = p & 255, g = p >> 8 & 255, r = p >> 16 & 255;
+	int32_t R = gTintTerm[0][r] + gTintTerm[1][g] + gTintTerm[2][b];
+	int32_t G = gTintTerm[3][r] + gTintTerm[4][g] + gTintTerm[5][b];
+	int32_t B = gTintTerm[6][r] + gTintTerm[7][g] + gTintTerm[8][b];
+
+	R = R < 0 ? 0 : R > 65535 ? 65535 : R;
+	G = G < 0 ? 0 : G > 65535 ? 65535 : G;
+	B = B < 0 ? 0 : B > 65535 ? 65535 : B;
+	return (p & 0xff000000u) | (uint32_t) gTintByte[R] << 16 | (uint32_t) gTintByte[G] << 8 | gTintByte[B];
+}
+
 struct RowJob {
 	const uint8_t * pixels;
 	uint32_t        stride;
 	int32_t         sx, sy, sw, sh, px0, py0, px1, py1, cx0, cx1;
 	bool            filter, unscaled;
+	bool            tint;           /* through the display's colour matrix (tintPixel()) */
 };
 
 void
@@ -2479,6 +2652,19 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
 			continue;
 		}
 		to = (uint32_t *) (fBase + (size_t) y * fRowBytes);
+		if (job->unscaled && job->tint) {
+			const uint32_t * __restrict in = (const uint32_t *) (pixels + (size_t) (sy + y - py0) * stride) + sx;
+			uint32_t * __restrict out = to + px0, last = ~in[0], tinted = 0;
+
+			for (int32_t i = 0; i < sw; i++) {
+				if (in[i] != last) {            /* (most of a screen is the same as next to it) */
+					last = in[i];
+					tinted = tintPixel(last);
+				}
+				out[i] = tinted;
+			}
+			continue;
+		}
 		if (job->unscaled) {
 			/* not scaled at all */
 			memcpy(to + px0, pixels + (size_t) (sy + y - py0) * stride + (size_t) sx * 4, (size_t) sw * 4);
@@ -2526,10 +2712,34 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
 			const uint16_t * __restrict weights = fColumnWeight + cx0;
 			uint32_t * __restrict out = to + cx0;
 
-			for (uint32_t i = 0, n = (uint32_t) (cx1 - cx0); i < n; i++) {
+			for (uint32_t i = 0, n = job->tint ? 0 : (uint32_t) (cx1 - cx0); i < n; i++) {
 				uint32_t c = column[i], w = weights[i], a = from[c];
 
 				out[i] = w == 0 || a == from[c + 1] ? a : blend(a, from[c + 1], w);
+			}
+			if (job->tint) {
+				uint32_t last = 0, tinted = tintPixel(0);
+
+				for (uint32_t i = 0, n = (uint32_t) (cx1 - cx0); i < n; i++) {
+					uint32_t c = column[i], w = weights[i], a = from[c];
+
+					a = w == 0 || a == from[c + 1] ? a : blend(a, from[c + 1], w);
+					if (a != last) {
+						last = a;
+						tinted = tintPixel(a);
+					}
+					out[i] = tinted;
+				}
+			}
+		} else if (job->tint) {
+			uint32_t last = 0, tinted = tintPixel(0);
+
+			for (int32_t x = cx0; x < cx1; x++) {
+				if (from[fColumn[x]] != last) {
+					last = from[fColumn[x]];
+					tinted = tintPixel(last);
+				}
+				to[x] = tinted;
 			}
 		} else {
 			for (int32_t x = cx0; x < cx1; x++) {
@@ -2679,6 +2889,7 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
 	job.cx1 = cx1;
 	job.filter = filter;
 	job.unscaled = px1 - px0 == sw && py1 - py0 == sh && px0 >= 0 && (uint32_t) px1 <= fPanelWidth;
+	job.tint = gTintOn;
 	if (fThreads <= 1 || fDiff || fHelpersStarted + 1 < fThreads) {
 		drawRows(&job, py0, py1, fBlendRow);
 		return;
@@ -3100,6 +3311,33 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 	}
 	fStatWaiting += mach_absolute_time() - began;
 	began = ready = mach_absolute_time();
+	/*
+	 * The same frame as the one on the panel: the same surfaces at the same places, no GPU work on them since (drawn), no
+	 * writes by a processor (the seed), the same colour matrix. Nothing is copied or pushed; the swap is done all the same.
+	 */
+	if (!gSameFrames && fGraphics && fPushTried && !fRecBase) {
+		uint32_t sig[SWAP_LAYERS][11];
+		bool same = true;
+
+		bzero(sig, sizeof(sig));
+		for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
+			sig[layer][0] = swapWord(swap, SWAP_SURFACE(layer));
+			memcpy(&sig[layer][1], swap + SWAP_SOURCE(layer), 16);
+			memcpy(&sig[layer][5], swap + SWAP_DEST(layer), 16);
+			sig[layer][9] = surfaces[layer] != NULL ? surfaces[layer]->drawn : 0;
+			sig[layer][10] = surfaces[layer] != NULL ? surfaces[layer]->shared()->seed ^ tintGeneration() : 0;
+			same = same && (sig[layer][0] == 0 || surfaces[layer] != NULL);
+		}
+		same = same && sig[0][0] != 0 && memcmp(sig, fShownSig, sizeof(sig)) == 0;
+		memcpy(fShownSig, sig, sizeof(sig));
+		if (same) {
+			fStatSame++;
+			hk_fb_same++;
+			fSwapsShown++;                  /* (what waits for a swap ages all the same) */
+			dequeueSwap();
+			return;
+		}
+	}
 	if (!fPushTried) {
 		fPushTried = true;
 		uint32_t rowBytes = (fPanelWidth * 4 + 63) & ~63u, stride0 = 0, stride1 = 0;
@@ -3314,6 +3552,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 				PE_initialize_console(NULL, kPEGraphicsMode);
 			}
 			if (panel < 0) {
+				tintRefresh();
 				drawLayer(s, src, dst);
 			}
 			if (layer == 0) {
@@ -3683,14 +3922,10 @@ IOMobileFramebufferUserClient::vsync(void)
  * The display's colour matrices: what CoreAnimation sets with IOMobileFramebufferSetMatrix (selector 55: a location, then 9 doubles,
  * a 3x3 by rows) -- Night Shift's and True Tone's white point among them, which an iPhone's display pipe applies to every pixel.
  * This driver has no pipe for it: it keeps them as they came (the kernel does no floating point) and the window server's last GPU
- * pass applies their product (userland/src/eagl.c, selector 202). Locations 0..7; a matrix set to identity is set like any other.
+ * pass applies their product (userland/src/eagl.c, selector 202); the frames copied here go through it as well (tintPixel()).
+ * Locations 0..7; a matrix set to identity is set like any other.
  */
-struct fb_color_matrices {
-	uint32_t generation;            /* one more at every SetMatrix */
-	uint32_t set;                   /* bit n: location n has a matrix */
-	uint64_t matrix[8][9];          /* the doubles, as bits */
-};
-static struct fb_color_matrices gColorMatrices;
+/* (struct fb_color_matrices and gColorMatrices: above, with the copies' tinting, tintRefresh()) */
 static unsigned gColorMatrixSaid;
 
 IOReturn

@@ -421,12 +421,19 @@ gpuWait(uint32_t fence, uint64_t milliseconds)
 	uint64_t began = mach_absolute_time(), patience;
 
 	nanoseconds_to_absolutetime(milliseconds * NSEC_PER_MSEC, &patience);
-	for (bool waited = false;; waited = true) {
+	for (uint32_t sleeps = 0;; sleeps++) {
 		if (hk_gpu_done(fence)) {
 			hk_gpu_faults();
-			if (waited) {
+			if (sleeps != 0) {
 				gGPUStat.waits++;
 				gGPUStat.waiting += mach_absolute_time() - began;
+				if (gpu_log) {
+					/* "tl: w FENCE waited US, N sleeps": how long a wait took to see the fence (iokit/Kernel/HKGPU.cpp: tl: Q) */
+					uint64_t ns;
+
+					absolutetime_to_nanoseconds(mach_absolute_time() - began, &ns);
+					hk_tl("tl: w %u waited %llu, %u sleeps\n", fence, ns / 1000, sleeps);
+				}
 			}
 			return true;
 		}
@@ -1294,7 +1301,11 @@ HKGPUUserClient::submit(struct msm_gem_submit * request)
 			all_words += words[i];
 		}
 		absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
-		hk_tl("tl: Q %u at %llu: %u buffers, %u big, %u words\n", request->fence, ns / 1000, request->nr_bos, big, all_words);
+		char who[24] = "?";
+
+		proc_selfname(who, sizeof(who));
+		hk_tl("tl: Q %u at %llu: %u buffers, %u big, %u words by %s\n", request->fence, ns / 1000, request->nr_bos, big, all_words,
+		    who);
 	}
 	if (request->flags & MSM_SUBMIT_FENCE_FD_OUT) {
 		request->fence_fd = -1;
@@ -1341,7 +1352,8 @@ HKGPUUserClient::submit(struct msm_gem_submit * request)
 		absolutetime_to_nanoseconds(gGPUStat.making, &making);
 		IOLog("HKGPU: buffers: %u made in %llu us each, %u kept ones given again (%llu MB kept)\n", gGPUStat.made,
 		    gGPUStat.made ? making / NSEC_PER_USEC / gGPUStat.made : 0, gGPUStat.given_again, fKeptBytes >> 20);
-		IOLog("HKGPU: %u submissions in %llu ms: %u command buffers and %u buffers named, %llu KB out of the cache "
+		/* (printf: the console, where a live run's log is read; IOLog's lines reach only the kernel's buffer) */
+		printf("HKGPU: %u submissions in %llu ms: %u command buffers and %u buffers named, %llu KB out of the cache "
 		    "in %llu us a submission; the GPU worked %llu us on each of %u (%u under 0.1 ms, %u under 0.25, %u under 0.5, "
 		    "%u under 1, %u under 2, %u under 4, %u longer; %llu ms in all); %u waits of %llu us, %u over before they "
 		    "began; %u IOSurfaces taken as buffers in %llu us each; %u buffers, %llu MB\n",
@@ -1357,7 +1369,7 @@ HKGPUUserClient::submit(struct msm_gem_submit * request)
 			uint64_t slowest;
 
 			absolutetime_to_nanoseconds(gSpeedSlowest, &slowest);
-			IOLog("HKGPU: speed (gpu_dcvs): %u%% of the time at %u MHz, %u%% at %u, %u%% at %u; %u changes, the "
+			printf("HKGPU: speed (gpu_dcvs): %u%% of the time at %u MHz, %u%% at %u, %u%% at %u; %u changes, the "
 			    "longest %llu us%s\n", periods ? gSpeedTime[1] * 100 / periods : 0, hk_gpu_level_khz(1) / 1000,
 			    periods ? gSpeedTime[2] * 100 / periods : 0, hk_gpu_level_khz(2) / 1000,
 			    periods ? gSpeedTime[3] * 100 / periods : 0, hk_gpu_level_khz(3) / 1000, gSpeedChanges,

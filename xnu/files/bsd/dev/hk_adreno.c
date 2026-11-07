@@ -4051,7 +4051,8 @@ gpu_times(void)
 
 		absolutetime_to_nanoseconds(now - gpu_stat_at, &ns);
 		if (gpu_stat_at != 0 && ns >= 1000000000ull) {
-			hk_tl("tl: u busy %llu permille of %llu ms in %u submissions\n", gpu_stat_ticks * 10 / 192 * 1000 / (ns / 1000), ns / 1000000, gpu_stat_count);
+			hk_tl("tl: u busy %llu permille of %llu ms in %u submissions, now at %u MHz\n", gpu_stat_ticks * 10 / 192 * 1000 / (ns / 1000),
+			    ns / 1000000, gpu_stat_count, core_khz / 1000);
 			gpu_stat_ticks = 0;
 			gpu_stat_count = 0;
 			gpu_stat_at = now;

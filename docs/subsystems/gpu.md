@@ -179,6 +179,54 @@ switcher, `sb3` blur refusal, the Control Center glyph opacity workaround).
 - Why IOSurface drawables matter: `-[CAMetalLayer nextDrawable]` sends a device one message,
   `-newTextureWithDescriptor:iosurface:plane:` (`hkdrawable.m`; research in air.md).
 
+### Performance: Maps (2026-11-07, OnePlus 8 Pro, RAM images 211-228; measured on the phone)
+
+How it was measured (boot-args in [../BOOT_ARGS.md](../BOOT_ARGS.md)): `metal_stats=1` prints per process, every 5 s, the
+command buffers, draws and blits, the time `-commit` replays them into Gallium, the time from submission to fence (split into
+the completion queue and the fence wait) and the time waited in `-[CAMetalLayer nextDrawable]`; the library adds where a draw's
+time goes; backboardd's `eagl.c` adds a "pace" line (frames composited, frames on the panel, swaps not pushed). `gpu_log=1`
+gives the kernel's line per submission (`tl: Q` with words and process, `tl: q` with the GPU's own time, `tl: w` with how long a
+wait took to see its fence) in the loader's log (`tools/macdev/logpoll.py`); `gpu_stats=1` the GPU's busy share and clock a
+second. Kernel lines printed after boot reach the loader's log, not `iphont log --live`.
+
+What limited Maps while panning, and what was done (before -> after):
+- **The GPU, not the processor.** Maps' map pass was 29.7-33 ms of GPU time (median) at 525 MHz, the GPU 65-85 % busy, and
+  command buffers waited ~23 ms for their fence (frames are three command buffers, the completion queue is serial): ~11-18
+  Maps frames a second. The processor's replay was 6-13 % of a core.
+- **Tile memory** (`metal_tiler`, default on): DontCare loads and stores discard the attachment (`rwa_texture_discard`,
+  freedreno's glInvalidateFramebuffer path), and a pass that resolves without storing renders its samples in tile memory and
+  writes each tile out resolved (`rwa_draw.resolve`, EXT_multisampled_render_to_texture): the 4-sample texture is never
+  written or read and the resolve blit (1.8 ms of the processor's a frame) is gone. 33 -> 29.7 ms.
+- **Samples** (`metal_msaa`, default 2): Maps asks for 4 samples without asking whether they are supported; at 4 the
+  Adreno's tile memory holds half the pixels, so the pass is played for twice the tiles (50 000 command words, against 17 000).
+  29.7 -> 13.8 ms (median), fence 20 -> 9 ms. `metal_msaa=1` draws Maps black (not investigated).
+- **The processor's replay** (`air_metal.c` `rwa_render_draw`): surfaces kept per texture and the framebuffer left bound
+  (`metal_fbkeep`; freedreno compared framebuffers by surface pointer, so every draw dirtied all state); state bound only where
+  it differs (`device->bound`); the index buffer no longer read to bound the vertices (`metal_strict=1` brings it back; the
+  Adreno bounds its fetches itself). Per draw 32 -> 15 us in the driver, 19.5 -> 10 us in the library.
+- **Idle power:** with nothing new to show the window server still swapped up to 58 times a second, each a full scaled copy by
+  the processors and a push to the panel; the kernel now leaves such swaps unpushed (`fb_same=1`: as before), and GPU
+  submissions at rest went from ~72 to 0-40 a second.
+- **Still open:** in the busiest second Maps' map passes were 415 ms of GPU time and backboardd's compositing 387 ms (434
+  submissions: about twenty per composited frame, ~1.3 ms each, probably one per offscreen pass, each reloading its target into
+  tile memory); and `-commit` spends ~0.8 ms submitting since the tile-memory changes. Maps panned at about 21 frames a second
+  at best in these runs (it was 11), not 120.
+- **Panel-density Metal layers** (`metal_native`, default on since 2026-11-07, the owner's choice): `hkmetal.m` lowers a
+  CAMetalLayer's contentsScale by panel / display (3 -> 2.512 here, from `kern.hackios.fb_panel`), so Maps draws 1080 x 2340
+  instead of 1290 x 2796 and the window server stretches it as before. Scaling only the drawable was tried first and drew
+  Maps black: Maps makes its own multisample and depth targets from its view, and its passes had attachments of two sizes.
+  The saving is not measurable across boots: Maps reopens where it was left, and what is on the map changes the GPU's time
+  more than the 30 % fewer pixels (11.2 and 11.0 ms against 13.8 and 7.7 ms in four runs).
+- **The window server's frame** (trace `gltrace_at=100 gltrace_frames=12`, RAM image 233): a frame with Maps changing is
+  ~20 GPU submissions -- CoreAnimation draws the screen behind the translucent bars twice into 1100 x 2730 targets, a
+  1100 x 1342 and a 782 x 1342 one for the blur, strips of 1290 x 177 and 1312 x 192, then the 1290 x 2796 frame (30
+  draws), and `eagl.c` scales it to the panel (0.6 ms). About 10 million pixels of passes, each a tile pass of its own:
+  8-12 ms of GPU a frame, at 30-85 frames a second (a 30 a second rhythm is always there while Maps is open). With
+  Maps panning the GPU was 92-98 % busy, about 60 % of it the window server's. It is the backdrop blur of iOS's
+  materials, not a fault of the GL path; Reduce Transparency would remove those passes (not tried).
+- **Do not boot `metal_sync=1` with Metal on everywhere:** image 222 (with it) never came up and the phone left USB until the
+  owner reset it; there was no saved log. `metal_sync_in=NAME` waits per draw in that one process only.
+
 ## Verification record
 
 Verified on the phone: cold `gpu=1` (logs `180011`, `180356`), GPU scaling into scanout, hang recovery 3/3, fence IRQ,
