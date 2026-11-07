@@ -257,6 +257,15 @@ README lists video and Live Photo recording as not working (redwood). No encoder
   no refusal said -- the video mode's outputs are not ones `camera_device.c` delivers to. Next: log the outputs and properties
   the graph sets in Video mode (stream properties, output configurations), deliver to them, then see the encoder (the software
   HEVC of VCPHEVC is registered; T49 is the hardware one).
+- **2026-11-08 later (RAM images 268-272):** in Video mode the capture graph never starts on the stream (no output configured,
+  "graph NOT running": `camera_device.c` now says so at the 30th frame). `media_oslog=1` (`userland/src/oslog_mirror.c`: the four
+  `_os_log_*_impl` entry points in mediaserverd go to the console) shows, with Metal hidden from mediaserverd (the default),
+  `[Espresso::handle_ex_] exception=Metal device not found`. With Metal left to it (`mediamtl=1`) mediaserverd dies at the first
+  frame in MPSCore (`MPSAutoCache::MPSAutoCache`, NULL+0x18): `-[MPSCommandBufferImageCache initWithCommandBuffer:]` returns nil
+  because `MPSDevice::GetMPSDevice([buffer device])` is 0 -- MetalPerformanceShaders does not take this driver's device (it
+  knows Apple's GPUs by family); `-userDictionary` was added to the command buffer on the way (MPS keeps its cache there), not
+  enough. Next: make MPS take the device (what GetMPSDevice reads off it), or find which node of the video graph needs
+  Espresso/MPS and whether it can be done without (the photo graph runs without them).
 
 ### T48 Apple ID and App Store sign-in — Accounts · Not Started · P0
 - **The owner (2026-11-08):** signing in with an Apple ID, and to the App Store, does not work properly; a priority. Nothing
