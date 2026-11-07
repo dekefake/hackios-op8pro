@@ -16,7 +16,8 @@ anything that has aged into the right permanent page.
 - **Not seen (needs a hand):** the screen turning, tap-to-focus (back camera), proximity. Compass: SEE never registers a mag; the DSP's own
   log (`slpi_dsplog=1`) does not come yet (only the root process got init2; no lines).
 - **After a kernel return:** `fastboot getvar result` then `fastboot get_staged` before anything else (never `xl screenshot`/`oem log` first).
-- **To flash** these to boot_a needs the owner's OK (rule 1); the bundle would be kernel data75 + loader 15 + `out/tree/r42`.
+- **Flash candidate:** `out/instantnoodlep-standalone189.img` (kernel data75, loader 15, `out/tree/r42` of 10:00; sha256 2d929353810cfd21...),
+  RAM-booted as is and checked: Camera back/front (natural colours), Maps, Photos, orientation. Flashing boot_a needs the owner's OK (rule 1).
 
 ## 0a. OnePlus 8 Pro, 2026-11-06/07: Metal for the whole system, GPS fields, the sensor DSP started on
 

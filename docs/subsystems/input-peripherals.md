@@ -183,7 +183,8 @@ FAT (`image/`, `hk_fw_partition_file()` in `instantnoodle_modem.c`; nothing bund
 - **Orientation (2026-11-07, built, not yet seen):** backboardd turns the screen by CoreMotion's `CMDeviceOrientationManager`; `inject.c`
   `orientation_start()` answers its three methods from `kern.hackios.sensor_values` (a struct per kind: events, values, timestamp) when the
   kernel has an accelerometer, else leaves CoreMotion's (`orient=0`: not at all). How backboardd uses it: research/ios-userland.md 1.5a.
-- **Orientation verified (2026-11-07, RAM images 177-185):** face up reported (5) with the phone on a table; turning not seen yet (needs a hand).
+- **Orientation verified (2026-11-07, RAM images 177-189):** face up (5) on a table, and portrait (1, y = +8.1 m/s^2) when the phone was picked up
+  upright, back to 5 when laid down; the landscape signs (3/4) not yet seen.
   `slpi=1` is in loader 15's default arguments.
 - **Proximity (2026-11-07; `prox=1` only: it makes backboardd abort, see BOOT_ARGS):** `inject.c` `proximity_start()` makes backboardd a service of DeviceUsagePage 0xff00 /
   DeviceUsage 8 once the DSP has a proximity sensor (waits up to 3 minutes for it), and sends kIOHIDEventTypeProximity with mask 0x40 (near the
