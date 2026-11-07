@@ -178,8 +178,13 @@ FAT (`image/`, `hk_fw_partition_file()` in `instantnoodle_modem.c`; nothing bund
 - **Orientation (2026-11-07, built, not yet seen):** backboardd turns the screen by CoreMotion's `CMDeviceOrientationManager`; `inject.c`
   `orientation_start()` answers its three methods from `kern.hackios.sensor_values` (a struct per kind: events, values, timestamp) when the
   kernel has an accelerometer, else leaves CoreMotion's (`orient=0`: not at all). How backboardd uses it: research/ios-userland.md 1.5a.
-- **Not done:** proximity (screen off at the ear), ambient light (auto-brightness) and CoreMotion for apps (locationd would want the iPhone X's
-  motion coprocessor protocol). `slpi=1` is not in the default arguments yet. See [../TODO.md](../TODO.md) T47.
+- **Proximity (2026-11-07, built, not yet seen):** `inject.c` `proximity_start()` makes backboardd a service of DeviceUsagePage 0xff00 /
+  DeviceUsage 8 once the DSP has a proximity sensor (waits up to 3 minutes for it), and sends kIOHIDEventTypeProximity with mask 0x40 (near the
+  receiver) or 0 on each change of SEE's near/far, read 5 times a second (`prox=0`: none). The kernel keeps SEE's proximity events (message
+  773/774, inferred from sns_proximity.proto: field 1 near 1 / far 0, field 2 raw ADC) in `kern.hackios.sensor_values`; until now only its
+  configuration event (769) had been seen, so whether 773 is what arrives is not known yet.
+- **Not done:** ambient light (auto-brightness: CoreBrightness wants an ALS service, (0xff00, 4), research/ios-userland.md 1.5) and CoreMotion
+  for apps (locationd would want the iPhone X's motion coprocessor protocol). `slpi=1` is not in the default arguments yet. See [../TODO.md](../TODO.md) T47.
 
 GPS belongs to the modem (QMI LOC, `userland/src/hk_location.m`, research/modem-sdx55.md). Redwood: not present.
 

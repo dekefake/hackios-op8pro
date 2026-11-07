@@ -2912,6 +2912,21 @@ sns_event(uint64_t suid_low, uint64_t suid_high, uint32_t msg_id, uint64_t times
 			}
 			sns_kinds[i].count = count;
 			sns_kinds[i].timestamp = timestamp;
+		} else if (msg_id == 773 || msg_id == 774) {
+			/*
+			 * sns_proximity_event (SEE's sns_proximity.proto, as recalled: inferred, not yet seen): 1 the event type, 0 far
+			 * 1 near; 2 the raw ADC count; 3 the sample's status. Kept as floats in data[0..2] like the others.
+			 */
+			uint32_t count = 0;
+
+			while (pb_next(payload, length, &at, &field, &wire, &value, &bytes)) {
+				if (wire == 0 && field >= 1 && field <= 3) {
+					sns_kinds[i].data[field - 1] = (float)value;
+					count = field > count ? field : count;
+				}
+			}
+			sns_kinds[i].count = count;
+			sns_kinds[i].timestamp = timestamp;
 		}
 		if (sns_kinds[i].events <= 3 && sns_said++ < 40) {
 			tell("slpi: sns: %s: event %u, message %u, %u values (%d %d %d in thousandths)\n", sns_kind_names[i],

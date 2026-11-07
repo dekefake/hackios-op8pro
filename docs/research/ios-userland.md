@@ -113,8 +113,11 @@ All [observed] by disassembling backboardd 20F66 (`otool -tV`; the `objc_msgSend
   accelerometer (0x100079fdc, by the orientation code), (0xff00, 9) at 0x100006e2c, and on the HID sensor page (0x20, 0x11) human
   presence and (0x20, 0x12) human proximity (0x100030c08, 0x100030c3c).
 - **Proximity events** are biometric HID events (type 0x1d): field 0x1d0000 the kind (0 human proximity, 3 human presence), 0x1d0001
-  the level (float; > 0 counts as near), handled at 0x100031234 ("human proximity event %g"). Not yet fed: which of these drives
-  the screen off at the ear (`BKHIDUIDiscreteProximityServiceWrapper` vs the host-state one, `ProxDetectionMode`) is not read yet.
+  the level (float; > 0 counts as near), handled at 0x100031234 ("human proximity event %g"): the attention/presence features.
+- **The proximity sensor of calls:** `BKHIDUISensorController` wraps a service matched by { DeviceUsagePage 0xff00, DeviceUsage 8 } (dictionary at
+  0x100046f2c: the keys' CFStrings and two `__objc_intobj` numbers, 0xff00 and 8) and reads kIOHIDEventTypeProximity's detection mask
+  (field 0xe0000) at 0x10002cd4c: with detection on, mode 6 takes bit 0x40, other modes 0x40 if any of 0x240; bit 6 of that is
+  `_locked_setObjectWithinProximity:` (screen off, touches ignored); with detection off only bit 0x400 is kept.
 - **Ambient light:** CoreBrightness waits for an ALS service (1.5); none is made yet.
 
 ### 1.6 Frame rate
