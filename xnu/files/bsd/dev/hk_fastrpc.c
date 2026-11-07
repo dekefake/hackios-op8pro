@@ -26,7 +26,7 @@
  * /hackios/sensors (the image's copy of the phone's own, made from its persist, vendor and odm partitions); writes go
  * to the first.
  *
- * Boot-arg slpi_frpc=0: not started. Started by hk_slpi.c once the sensor DSP is up and linked.
+ * Boot-arg slpi_frpc=0: not started. slpi_dsplog=1: the DSP's own log lines too (session_up()). Started by hk_slpi.c once the sensor DSP is up and linked.
  */
 #include <kern/clock.h>
 #include <kern/kalloc.h>
@@ -1473,6 +1473,19 @@ session_up(struct frpc_session *se)
 	}
 	mmu_faults("a registration");
 	say("frpc: %s HAS A LISTENER%s\n", se->name, se->listening ? "" : " (NOT LISTENING)");
+	{
+		/*
+		 * Boot-arg slpi_dsplog=1: the DSP's own log lines (its FARF messages: what a sensor driver says when its part does not
+		 * answer) to us, as Android's adspmsgd asks for them (fastrpc log_config.c): adspmsgd_adsp1, the DSP's static handle 5,
+		 * method 2 init2(), no arguments; they come back as adspmsgd_apps log() calls (FRPC_APPS_MSG, said as "frpc: dsp:").
+		 */
+		uint32_t dsplog = 0;
+
+		if (PE_parse_boot_argn("slpi_dsplog", &dsplog, sizeof(dsplog)) && dsplog != 0) {
+			error = frpc_call(se, se->slot + 1, false, 5, SC(2, 0, 0), a, &result, 10000);
+			say("frpc: %s: adspmsgd_adsp1 init2 (the DSP's log to us): %d, result %#x\n", se->name, error, result);
+		}
+	}
 	return true;
 }
 
