@@ -214,6 +214,24 @@ way to the loader (backboardd sets level 0 at shutdown; the loader's menu stays 
   `brightness_fixes()` that skips it, but it is switched off because with it backboardd stopped adopting our touch
   service (see [input-peripherals.md](input-peripherals.md)).
 
+## Night Shift, True Tone, Auto-Brightness (OnePlus 8 Pro, 2026-11-07, verified on the phone, RAM images 191-206)
+
+- **Night Shift:** CoreBrightness hands CoreAnimation a colour matrix (`-[CAWindowServerDisplay setColorMatrix:scale:rampDuration:]`, and the
+  white point with `setWhitePoint:rampDuration:error:`); an iPhone's display pipe applies them, CoreAnimation finds none here and drops them.
+  `inject.c` `display_colour_start()` passes them to the framebuffer driver as `IOMobileFramebufferSetMatrix` (selector 55; location 1 the
+  white point, 2 the colour matrix, 3 True Tone); `MiniIOMobileFramebuffer.cpp` keeps them (also `GetMatrix`, 54) and gives them to the
+  window server (selector 202), whose last GPU pass (`eagl.c` `panel_tint()`, instead of the blit into the panel's framebuffer) multiplies
+  every pixel by their product in linear light. Seen: Night Shift's matrix R 0.80 G 0.67 B 0.40, the whole screen warm; off: the blit again.
+- **True Tone:** the switch (Display & Brightness) shows when the server's `SupportedColorFX`/`SupportsAmbientColorAdaptation` is set
+  (hooked: CoreBrightness's own colour module never takes this ALS for its adaptation). The switch is kept by `inject.c` (preference
+  `TrueTone` of `com.hackios.display`); while on, the colour sensor's temperature (SEE `rgb`, 3900-4300 K under the room's lamps) sets a white
+  point halfway from D65 towards it (4500-7500 K, Bradford adaptation) as matrix location 3: seen 5226 K for 3948 K light.
+- **Auto-Brightness:** Settings shows it where MobileGestalt's `ambient-light-sensor` is true, which is an IOService of PrimaryUsagePage
+  0xff00 / PrimaryUsage 4 (`MiniALSServiceStart()` publishes one with slpi=1; MobileGestalt's cache had to be removed once to see it);
+  CoreBrightness's auto-brightness runs on the ALS HID service (`inject.c` `als_start()`, made at once so that CoreBrightness finds it when
+  it starts, fed with SEE's lux and the light's XYZ, `copyEvent` answered): the backlight follows the room (levels 32333..33104 seen ramping).
+  The loader also adds `arm-io/aop/iop-aop-nub/als` to the device tree (another MobileGestalt path). `als=0` turns the ALS service off.
+
 ## What iOS asks of the framebuffer (research notes)
 
 - Frame period comes from `IOMFBDisplayRefresh`, not `TimingElements` (above).

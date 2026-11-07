@@ -124,6 +124,20 @@ All [observed] by disassembling backboardd 20F66 (`otool -tV`; the `objc_msgSend
 - **The proximity wrapper's condition:** the block at 0x100047134 (given to `initWithMatchingDictionary:instantiateWrapperUsingBlock:`) makes a
   wrapper only if the service's "Placement" is 1 ("discrete prox service %llX top placement"); else nil, which went into the list as NSNull.
 
+### 1.5b Colour adaptation and the light sensor in Settings (2026-11-07) [observed]
+- IOMobileFramebuffer: `SetMatrix` is selector 55 (scalar location, 72 bytes: 9 doubles), `GetMatrix` 54. QuartzCore imports it and
+  `SwapSetColorMatrix` (a per-swap matrix through the display's function table at +0x738); with no display pipe CoreAnimation does nothing
+  with CoreBrightness's matrices ("WhitePoint Available").
+- Settings' True Tone row (`WHITE_BALANCE`, `-[DBSBrightnessManager mainDisplayBrightnessSpecifiers]`) is behind `PSAutoWhiteBalanceCapability`
+  = `[[[CBClient new] adaptationClient] supported]` = the server's `SupportedColorFX`.`SupportsAmbientColorAdaptation`; `available` /
+  `enabled` are `ColorAdaptationAvailable` / `ColorAdaptationEnabled`. Harmony support itself is `MGGetBoolAnswer("F1Xz9g1JORibBS9DYPUPrg")`
+  (true here), or `FORCE_HARMONY_SUPPORT` in kern.bootargs. A CB ALS is a colour one by its service's `ColorSupport` (or `crgb`);
+  colour ALS events: field 0xc0006 = 1 means XYZ in 0xc0007-0xc0009, 0xc000a beside the illuminance 0xc000b. Why the colour module never
+  makes this ALS's adaptation available was not found (`-[CBColorModuleiOS updateAvailability]` enumerates services for `isColorSupported`).
+- Accessibility's Auto-Brightness is behind MobileGestalt `ambient-light-sensor` (key `lo3szoQ4sLy7o3+ZD0GcAQ`, handler 0x19c547058): an
+  IOService matching { PrimaryUsagePage 0xff00, PrimaryUsage 4 } -- a kernel service; a backboardd virtual HID service does not count.
+  MobileGestalt's obfuscated keys are base64(MD5("MGCopyAnswer" + name)), first 22 characters.
+
 ### 1.6 Frame rate
 `ca_rates=1` lists CA's display classes' rate methods: `idealRefreshRate` was 60, `vblDelta` 16.7 ms. The ideal rate is set by
 `ca_ideal_rate()` (boot-arg `ca_fps`). QuartzCore takes VSync notifications only on A7-A10 phones or with `CA_FORCE_TIMER`

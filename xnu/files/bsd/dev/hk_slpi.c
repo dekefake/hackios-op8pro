@@ -3124,7 +3124,10 @@ sns_start(void)
 	PE_parse_boot_argn("slpi_watch", &watch, sizeof(watch));
 	for (unsigned waited = 0; waited < watch * 10; waited++) {
 	sleep_ms(100);
-	for (int i = 0; i < SNS_STARTED_KINDS; i++) {
+	for (int i = 0; i < SNS_KINDS; i++) {
+		if (i >= SNS_STARTED_KINDS && i != 14) {
+			continue;       /* (the rgb sensor too, 14: the light's colour, for True Tone in inject.c) */
+		}
 		if (!sns_kinds[i].found || sns_kinds[i].started) {
 			continue;
 		}

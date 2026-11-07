@@ -3553,6 +3553,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	int torch_requested = 0;
 	/* "cam=5" there too: the phone's wide camera is iOS's (bsd/dev/hk_camera.c) */
 	int camera_requested = 0;
+	int sensors_requested = 0, sensors_seen = 0;    /* slpi=1: the first slpi= on the line (the image's before the defaults) */
 	/* (the loader stays for run after run: what the last run's arguments said must not hold for this one) */
 	gamut_p3 = 0;
 	/* a run that does not ask for writes does not get them, whatever an earlier run of this
@@ -3568,6 +3569,10 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		    (c[9] == 0 || c[9] == ' ');
 		torch_requested |= starts_with(c, "torch=") && (c == pi.cmdline || c[-1] == ' ') && c[6] >= '1' && c[6] <= '9';
 		camera_requested |= starts_with(c, "cam=5") && (c == pi.cmdline || c[-1] == ' ') && (c[5] == 0 || c[5] == ' ');
+		if (!sensors_seen && starts_with(c, "slpi=") && (c == pi.cmdline || c[-1] == ' ')) {
+			sensors_seen = 1;
+			sensors_requested = c[5] == '1';
+		}
 		gamut_p3 |= starts_with(c, "gamut=p3") && (c == pi.cmdline || c[-1] == ' ');
 		if (starts_with(c, "ufs=") && (c == pi.cmdline || c[-1] == ' ') && c[4] >= '1' && c[4] <= '2' &&
 		    (c[5] == 0 || c[5] == ' ')) {
@@ -4018,6 +4023,19 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	if (camera_requested) {
 		dt_begin(&w, "isp");
 		dt_prop_u32(&w, "camera-rear", 1);
+		dt_end(&w);
+	}
+	/*
+	 * With the sensor DSP (slpi=1): where MobileGestalt looks for an ambient light sensor (ambient-light-sensor:
+	 * IODeviceTree:/arm-io/aop/iop-aop-nub/als, the iPhone's always-on processor's), by which Settings has its
+	 * Auto-Brightness switch. Only the nodes; the sensor itself is userland/src/inject.c's HID service.
+	 */
+	if (sensors_requested) {
+		dt_begin(&w, "aop");
+		dt_begin(&w, "iop-aop-nub");
+		dt_begin(&w, "als");
+		dt_end(&w);
+		dt_end(&w);
 		dt_end(&w);
 	}
 	/*

@@ -416,6 +416,7 @@ GenericARMPE::start(IOService * provider)
 	MiniIOMobileFramebufferStart(this);
 	MiniAppleKeyStoreStart();
 	MiniAppleARMBacklightStart();
+	MiniALSServiceStart();
 	MiniIONetworkStackStart();
 	return true;
 }

@@ -7,6 +7,7 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOService.h>
 #include <IOKit/IOUserClient.h>
+#include <pexpert/pexpert.h>
 #include <libkern/c++/OSSymbol.h>
 #include <sys/proc.h>
 
@@ -120,4 +121,34 @@ MiniAppleARMBacklightStart(void)
 		light->detach(platform);
 	}
 	light->release();
+}
+
+/*
+ * MobileGestalt's ambient-light-sensor (by which Settings has its Auto-Brightness switch) is "an IOService of PrimaryUsagePage
+ * 0xff00, PrimaryUsage 4" (libMobileGestalt 20F66 0x19c547058: an IOPropertyMatch, IOServiceGetMatchingService) -- the iPhone's
+ * ALS driver's own service. The sensor here is the sensor DSP's, given to iOS as a HID service of backboardd's
+ * (userland/src/inject.c als_start()); this service, with no driver behind it, says only that there is one. With slpi=1.
+ */
+void
+MiniALSServiceStart(void)
+{
+	IOService * platform = (IOService *) IOService::getPlatform();
+	IOService * als;
+	uint32_t on = 0;
+
+	if (!PE_parse_boot_argn("slpi", &on, sizeof(on)) || on != 1) {
+		return;
+	}
+	als = OSTypeAlloc(IOService);
+	if (platform == NULL || als == NULL || !als->init() || !als->attach(platform)) {
+		OSSafeReleaseNULL(als);
+		return;
+	}
+	als->setName("als");
+	als->setProperty("PrimaryUsagePage", 0xff00ULL, 32);
+	als->setProperty("PrimaryUsage", 4ULL, 32);
+	als->setProperty("Built-In", kOSBooleanTrue);
+	als->registerService();
+	als->release();
+	IOLog("MiniALSService: an ALS service for MobileGestalt (PrimaryUsagePage 0xff00, PrimaryUsage 4)\n");
 }

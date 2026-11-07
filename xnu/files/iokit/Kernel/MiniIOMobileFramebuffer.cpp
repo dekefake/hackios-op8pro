@@ -81,6 +81,9 @@ enum {
 	kFBMethodGetProtectionOptions   = 82,
 	kFBMethodRedwoodPanelAcquire    = 200,  /* ours (fb_gpu, userland/src/eagl.c): out: index, surface, width, height, bytes a row */
 	kFBMethodRedwoodPanelReady      = 201,  /* ours: in: index, the surface whose frame was scaled into it */
+	kFBMethodRedwoodColorMatrices   = 202,  /* ours (eagl.c): structure out: struct fb_color_matrices (what Set/GetMatrix keep) */
+	kFBMethodGetMatrix              = 54,   /* IOMobileFramebufferGetMatrix: in: location; structure out: 9 doubles */
+	kFBMethodSetMatrix              = 55,   /* IOMobileFramebufferSetMatrix: in: location; structure in: 9 doubles (a 3x3) */
 };
 
 /* The swap request (IOMobileFramebufferSwapEnd): 0x46c bytes, of which we read these. */
@@ -3676,6 +3679,20 @@ IOMobileFramebufferUserClient::vsync(void)
 	}
 }
 
+/*
+ * The display's colour matrices: what CoreAnimation sets with IOMobileFramebufferSetMatrix (selector 55: a location, then 9 doubles,
+ * a 3x3 by rows) -- Night Shift's and True Tone's white point among them, which an iPhone's display pipe applies to every pixel.
+ * This driver has no pipe for it: it keeps them as they came (the kernel does no floating point) and the window server's last GPU
+ * pass applies their product (userland/src/eagl.c, selector 202). Locations 0..7; a matrix set to identity is set like any other.
+ */
+struct fb_color_matrices {
+	uint32_t generation;            /* one more at every SetMatrix */
+	uint32_t set;                   /* bit n: location n has a matrix */
+	uint64_t matrix[8][9];          /* the doubles, as bits */
+};
+static struct fb_color_matrices gColorMatrices;
+static unsigned gColorMatrixSaid;
+
 IOReturn
 IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments * args,
     IOExternalMethodDispatch * dispatch, OSObject * target, void * reference)
@@ -3697,6 +3714,46 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 	}
 
 	switch (selector) {
+	case kFBMethodSetMatrix:
+		if (args->scalarInputCount < 1 || args->structureInput == NULL || args->structureInputSize < sizeof(gColorMatrices.matrix[0])) {
+			return kIOReturnBadArgument;
+		}
+		if (in[0] >= 8) {
+			return kIOReturnSuccess;        /* (a location this driver does not know: taken, not applied) */
+		}
+		memcpy(gColorMatrices.matrix[in[0]], args->structureInput, sizeof(gColorMatrices.matrix[0]));
+		gColorMatrices.set |= 1u << in[0];
+		gColorMatrices.generation++;
+		if (gColorMatrixSaid++ < 8) {
+			const uint64_t *m = gColorMatrices.matrix[in[0]];
+
+			IOLog("MiniIOMobileFramebuffer: colour matrix at location %llu (doubles' bits %#llx %#llx %#llx / %#llx %#llx %#llx / "
+			    "%#llx %#llx %#llx)\n", in[0], m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]);
+		}
+		return kIOReturnSuccess;
+
+	case kFBMethodGetMatrix:
+		if (args->scalarInputCount < 1 || args->structureOutput == NULL || args->structureOutputSize < sizeof(gColorMatrices.matrix[0])) {
+			return kIOReturnBadArgument;
+		}
+		if (in[0] < 8 && (gColorMatrices.set & (1u << in[0]))) {
+			memcpy(args->structureOutput, gColorMatrices.matrix[in[0]], sizeof(gColorMatrices.matrix[0]));
+		} else {
+			static const uint64_t identity[9] = { 0x3ff0000000000000ULL, 0, 0, 0, 0x3ff0000000000000ULL, 0, 0, 0, 0x3ff0000000000000ULL };
+
+			memcpy(args->structureOutput, identity, sizeof(identity));
+		}
+		args->structureOutputSize = sizeof(gColorMatrices.matrix[0]);
+		return kIOReturnSuccess;
+
+	case kFBMethodRedwoodColorMatrices:
+		if (args->structureOutput == NULL || args->structureOutputSize < sizeof(gColorMatrices)) {
+			return kIOReturnBadArgument;
+		}
+		memcpy(args->structureOutput, &gColorMatrices, sizeof(gColorMatrices));
+		args->structureOutputSize = sizeof(gColorMatrices);
+		return kIOReturnSuccess;
+
 	case kFBMethodRedwoodPanelAcquire:
 	{
 		uint64_t panel[5];

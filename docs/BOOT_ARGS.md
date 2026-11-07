@@ -247,7 +247,9 @@ Rules of thumb: a bare `./xl enter` or a bad arg can hang a phone; **never pass 
 | `slpi_frpc_trace` | 1: log every FastRPC call served. |
 | `slpi_dsplog` | 1: ask the DSP for its own log lines (adspmsgd_adsp1 init2, as Android's adspmsgd); they are logged as `frpc: dsp:`. |
 
-| `als` | 1: an ambient light sensor service in backboardd (auto-brightness; userland `inject.c`). Off by default until it is seen to follow the light (RAM image 187: no crash since `shouldMitigateHarmony:` is guarded; the lux arrives). |
+| `als` | 0: no ambient light sensor service in backboardd (default: one, with slpi=1: Auto-Brightness, True Tone; userland `inject.c`). |
+| `nightshift` | 0: CoreAnimation's colour matrices (Night Shift, True Tone) are not passed to the display (userland `inject.c`). |
+| `cbtrace` | 1: log what CoreBrightness's colour module does with its HID services (userland `inject.c`, a probe). |
 | `prox` | 1: a proximity service in backboardd (userland `inject.c`; "Placement" 1 makes backboardd's sensor controller take it, RAM image 188). Off by default until a near/far is seen: SEE has sent no proximity data event yet. |
 | `orient` | 0: backboardd's device orientation stays CoreMotion's (userland `inject.c`; default: from the accelerometer when there is one). |
 

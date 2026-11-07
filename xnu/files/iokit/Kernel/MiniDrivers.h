@@ -18,6 +18,7 @@ void MiniIOSurfaceStart(IOService * provider);
 void MiniIOMobileFramebufferStart(IOService * provider);
 void MiniAppleKeyStoreStart(void);
 void MiniAppleARMBacklightStart(void);
+void MiniALSServiceStart(void);
 void MiniIONetworkStackStart(void);
 
 #endif /* _IOKIT_MINIDRIVERS_H */
