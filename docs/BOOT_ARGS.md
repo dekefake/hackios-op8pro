@@ -247,6 +247,7 @@ Rules of thumb: a bare `./xl enter` or a bad arg can hang a phone; **never pass 
 | `slpi_frpc_trace` | 1: log every FastRPC call served. |
 | `slpi_dsplog` | 1: ask the DSP for its own log lines (adspmsgd_adsp1 init2, as Android's adspmsgd); they are logged as `frpc: dsp:`. |
 
+| `als` | 1: an ambient light sensor service in backboardd (auto-brightness) from the sensor DSP's light sensor (userland `inject.c`; off by default until verified). |
 | `prox` | 0: no proximity service in backboardd (userland `inject.c`; default: one, from the sensor DSP's proximity sensor). |
 | `orient` | 0: backboardd's device orientation stays CoreMotion's (userland `inject.c`; default: from the accelerometer when there is one). |
 

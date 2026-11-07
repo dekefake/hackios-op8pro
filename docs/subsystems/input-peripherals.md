@@ -183,8 +183,11 @@ FAT (`image/`, `hk_fw_partition_file()` in `instantnoodle_modem.c`; nothing bund
   receiver) or 0 on each change of SEE's near/far, read 5 times a second (`prox=0`: none). The kernel keeps SEE's proximity events (message
   773/774, inferred from sns_proximity.proto: field 1 near 1 / far 0, field 2 raw ADC) in `kern.hackios.sensor_values`; until now only its
   configuration event (769) had been seen, so whether 773 is what arrives is not known yet.
-- **Not done:** ambient light (auto-brightness: CoreBrightness wants an ALS service, (0xff00, 4), research/ios-userland.md 1.5) and CoreMotion
-  for apps (locationd would want the iPhone X's motion coprocessor protocol). `slpi=1` is not in the default arguments yet. See [../TODO.md](../TODO.md) T47.
+- **Ambient light (2026-11-07, built, not yet seen; `als=1` only):** a service of (0xff00, 4) in backboardd and kIOHIDEventTypeAmbientLightSensor
+  events, SEE's lux (data[0], inferred) as the level and as field 0xc000b (the illuminance: what CoreBrightness itself writes there when it
+  rewrites an event, 20F66 0x1af009b14). Off by default: with an ALS iOS turns auto-brightness on, and a wrong reading would hold the screen
+  at its dimmest.
+- **Not done:** CoreMotion for apps (locationd would want the iPhone X's motion coprocessor protocol). `slpi=1` is not in the default arguments yet. See [../TODO.md](../TODO.md) T47.
 
 GPS belongs to the modem (QMI LOC, `userland/src/hk_location.m`, research/modem-sdx55.md). Redwood: not present.
 
