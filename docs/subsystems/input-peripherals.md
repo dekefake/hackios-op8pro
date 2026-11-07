@@ -40,6 +40,20 @@ Findings behind it:
 **Never pass `touchscreen=1` on the OnePlus 8.** That argument selects redwood's Goodix driver; it touched GPIO68 and sent
 the OnePlus to a NoC CrashDump. The OnePlus path is guarded now, but the profile does not pass it.
 
+### OnePlus 8 Pro touch: rate and game mode (2026-11-07, RAM image 260, the owner's fingers)
+
+- `instantnoodle_touch.c` sends the chip OnePlus's game mode after its start and every screen wake: `0x3F 00 00 00 12`
+  (`SEC_CMD_SENSETIVE_CTRL`; 0x18 is the default; from OnePlus's own `sec_drivers_s6sy761.c`, which sets it only when a game
+  asks). The chip takes it (`tl: g ... set`). `touch_game=0` leaves the default. The owner: "a bit faster, hard to tell".
+- Measured with real fingers (`tl: g` every 8 strokes, ported from upstream hakios a3975b6): samples 8.25-8.34 ms apart
+  (121 a second; the longest gap 10-15 ms), the first move 6-8 ms after the press, the lift 8 ms after the last move --
+  one report period each, no missed reports. The reports follow the panel's 120 Hz; OnePlus's S6SY761 driver has no
+  report-rate switch (no `tp_refresh_switch`/`set_high_frame_rate`), so its "240 Hz" is not a rate Android sets either.
+- Upstream's touch changes of 3-5 November (4 ms polling, reading while a finger is down) fix a FocalTech that pulses its
+  line; this chip's line is level-triggered and the driver already reads while it is low, and backboardd's bridge reads the
+  device blocking, so neither applies here. The press line on the console is kept to the first eight presses (a console
+  write from the touch thread holds the next sample up).
+
 ### Buttons (`hk_buttons.c`)
 
 None of the three keys is a SoC pin: they are inputs of the PMICs on the SPMI bus, reached through the SoC's **PMIC

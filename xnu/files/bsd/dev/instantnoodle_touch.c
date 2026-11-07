@@ -448,8 +448,29 @@ static uint32_t panel_w = PANEL_W, panel_h = PANEL_H;
 static struct {
 	uint32_t x, y;
 	bool down;
+	uint64_t down_at, last_at;              /* (mach time) its press, and its last sample: the strokes' figures below */
+	uint32_t samples;
 } finger[MAX_FINGERS];
 static unsigned events;
+
+/*
+ * The chip's game mode, as OnePlus's own driver sets it when a game asks (sec_drivers_s6sy761.c, sec_enable_game_mode():
+ * SEC_CMD_SENSETIVE_CTRL, 0x3F, four bytes, the last 0x12 for the game and 0x18 by default): less of the chip's own filtering
+ * between the finger and its report, for a screen that answers at once. On by default since 2026-11-07 (the owner: the phone
+ * is to feel super fast); boot-arg touch_game=0 leaves the chip's default.
+ */
+#define CMD_SENSITIVE_CTRL      0x3F
+static uint32_t touch_game = 1;
+
+/*
+ * How the fingers' samples went (as upstream hakios a3975b6 for its FocalTech): every 8 strokes, the samples they had, the
+ * time between two (the mean, and the longest), from a finger's press to its first move, and from its last move to its
+ * lift -- what makes a swipe feel late, or stand still and jump. "tl: g" lines in the loader's log.
+ */
+static struct {
+	uint32_t strokes, samples;
+	uint64_t gaps, gap_most, first_move, last_to_lift;      /* microseconds */
+} stroke_stats;
 
 static int
 wait_boot_complete(void)
@@ -501,8 +522,31 @@ handle_event(const uint8_t *ev)
 		finger[id].x = scale(x, panel_w);
 		finger[id].y = scale(y, panel_h);
 		hk_touch_post(finger[id].down ? HK_TOUCH_MOVE : HK_TOUCH_DOWN, id, finger[id].x, finger[id].y);
-		if (!finger[id].down) {
-			printf("touch: finger %u down at %u,%u\n", id, x, y);
+		{
+			uint64_t now = mach_absolute_time();
+
+			if (!finger[id].down) {
+				static unsigned said;
+
+				/* (the first presses only: a console line from this thread is milliseconds the next sample waits) */
+				if (said++ < 8) {
+					printf("touch: finger %u down at %u,%u\n", id, x, y);
+				}
+				finger[id].down_at = now;
+				finger[id].samples = 0;
+			} else {
+				uint64_t gap = micros(now) - micros(finger[id].last_at);
+
+				if (finger[id].samples == 0) {
+					stroke_stats.first_move += micros(now) - micros(finger[id].down_at);
+				} else {
+					stroke_stats.gaps += gap;
+					stroke_stats.gap_most = gap > stroke_stats.gap_most ? gap : stroke_stats.gap_most;
+					stroke_stats.samples++;
+				}
+				finger[id].samples++;
+			}
+			finger[id].last_at = now;
 		}
 		finger[id].down = true;
 		events++;
@@ -512,6 +556,14 @@ handle_event(const uint8_t *ev)
 			finger[id].down = false;
 			hk_touch_post(HK_TOUCH_UP, id, finger[id].x, finger[id].y);
 			events++;
+			stroke_stats.last_to_lift += micros(mach_absolute_time()) - micros(finger[id].last_at);
+			if (++stroke_stats.strokes == 8) {
+				hk_tl("tl: g 8 strokes: %u samples %llu us apart (longest %llu); first move %llu us after the press, "
+				    "lift %llu us after the last move\n", stroke_stats.samples,
+				    stroke_stats.samples ? stroke_stats.gaps / stroke_stats.samples : 0, stroke_stats.gap_most,
+				    stroke_stats.first_move / 8, stroke_stats.last_to_lift / 8);
+				bzero(&stroke_stats, sizeof(stroke_stats));
+			}
 		}
 		break;
 	}
@@ -547,6 +599,22 @@ poll_events(void)
 		}
 	}
 	return 0;
+}
+
+static void
+touch_game_on(void)
+{
+	uint8_t game[5] = { CMD_SENSITIVE_CTRL, 0, 0, 0, 0x12 };
+
+	if (touch_game) {
+		int err = ts_write(game, sizeof(game));
+		static unsigned said;
+
+		if (said++ < 2) {
+			printf("touch: the chip's game mode (0x3F ... 0x12): %s\n", err == 0 ? "set" : "NOT taken");
+			hk_tl("tl: g the touch chip's game mode: %s (error %d)\n", err == 0 ? "set" : "NOT taken", err);
+		}
+	}
 }
 
 static void
@@ -603,6 +671,7 @@ touch_thread(void *parameter __unused, wait_result_t result __unused)
 	/* not acknowledged on this phone, harmless (see the top) */
 	ts_write(func, 3);
 	ts_write(&sense, 1);
+	touch_game_on();
 	if (use_irq) {
 		irq_pin = ml_io_map(INSTANTNOODLE_TLMM_SOUTH + 0x1000UL * PIN_IRQ.pin, 0x1000);
 		/* pinctrl-sm8250: target KPSS=3, raw status enabled, level low. */
@@ -646,6 +715,7 @@ touch_thread(void *parameter __unused, wait_result_t result __unused)
 			booted = wait_boot_complete();
 			ts_write(func, 3);
 			ts_write(&sense, 1);
+			touch_game_on();
 			if (use_irq) {
 				wr(irq_pin + IRQ_STATUS, 0);
 				wr(irq_pin + IRQ_CONFIG, rd(irq_pin + IRQ_CONFIG) | IRQ_ENABLE);
@@ -723,6 +793,7 @@ instantnoodle_touch_init(void)
 	PE_parse_boot_argn("touchscreen", &enabled, sizeof(enabled));
 	PE_parse_boot_argn("touch_irq", &use_irq, sizeof(use_irq));
 	PE_parse_boot_argn("touch_lat", &trace_latency, sizeof(trace_latency));
+	PE_parse_boot_argn("touch_game", &touch_game, sizeof(touch_game));
 	if (!enabled) {
 		return;
 	}
