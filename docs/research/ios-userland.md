@@ -99,6 +99,24 @@ the event server, edge marking, `TouchDetectionMode`.
   50%), `FadePeriod`, `DisplayBrightness`, `DisplayBrightnessSliderPosition`; nits fields are 0. At shutdown it sets level 0.
   [observed; see display.md for how it reaches the panel]
 
+### 1.5a Device orientation, proximity, ambient light: where backboardd takes them (2026-11-07)
+All [observed] by disassembling backboardd 20F66 (`otool -tV`; the `objc_msgSend$` stubs mapped to selectors through
+`__objc_selrefs`), addresses unslid:
+- **Orientation:** `BKOrientationManager` asks CoreMotion's `CMDeviceOrientationManager`: `startDeviceOrientationUpdatesToQueue:withHandler:`
+  (0x10007af5c; the queue from the manager's ivar +0x70, the handler a block of one argument, invoke 0x10007c540, which asserts
+  the manager's dispatch queue and calls `_queue_updateDeviceOrientationFromCoreMotion:`), and for a one-off a temporary manager's
+  start (handler nil), `deviceOrientationBlocking`, stop (0x10007b434..). Of the object it gets, it calls only `-orientation`
+  (a UIDeviceOrientation, 32 bits), then `_queue_updateDeviceOrientation:changeSource:` with source 1 (0x10007b518).
+  CoreMotion would get it from locationd (`CLSPUHIDDriverInterface`, the motion coprocessor's own protocol). `inject.c`'s
+  `orientation_start()` answers those three methods from `kern.hackios.sensor_values` instead.
+- **Service matchers** (`BKIOHIDServiceMatcher initWithUsagePage:usage:builtIn:dataProvider:`, stub 0x100099480): (0xff00, 3) the
+  accelerometer (0x100079fdc, by the orientation code), (0xff00, 9) at 0x100006e2c, and on the HID sensor page (0x20, 0x11) human
+  presence and (0x20, 0x12) human proximity (0x100030c08, 0x100030c3c).
+- **Proximity events** are biometric HID events (type 0x1d): field 0x1d0000 the kind (0 human proximity, 3 human presence), 0x1d0001
+  the level (float; > 0 counts as near), handled at 0x100031234 ("human proximity event %g"). Not yet fed: which of these drives
+  the screen off at the ear (`BKHIDUIDiscreteProximityServiceWrapper` vs the host-state one, `ProxDetectionMode`) is not read yet.
+- **Ambient light:** CoreBrightness waits for an ALS service (1.5); none is made yet.
+
 ### 1.6 Frame rate
 `ca_rates=1` lists CA's display classes' rate methods: `idealRefreshRate` was 60, `vblDelta` 16.7 ms. The ideal rate is set by
 `ca_ideal_rate()` (boot-arg `ca_fps`). QuartzCore takes VSync notifications only on A7-A10 phones or with `CA_FORCE_TIMER`

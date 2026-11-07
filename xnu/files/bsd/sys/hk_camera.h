@@ -44,6 +44,14 @@ struct hk_camera_frame {
 };
 
 #define HK_CAMERA_NO_FOCUS 0xffffffffu
+/*
+ * Bits over the focus position (0..1023), where a kernel sets them (OnePlus 8 Pro): STAMPED says the position is the lens's while
+ * this frame was exposed (taken at the frame before's end and at this one's), not the last one set when the frame was read; MOVED
+ * says the lens was moved while it was exposed (a blurred measurement). Without STAMPED (redwood) the position is the last one set.
+ */
+#define HK_CAMERA_FOCUS_STAMPED 0x20000000u
+#define HK_CAMERA_FOCUS_MOVED   0x40000000u
+#define HK_CAMERA_FOCUS_AT(f)   ((f) & 0x3ff)
 
 enum {
 	HK_CAMERA_EXPOSURE = 1,    /* a: lines, b: gain, c: frame lines (0: the shortest that holds the exposure) */

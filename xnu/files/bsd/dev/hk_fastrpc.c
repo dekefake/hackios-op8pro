@@ -299,6 +299,30 @@ mmu_faults(const char *when)
 	mwr(mmu.context + SMMU_CB_FSR, status);
 }
 
+/*
+ * Our match register still sends stream 0x541 through our context? Another driver that restores registers "as it found them" can
+ * write over it (the camera did, 2026-11-07, instantnoodle_camera.c fp_put_back_matches()); then every access of the DSP's to our pool
+ * matches nothing. Checked before each call; put back once noticed.
+ */
+static void
+mmu_keep(void)
+{
+	static unsigned put_back;
+
+	if (!mmu.on || mmu.passed || mmu.match == ~0u) {
+		return;
+	}
+	if (mrd(mmu.base + SMMU_SMR(mmu.match)) == (1u << 31 | FRPC_STREAM) && (mrd(mmu.base + SMMU_S2CR(mmu.match)) & 0xff) == mmu.ctx) {
+		return;
+	}
+	lck_mtx_lock(&hk_smmu_lock);
+	say("frpc: match register %u was written over (smr %#x s2cr %#x): ours again (%u)\n", mmu.match, mrd(mmu.base + SMMU_SMR(mmu.match)),
+	    mrd(mmu.base + SMMU_S2CR(mmu.match)), ++put_back);
+	mwr(mmu.base + SMMU_S2CR(mmu.match), mmu.ctx);
+	mwr(mmu.base + SMMU_SMR(mmu.match), 1u << 31 | FRPC_STREAM);
+	lck_mtx_unlock(&hk_smmu_lock);
+}
+
 /* ---- invocations ---------------------------------------------------------------------------------------- */
 
 #define SC(method, in, out)     ((uint32_t)((method) & 0x1f) << 24 | (uint32_t)((in) & 0xff) << 16 | (uint32_t)((out) & 0xff) << 8)
@@ -395,6 +419,7 @@ frpc_call(const struct frpc_session *session, int slot, bool kernel, uint32_t ha
 	if (n > FRPC_MAX_ARGS || SC_HANDLES(sc) != 0) {
 		return EINVAL;
 	}
+	mmu_keep();
 	meta = n * (16 + 8 + 16) + 16 * 8 + 64 * 4;
 	bzero(page, meta);
 	rpra = (uint64_t *)page;

@@ -3027,6 +3027,44 @@ sns_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int a
 SYSCTL_PROC(_kern_hackios, OID_AUTO, sensors, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, sns_sysctl, "A",
     "the sensor DSP's sensors: which were found, how many events, the last values");
 
+/*
+ * The same, for programs (userland/src/inject.c's sensor services in backboardd): kern.hackios.sensor_values, a struct hk_sensor_values.
+ * Per kind (sns_kind_names' order): how many events, how many values the last one had, the values (SEE's units: m/s^2, rad/s, lux,
+ * proximity 0 far / 1 near ...), and the DSP's timestamp (19.2 MHz ticks). Read whole; nothing to set.
+ */
+struct hk_sensor_value {
+	uint32_t events, count;
+	float data[4];
+	uint64_t timestamp;
+};
+struct hk_sensor_values {
+	uint32_t version;               /* 1 */
+	uint32_t kinds;                 /* SNS_KINDS */
+	struct hk_sensor_value kind[SNS_KINDS];
+};
+
+static int
+sns_values_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	struct hk_sensor_values v;
+
+	bzero(&v, sizeof(v));
+	v.version = 1;
+	v.kinds = SNS_KINDS;
+	for (int i = 0; i < SNS_KINDS; i++) {
+		if (!sns_kinds[i].found) {
+			continue;
+		}
+		v.kind[i].events = sns_kinds[i].events;
+		v.kind[i].count = sns_kinds[i].count;
+		memcpy(v.kind[i].data, sns_kinds[i].data, sizeof(v.kind[i].data));
+		v.kind[i].timestamp = sns_kinds[i].timestamp;
+	}
+	return SYSCTL_OUT(req, &v, sizeof(v));
+}
+SYSCTL_PROC(_kern_hackios, OID_AUTO, sensor_values, CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, sns_values_sysctl, "S",
+    "the sensor DSP's last values, as a struct hk_sensor_values");
+
 /* sensors over SEE: find the service, ask for each kind, start what is found (slpi_sns=0: not at all; slpi_hz=N: the rate, default 10) */
 static void
 sns_start(void)

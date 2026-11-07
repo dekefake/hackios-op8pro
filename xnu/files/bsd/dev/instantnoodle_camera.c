@@ -973,7 +973,7 @@ extern lck_mtx_t hk_smmu_lock;
 
 static volatile uint32_t *fp_ctx;
 static const uint32_t fp_streams[8] = { 0x800, 0x801, 0x840, 0x841, 0xc00, 0xc01, 0xc40, 0xc41 };   /* the device tree's eight, one match register each */
-static uint32_t fp_match[8], fp_old_smr[8], fp_old_s2cr[8], fp_nmatch, fp_ctx_n;
+static uint32_t fp_match[8], fp_old_smr[8], fp_old_s2cr[8], fp_want[8], fp_nmatch, fp_ctx_n;   /* fp_want: what we wrote (only those are put back) */
 static bool fp_smmu_on;
 static vm_offset_t fp_tables;
 static vm_size_t fp_tables_bytes;
@@ -1024,6 +1024,7 @@ fp_smmu_up(vm_offset_t buffer, uint64_t bytes)
 			fp_match[fp_nmatch] = n;
 			fp_old_smr[fp_nmatch] = smr;
 			fp_old_s2cr[fp_nmatch] = s2cr;
+			fp_want[fp_nmatch] = 0;
 			fp_nmatch++;
 		}
 	}
@@ -1088,19 +1089,37 @@ fp_smmu_up(vm_offset_t buffer, uint64_t bytes)
 		return false;
 	}
 	fp_smmu_on = true;
-	unsigned accepted = 0;
+	unsigned accepted = 0, kept = 0;
 
+	/*
+	 * A register the hypervisor refuses (its SMR reads 0: it keeps some of the IFE's streams to itself) is given back at once and
+	 * forgotten: it still reads free, so the next driver to start takes it, and putting back "what was found" at the camera's stop
+	 * would wipe that driver's stream out. Seen 2026-11-07: the sensor DSP's FastRPC (hk_fastrpc.c) took match register 10, refused
+	 * here, after the camera's first stream; the camera's stop then wrote 0 over it, the DSP's stream 0x541 matched nothing any more,
+	 * and the next opening of Camera.app ended the kernel's run.
+	 */
 	for (unsigned k = 0; k < 8; k++) {
-		smmu_regs[SM_S2CR(fp_match[k]) / 4] = fp_ctx_n;
-		smmu_regs[SM_SMR(fp_match[k]) / 4] = 1u << 31 | fp_streams[k];
+		uint32_t n = fp_match[k], want = 1u << 31 | fp_streams[k];
+
+		smmu_regs[SM_S2CR(n) / 4] = fp_ctx_n;
+		smmu_regs[SM_SMR(n) / 4] = want;
 		__asm__ volatile ("dsb sy" ::: "memory");
-		if ((smmu_regs[SM_SMR(fp_match[k]) / 4] & 0x7fff) == fp_streams[k] && (smmu_regs[SM_S2CR(fp_match[k]) / 4] & 0xff) == fp_ctx_n) {
+		if (smmu_regs[SM_SMR(n) / 4] == want && (smmu_regs[SM_S2CR(n) / 4] & 0xff) == fp_ctx_n) {
 			accepted++;
+			fp_match[kept] = n;
+			fp_old_smr[kept] = fp_old_smr[k];
+			fp_old_s2cr[kept] = fp_old_s2cr[k];
+			fp_want[kept] = want;
+			kept++;
 		} else {
-			say("camera: stream %#x: match register %u refused (smr reads %#x, s2cr %#x)\n", fp_streams[k], fp_match[k],
-			    smmu_regs[SM_SMR(fp_match[k]) / 4], smmu_regs[SM_S2CR(fp_match[k]) / 4]);
+			say("camera: stream %#x: match register %u refused (smr reads %#x, s2cr %#x): given back\n", fp_streams[k], n,
+			    smmu_regs[SM_SMR(n) / 4], smmu_regs[SM_S2CR(n) / 4]);
+			smmu_regs[SM_SMR(n) / 4] = fp_old_smr[k];
+			smmu_regs[SM_S2CR(n) / 4] = fp_old_s2cr[k];
+			__asm__ volatile ("dsb sy" ::: "memory");
 		}
 	}
+	fp_nmatch = kept;
 	say("camera: the hypervisor took %u of the IFE's 8 streams\n", accepted);
 	if (accepted == 0) {
 		lck_mtx_unlock(&hk_smmu_lock);
@@ -1108,6 +1127,23 @@ fp_smmu_up(vm_offset_t buffer, uint64_t bytes)
 	}
 	lck_mtx_unlock(&hk_smmu_lock);
 	return true;
+}
+
+/* Our match registers back as they were found: only those that still say what we wrote (fp_want); one that says something else is somebody's now.
+ * (No logging: the kernel's quiesce on the way back to the loader calls this too.) */
+static void
+fp_put_back_matches(void)
+{
+	for (unsigned k = 0; k < fp_nmatch; k++) {
+		uint32_t n = fp_match[k];
+
+		if (fp_want[k] == 0 || smmu_regs[SM_SMR(n) / 4] != fp_want[k]) {
+			continue;       /* never written by us, or somebody's now */
+		}
+		smmu_regs[SM_SMR(n) / 4] = fp_old_smr[k];
+		smmu_regs[SM_S2CR(n) / 4] = fp_old_s2cr[k];
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
 }
 
 static void
@@ -1134,10 +1170,7 @@ fp_smmu_down(void)
 	}
 	fp_smmu_faults();
 	lck_mtx_lock(&hk_smmu_lock);
-	for (unsigned k = 0; k < fp_nmatch; k++) {
-		smmu_regs[SM_SMR(fp_match[k]) / 4] = fp_old_smr[k];
-		smmu_regs[SM_S2CR(fp_match[k]) / 4] = fp_old_s2cr[k];
-	}
+	fp_put_back_matches();
 	if (fp_smmu_on) {
 		fp_ctx[0x00] = 0;
 		fp_ctx[0x610 / 4] = fp_ctx_n;
@@ -1789,8 +1822,9 @@ static struct fpd_mode fpd_m = FPD_MODE_MAIN;
 LCK_GRP_DECLARE(fpd_group, "hk-camera-8pro");
 LCK_MTX_DECLARE(fpd_lock, &fpd_group);
 
-struct fpd_slot { uint64_t sequence, time; uint32_t lines, gain, frame_lines; int state; };   /* 0 free, 1 being written, 2 ready, 3 being read */
+struct fpd_slot { uint64_t sequence, time; uint32_t lines, gain, frame_lines, focus; int state; };   /* 0 free, 1 being written, 2 ready, 3 being read */
 static struct fpd_slot fpd_slot[FPD_RING];
+static uint32_t fpd_lens_before = HK_CAMERA_NO_FOCUS;       /* the lens at the end of the frame before (fpd_stream) */
 static vm_offset_t fpd_ring;
 static vm_size_t fpd_place;
 static bool fpd_wanted, fpd_broken, fpd_streaming, fpd_up_now, fpd_made;
@@ -2245,10 +2279,7 @@ instantnoodlep_camera_quiesce(void)
 	if (fp_phy != NULL) {
 		fp_csiphy_down();
 	}
-	for (unsigned k = 0; k < fp_nmatch; k++) {
-		smmu_regs[SM_SMR(fp_match[k]) / 4] = fp_old_smr[k];
-		smmu_regs[SM_S2CR(fp_match[k]) / 4] = fp_old_s2cr[k];
-	}
+	fp_put_back_matches();
 	if (fp_smmu_on) {
 		fp_ctx[0x00] = 0;
 	}
@@ -2263,6 +2294,7 @@ fpd_stream(void)
 	lck_mtx_lock(&fpd_lock);
 	fpd_slot[0].state = 1;
 	fpd_streaming = true;
+	fpd_lens_before = HK_CAMERA_NO_FOCUS;   /* (the first frame's lens is not known: MOVED) */
 	if (fpd_auto_until != 0 && fpd_auto_until < 1000) {
 		fpd_auto_until = fpd_ms() + fpd_auto_until * 1000;
 	}
@@ -2280,6 +2312,13 @@ fpd_stream(void)
 			lwr(0x1a20, done);
 			lwr(0x1a30, 1);
 			int finished = cur;
+			/* the lens where it was while this frame was exposed: at the frame before's end and now (HK_CAMERA_FOCUS_STAMPED) */
+			uint32_t lens_now = fpd_cur == 1 ? instantnoodle_lens_position() : HK_CAMERA_NO_FOCUS, lens_stamp = HK_CAMERA_NO_FOCUS;
+
+			if (lens_now != HK_CAMERA_NO_FOCUS) {
+				lens_stamp = HK_CAMERA_FOCUS_STAMPED | lens_now | (lens_now != fpd_lens_before ? HK_CAMERA_FOCUS_MOVED : 0);
+			}
+			fpd_lens_before = lens_now;
 			lck_mtx_lock(&fpd_lock);
 			fpd_slot[cur].sequence = ++fpd_sequence;
 			absolutetime_to_nanoseconds(mach_absolute_time(), &fpd_slot[cur].time);
@@ -2287,6 +2326,7 @@ fpd_stream(void)
 			fpd_slot[cur].lines = fpd_lines;
 			fpd_slot[cur].gain = fpd_gain;
 			fpd_slot[cur].frame_lines = fpd_fl;
+			fpd_slot[cur].focus = lens_stamp;
 			fpd_slot[cur].state = 2;
 			for (int i = 0; i < FPD_RING; i++) {            /* a free place first, else the oldest finished one that is not being read */
 				if (i != cur && fpd_slot[i].state == 0) {
@@ -2566,7 +2606,7 @@ fpd_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 	f.frame_lines_max = FPD_FL_MAX;
 	f.margin = FPD_MARGIN;
 	f.sensor = fpd_sensor_index;            /* the camera asked for (see fpd_sensor_index) */
-	f.focus = fpd_cur == 1 ? instantnoodle_lens_position() : HK_CAMERA_NO_FOCUS;                /* (the main camera's lens motor; HK_CAMERA_NO_FOCUS without one) */
+	f.focus = fpd_slot[b].focus;            /* (the main camera's lens motor, as it was while the frame was exposed; HK_CAMERA_NO_FOCUS without one) */
 	lck_mtx_unlock(&fpd_lock);
 	error = uiomove((caddr_t)&f, (int)MIN(sizeof(f), (size_t)uio_resid(uio)), uio);
 	if (error == 0 && uio_resid(uio) > 0) {

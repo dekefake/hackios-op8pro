@@ -32,6 +32,14 @@ floats), the number of temperature ranges, per range { CCT from, to, the matrix 
 same for the lens shading, with per temperature range { CCT from, to, R, Gr, Gb, B grids (17 x 13 floats
 each) }; the number of reference lights (0 where there are not the ten) and each { R/G, B/G, CCT }.
 Everything little-endian, counts as 32-bit words.
+
+"Parameter Parser V2.0.0" (the OnePlus 8 Pro's, /odm/lib64/camera/com.qti.tuned.semco_imx689.bin, truly_imx471 ...) is
+read too: camsensor.py's V2 layout (entry points at 0xa0 as 64-bit words, symbols of 72 bytes), every scalar of a tree's
+node in a 64-bit word of its own (a float in its low half), the arrays packed: led_idx_data { index, count, symbol },
+aec_data { lux index from, to, gain from, to, count, symbol }, cct_data { CCT from, to, the values }. The trees have
+levels above these (lens position, DRC gain, HDR) of which the first of each is the one taken, as the first led_idx_data
+is. Its lens shading is lsc40's (lsc34's tables are all 1.0 in these files); a CCT node of lsc40 has 16 floats after the
+four 17 x 13 grids (each followed by a float of padding: a stride of 222), not used. The reference lights are refPtV1's ten (R/G, B/G) points from the seventh word on.
 """
 import struct
 import sys
@@ -51,6 +59,57 @@ def symbols(data):
         syms[sid] = (name, data[pool + ref:pool + ref + size])
         at += 0x38
     return syms
+
+
+def symbols_v2(data):
+    entries = struct.unpack_from('<9Q', data, 0xa0)
+    table, pool = entries[1], entries[4]
+    syms, at = {}, table
+    while at + 0x48 <= pool:
+        sid = struct.unpack_from('<Q', data, at)[0]
+        name = data[at + 8:at + 0x28].split(b'\0')[0].decode('latin1')
+        _, _, ref, size = struct.unpack_from('<4Q', data, at + 0x28)
+        syms[sid] = (name, data[pool + ref:pool + ref + size])
+        at += 0x48
+    return syms
+
+
+def word_float(v, i):
+    """the float in the low half of 64-bit word i"""
+    return struct.unpack_from('<f', v, 8 * i)[0]
+
+
+def module_v2(syms, name, floats, channels=1):
+    """module()'s result, from a V2 file (channels > 1: that many arrays of floats/channels values, each followed by one
+    float of padding, as lsc40's grids are)"""
+    led = next(v for n, v in syms.values() if n == 'mod_%s_led_idx_data' % name)
+    _, regions, sid = next(e for e in struct.iter_unpack('<3Q', led) if e[0] == 0)
+    out = []
+    for i in range(regions):
+        node = syms[sid][1][48 * i:48 * (i + 1)]
+        lux_from, lux_to = word_float(node, 0), word_float(node, 1)
+        n, cct_sid = struct.unpack_from('<2Q', node, 32)
+        cct = syms[cct_sid][1]
+        size = len(cct) // n
+        ranges = []
+        for j in range(n):
+            e = cct[size * j:size * (j + 1)]
+            per = floats // channels + (1 if channels > 1 else 0)
+            v = struct.unpack_from('<%df' % (per * channels), e, 16)
+            ranges.append((word_float(e, 0), word_float(e, 1), sum((v[per * c:per * c + floats // channels] for c in range(channels)), ())))
+        out.append((lux_from, lux_to, ranges))
+    return out
+
+
+def references_v2(syms):
+    v = next((v for n, v in syms.values() if n == 'refPtV1'), None)
+    if v is None:
+        return []
+    f = [word_float(v, i) for i in range(len(v) // 8)]
+    points = [(f[i], f[i + 1]) for i in range(6, len(f) - 1, 2) if f[i] > 0 and f[i + 1] > 0]
+    if len(points) != len(REFERENCE_CCTS):
+        return []
+    return [(rg, bg, cct) for (rg, bg), cct in zip(points, REFERENCE_CCTS)]
 
 
 def module(syms, name, floats):
@@ -90,12 +149,18 @@ def main():
     if len(sys.argv) < 3:
         sys.exit(__doc__)
     data = open(sys.argv[1], 'rb').read()
-    if not data.startswith(b'QTI Chromatix Header') or b'Parameter Parser V3.0.1' not in data[:0x60]:
+    if data.startswith(b'QTI Chromatix Header') and b'Parameter Parser V2.0.0' in data[:0x60]:
+        syms = symbols_v2(data)
+        ccm = module_v2(syms, 'cc13', 9)
+        lsc = module_v2(syms, 'lsc40', 4 * GRID, 4)
+        refs = references_v2(syms)
+    elif data.startswith(b'QTI Chromatix Header') and b'Parameter Parser V3.0.1' in data[:0x60]:
+        syms = symbols(data)
+        ccm = module(syms, 'cc13', 9)
+        lsc = module(syms, 'lsc34', 4 * GRID)
+        refs = references(syms)
+    else:
         sys.exit('camtuning.py: not a tuning file of the kind known here')
-    syms = symbols(data)
-    ccm = module(syms, 'cc13', 9)
-    lsc = module(syms, 'lsc34', 4 * GRID)
-    refs = references(syms)
 
     for what, tree in (('colour matrix', ccm), ('lens shading', lsc)):
         for lux_from, lux_to, ranges in tree:

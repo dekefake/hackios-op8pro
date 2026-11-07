@@ -246,7 +246,9 @@ Rules of thumb: a bare `./xl enter` or a bad arg can hang a phone; **never pass 
 | `slpi_frpc_pd` | Bitmask of DSP processes attached: 1 root, 2 sensors (default 3). |
 | `slpi_frpc_trace` | 1: log every FastRPC call served. |
 
-Sysctls: `kern.hackios.sensors` (the sensors SEE reported and their last values), `kern.hackios.fastrpc` (listener state, calls served), `kern.hackios.slpi_charger`.
+| `orient` | 0: backboardd's device orientation stays CoreMotion's (userland `inject.c`; default: from the accelerometer when there is one). |
+
+Sysctls: `kern.hackios.sensors` (the sensors SEE reported and their last values), `kern.hackios.sensor_values` (the same as a struct, for `inject.c`), `kern.hackios.fastrpc` (listener state, calls served), `kern.hackios.slpi_charger`.
 
 ### `bsd/dev/hk_sound.c`
 

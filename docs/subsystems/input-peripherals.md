@@ -136,6 +136,21 @@ iOS position 268 for a close scene, 22 at the far end in run 1); the owner: auto
 focus, a higher code is further, so iOS position = 1000 - code. Not measured: where infinity lies, the userland's AF range (AF_NEAR 16..AF_FAR 768, redwood's) against the code range
 0..1000, why the climb is slow (a step of 48 and frames of waiting each; the driver's own ramp is under 5 ms a step), why tap-to-focus does not converge. OIS: not done.
 
+**OnePlus 8 Pro, 2026-11-07 (built; not yet seen on the phone):**
+- *Camera.app ended the kernel's run* (RAM image 174, `slpi=1`): the IFE's eight streams take match registers 9.., of which the hypervisor refuses four
+  (their SMRs read 0 after the write); a refused one still reads free, so the sensor DSP's FastRPC (`hk_fastrpc.c`, started after the camera's first
+  stream) took register 10, and the camera's stop then "put back as found" all eight, writing 0 over it. `instantnoodle_camera.c` now gives a refused
+  register back at once and puts back only registers that still hold what it wrote (`fp_put_back_matches()`); `hk_fastrpc.c` checks its own before
+  each call and rewrites it if lost (`mmu_keep()`).
+- *Focus by the frame's own lens position:* the kernel stamps each frame with where the lens was while it was exposed (`HK_CAMERA_FOCUS_STAMPED`,
+  `HK_CAMERA_FOCUS_MOVED` in `hk_camera.h`, both copies); the userland measures sharpness only on frames exposed where it sent the lens. Before, the
+  frames still in the ring from before a move were measured as the new place's, and a tap's sweep settled where the picture was blurred
+  (logs/lens/scan1.live: best 1.52 at 48, settled at 36 with 0.026). Redwood's frames have no STAMPED bit and keep the old frame counting.
+- *Colour tuning:* the image had no `.isp` files for the 8 Pro (identity colour matrix, no lens shading). `tools/camtuning.py` now reads Qualcomm's
+  V2.0.0 tuning files: `camera-imx689.isp` and `camera-imx471.isp` (from the phone's `com.qti.tuned.semco_imx689.bin` / `truly_imx471.bin`,
+  vendor data, not in git) in `out/tree/r42/fw/`; `camera_device.c` picks them by sensor on `board=instantnoodle`. The front camera's own file has
+  an identity colour matrix (its tuning does colour elsewhere), so only its lens shading and white balance lights change.
+
 Not on the OnePlus 8 (no driver), and no video or Live Photo recording. See [../KNOWN_ISSUES.md](../KNOWN_ISSUES.md).
 
 ### Sensors, ambient light, location
@@ -160,8 +175,11 @@ FAT (`image/`, `hk_fw_partition_file()` in `instantnoodle_modem.c`; nothing bund
   sessions (a collision hung the DSP after ~257 calls).
 - **OnePlus SMEM item 130** (`struct sensor_info`, Android's `oplus_sensor_devinfo.c`): which parts are fitted, filled from the dt node
   `oplus,sensor-devinfo` before the DSP starts. Without it SEE registered no IMU. The bootloader allocates it (4768 bytes here, the 2-source layout).
-- **Not done:** nothing feeds iOS yet (no IOHIDEventSystem services for accelerometer/gyro/proximity/ALS, so no auto-rotation, no screen off at
-  the ear, no auto-brightness, no CoreMotion). `slpi=1` is not in the default arguments yet. See [../TODO.md](../TODO.md) T47.
+- **Orientation (2026-11-07, built, not yet seen):** backboardd turns the screen by CoreMotion's `CMDeviceOrientationManager`; `inject.c`
+  `orientation_start()` answers its three methods from `kern.hackios.sensor_values` (a struct per kind: events, values, timestamp) when the
+  kernel has an accelerometer, else leaves CoreMotion's (`orient=0`: not at all). How backboardd uses it: research/ios-userland.md 1.5a.
+- **Not done:** proximity (screen off at the ear), ambient light (auto-brightness) and CoreMotion for apps (locationd would want the iPhone X's
+  motion coprocessor protocol). `slpi=1` is not in the default arguments yet. See [../TODO.md](../TODO.md) T47.
 
 GPS belongs to the modem (QMI LOC, `userland/src/hk_location.m`, research/modem-sdx55.md). Redwood: not present.
 
