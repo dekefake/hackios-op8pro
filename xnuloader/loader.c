@@ -303,18 +303,67 @@ static uint8_t block_buffer[BLOCK_BUFFER_SIZE] __attribute__((aligned(0x2000)));
 static const char *staged_data = out_buf;   /* what "upload" sends: normally the log in out_buf */
 static uint64_t staged_len;
 
+/*
+ * The returned kernel's log is kept for every composition after the return, not only the first: the loader's own prints
+ * after it (the kernel log echoed on a phone without a log partition, "log: NOT WRITTEN ...") fill log_buf, whose flush
+ * composed again without it -- what the host fetched after a return was 32 KB of the loader's log and no kernel log
+ * (2026-11-07). And XNU's panic text, which goes to the embedded panic log (the region the device tree gives it at
+ * PANIC_LOG_BASE) and not to the kernel's message buffer, follows the kernel log: its printable text, as "== PANIC LOG ==".
+ */
+static const char *kept_klog;
+static uint64_t kept_klog_len;
+
+static uint64_t
+append_panic_text(uint64_t n)
+{
+	static const char sep[] = "\n== PANIC LOG (printable text of the embedded panic region) ==\n";
+	const unsigned char *panic = (const unsigned char *)PANIC_LOG_BASE;
+	uint64_t room = sizeof(out_buf) - 4096, start = n, i;
+	int any = 0;
+
+	for (i = 0; i < PANIC_LOG_SIZE; i++) {
+		if (panic[i] != 0) {
+			any = 1;
+			break;
+		}
+	}
+	if (!any || n + sizeof(sep) >= room) {
+		return n;
+	}
+	memcpy(out_buf + n, sep, sizeof(sep) - 1);
+	n += sizeof(sep) - 1;
+	for (i = 0; i < PANIC_LOG_SIZE && n < room && n - start < 262144; i++) {
+		unsigned char c = panic[i];
+
+		if (c == '\n' || c == '\t' || (c >= 0x20 && c < 0x7f)) {
+			out_buf[n++] = (char)c;
+		} else if (n > start && out_buf[n - 1] != '\n' && out_buf[n - 1] != ' ' && c != 0) {
+			out_buf[n++] = ' ';
+		}
+	}
+	return n;
+}
+
 static void
 compose_logs(const char *klog, uint64_t klog_len)
 {
 	static const char sep[] = "\n== KERNEL LOG ==\n", end[] = "\n== END OF LOG ==\n";
 	uint64_t n = log_len;
 
+	if (klog != NULL) {
+		kept_klog = klog;
+		kept_klog_len = klog_len;
+	} else if (kept_klog != NULL) {
+		klog = kept_klog;
+		klog_len = kept_klog_len;
+	}
+
 	staged_data = out_buf;
 	memset(out_buf, 0, sizeof(out_buf));
 	memcpy(out_buf, log_buf, log_len);
 	if (klog != NULL) {
-		if (klog_len > sizeof(out_buf) - n - 8192) {
-			klog_len = sizeof(out_buf) - n - 8192;
+		if (klog_len > sizeof(out_buf) - n - 8192 - 0x48000) {       /* (room left for the panic text) */
+			klog_len = sizeof(out_buf) - n - 8192 - 0x48000;
 		}
 		memcpy(out_buf + n, sep, sizeof(sep) - 1);
 		n += sizeof(sep) - 1;
@@ -322,6 +371,7 @@ compose_logs(const char *klog, uint64_t klog_len)
 		n += klog_len;
 		memcpy(out_buf + n, end, sizeof(end) - 1);
 		n += sizeof(end) - 1;
+		n = append_panic_text(n);
 	}
 	staged_len = n;
 }
@@ -4615,6 +4665,7 @@ fb_command(char *cmd)
 			set_result("running", cp, 0);
 			fb_reply("OKAY", "");
 			log_len = 0;
+			kept_klog = NULL;
 			print("== XNULOADER run (usb) ==\n");
 			if (!run_kernel(have_cp, cp)) {
 				set_result("not-started", 0, 0);

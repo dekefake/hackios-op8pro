@@ -64,6 +64,7 @@ void instantnoodle_lens_park(void);
 void instantnoodle_lens_down(void);
 void instantnoodle_lens_frame(const void *frame, uint32_t stride, uint32_t width, uint32_t height);
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+extern void ml_io_unmap(vm_offset_t addr, vm_size_t sz);
 
 /* to the loader's log as well: the start of a run's kernel log may not reach the host */
 static void say(const char *format, ...) __printflike(1, 2);
@@ -990,6 +991,44 @@ fp_put(volatile uint32_t *base, uint32_t offset, uint32_t value, uint32_t check)
 	return true;
 }
 
+/*
+ * What fp_smmu_up() takes for one stream, given back: the page tables (and the context bank's page mapping kept for the next
+ * start, fp_ctx_map()). Each start of the camera took both anew and nothing gave them back; with the sensor DSP's mappings beside them (slpi=1) the kernel's map
+ * ran out after a few camera starts and switches: "kmem_alloc(..., 16384, 0x100021): failed with 3" in io_map() under
+ * fp_smmu_up(), a panic, the kernel's return (2026-11-07, RAM image 182, switching to the front camera).
+ */
+/* A context bank's page, mapped once for all the camera's starts (io_map()'s range is small and nothing in it comes back) */
+static volatile uint32_t *
+fp_ctx_map(uint64_t phys, uint32_t n)
+{
+	static volatile uint32_t *mapped[256];
+
+	if (n >= 256) {
+		return NULL;
+	}
+	if (mapped[n] == NULL) {
+		mapped[n] = (volatile uint32_t *)ml_io_map(phys, 0x1000);
+	}
+	return mapped[n];
+}
+
+static void
+fp_smmu_release(void)
+{
+	if (fp_ctx != NULL) {
+		for (unsigned waited = 0; (fp_ctx[0x7f4 / 4] & 1) && waited < 1000; waited++) {
+			IODelay(10);            /* (the context's TLB sync: its tables are still the SMMU's until it is done) */
+		}
+		/* (the mapping stays: io_map()'s are permanent -- ml_io_unmap() of one panicked, "Attempting to remove permanent
+		 * VM map entry", RAM image 183 -- and fp_ctx_map() hands the same one out again) */
+	}
+	if (fp_tables != 0) {
+		kmem_free(kernel_map, fp_tables, fp_tables_bytes);
+		fp_tables = 0;
+		fp_tables_bytes = 0;
+	}
+}
+
 static bool
 fp_smmu_up(vm_offset_t buffer, uint64_t bytes)
 {
@@ -1005,6 +1044,7 @@ fp_smmu_up(vm_offset_t buffer, uint64_t bytes)
 		say("camera: the SMMU's layout is not the one known here (page %#x, %u pages)\n", pagesize, pages);
 		return false;
 	}
+	fp_smmu_release();      /* (anything a failed start left) */
 	lck_mtx_lock(&hk_smmu_lock);
 	fp_nmatch = 0;
 	for (uint32_t n = 0; n < (idr0 & 0xff) && SM_SMR(n) < 0xc00; n++) {
@@ -1035,7 +1075,11 @@ fp_smmu_up(vm_offset_t buffer, uint64_t bytes)
 		lck_mtx_unlock(&hk_smmu_lock);
 		return false;
 	}
-	fp_ctx = (volatile uint32_t *)ml_io_map(SMMU_PHYS + (uint64_t)(pages + fp_ctx_n) * pagesize, 0x1000);
+	fp_ctx = fp_ctx_map(SMMU_PHYS + (uint64_t)(pages + fp_ctx_n) * pagesize, fp_ctx_n);
+	if (fp_ctx == NULL) {
+		lck_mtx_unlock(&hk_smmu_lock);
+		return false;
+	}
 	if (fp_ctx[0] & 1) {
 		say("camera: SMMU context %u is switched on although no stream uses it: somebody's\n", fp_ctx_n);
 		lck_mtx_unlock(&hk_smmu_lock);
@@ -1179,6 +1223,7 @@ fp_smmu_down(void)
 	lck_mtx_unlock(&hk_smmu_lock);
 	fp_smmu_on = false;
 	fp_nmatch = 0;
+	fp_smmu_release();
 	say("camera: the SMMU's match register and context put back as they were found\n");
 }
 
