@@ -3553,6 +3553,9 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 			}
 			if (panel < 0) {
 				tintRefresh();
+				/* (what the GPU drew is read from memory, not from lines an earlier copy left in the cache: HKGPU.cpp no longer
+				 * pushes a surface out of the cache before every submission, gpu_flush_all) */
+				MiniIOSurfaceFromGPU(s);
 				drawLayer(s, src, dst);
 			}
 			if (layer == 0) {

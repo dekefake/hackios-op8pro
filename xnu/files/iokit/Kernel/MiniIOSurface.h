@@ -127,6 +127,12 @@ public:
 	task_t                          scanoutOwner;   /* (not held: only compared) */
 	uint32_t                        drawn;          /* the GPU's last submission that names the pixels (0: none; HKGPU.cpp) */
 	uint32_t                        cpuFresh;       /* ... the one after which this processor's cache was last emptied of them (lockCommon()) */
+	/*
+	 * A processor may have written the pixels since the GPU's driver last pushed them out of the cache: set at the
+	 * surface's making and at every lock for writing (lockCommon()), except one with kHKLockSeedOnly -- a lock that
+	 * only turns the seed of pixels the GPU drew (userland/src/eagl.c) -- and cleared by HKGPU.cpp when it pushes them.
+	 */
+	bool                            cpuDirty;
 	struct minisurf_result          info;           /* addresses not filled in */
 	struct minisurf_plane           planes[MINISURF_MAX_PLANES];
 	OSDictionary *                  values;
@@ -174,6 +180,8 @@ void            MiniIOSurfaceCost(uint32_t * made, uint64_t * making, uint32_t *
 void            MiniIOSurfaceClearKept(void);
 /* Wait, for so many milliseconds at most, until the GPU is done with a surface's pixels (HKGPU.cpp). */
 bool            MiniIOSurfaceDrawn(MiniIOSurface * surface, uint64_t milliseconds);
+/* this processor's cached lines of a surface the GPU has drawn into since it last looked, forgotten (MiniIOSurface.cpp) */
+void            MiniIOSurfaceFromGPU(MiniIOSurface * surface);
 MiniIOSurface * MiniIOSurfaceCreateSimple(uint32_t width, uint32_t height, uint32_t pixelFormat);
 /* A BGRA surface whose pixels are physical memory of the display's (the framebuffer); NULL: it cannot be mapped. */
 MiniIOSurface * MiniIOSurfaceCreateScanout(uint64_t phys, uint32_t width, uint32_t height, uint32_t bytesPerRow);

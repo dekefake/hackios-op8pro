@@ -73,6 +73,7 @@ enum {
 };
 
 #define kSurfaceLockReadOnly    1u
+#define kHKLockSeedOnly         0x40000000u     /* (this port's) a lock for writing that writes nothing: see MiniIOSurface.h cpuDirty */
 
 #define MINISURF_TABLE_SIZE     16384
 #define MINISURF_MAX_DIMENSION  16384
@@ -154,9 +155,11 @@ static TUNABLE(uint32_t, gSurfaceClear, "surf_clear", 1);
 /*
  * boot-arg surf_wrap=1: surfaces around the client's pictures made (methodWrapClientImage); refused by default. Upstream's phone gained by it. Here it made no
  * difference (2026-11-02, OnePlus 8 Pro, surf_wrap, glstill and fb_pri together: home swipes 102-105 frames a second with, 106 without; Settings' scroll 99-103, 101-104;
- * Preferences 40-45% of a core, 33-37%), and it wires memory of the client's, so it is not on.
+ * Preferences 40-45% of a core, 33-37%), and it wires memory of the client's, so it was not on. With Maps up it is: refused, the
+ * window server's IOSurface.framework made and filled surfaces of its own for the pictures every frame (7.5 % of backboardd's
+ * time, hkprof 2026-11-07), and with it Maps panned at up to 63 frames a second against 49. On by default since; surf_wrap=0 refuses.
  */
-static TUNABLE(uint32_t, gSurfaceWrap, "surf_wrap", 0);
+static TUNABLE(uint32_t, gSurfaceWrap, "surf_wrap", 1);
 
 void
 MiniIOSurfaceClearKept(void)
@@ -708,6 +711,7 @@ surfaceCreate(OSDictionary * props, IOReturn * error, IOMemoryMap * scanout = NU
 	struct minisurf_shared * sh = s->shared();
 	sh->registryID = 0x100000000ULL + sid;
 	sh->seed = 1;
+	s->cpuDirty = true;             /* (the pixels were cleared through the kernel's mapping) */
 	sh->valuesSeed = 1;
 	sh->pixelSizeCasting = (uint8_t) dictNumber(props, "IOSurfacePixelSizeCastingAllowed", 1);
 	sh->displayable = 1;
@@ -1896,6 +1900,13 @@ surfaceFromGPU(MiniIOSurface * s)
 	s->cpuFresh = drawn;
 }
 
+/* The same for the kernel's own reading of a surface (the display's driver copying a frame by the processor) */
+void
+MiniIOSurfaceFromGPU(MiniIOSurface * s)
+{
+	surfaceFromGPU(s);
+}
+
 IOReturn
 IOSurfaceRootUserClient::lockCommon(uint32_t sid, uint32_t options, user_addr_t seedOut)
 {
@@ -1910,9 +1921,13 @@ IOSurfaceRootUserClient::lockCommon(uint32_t sid, uint32_t options, user_addr_t 
 
 		if (!(options & kSurfaceLockReadOnly)) {
 			sh->seed++;
+			if (!(options & kHKLockSeedOnly)) {
+				ref->surface->cpuDirty = true;
+			}
 		}
 		seed = sh->seed;
-		if (ref->surface->drawn != ref->surface->cpuFresh) {
+		/* (a seed-only lock reads nothing: the GPU's work is neither waited for nor this processor's lines forgotten) */
+		if (ref->surface->drawn != ref->surface->cpuFresh && !(options & kHKLockSeedOnly)) {
 			fresh = ref->surface;
 			surfaceHold(fresh);
 		}

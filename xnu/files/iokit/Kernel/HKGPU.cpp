@@ -230,6 +230,14 @@ struct hk_worked {
 
 static IOLock * gGPULock;                       /* around everything that is the GPU's (hk_gpu_...) */
 static bool gGPUCached;                         /* boot-arg gpu_cached=1 */
+/*
+ * Boot-arg gpu_flush_all=1: every IOSurface a submission names is pushed out of this processor's cache when its seed
+ * changed, and in any case every GPU_PUSH_AGAIN_MS -- as before 2026-11-07. By default only one a processor may have
+ * written is (MiniIOSurface.h cpuDirty: a lock for writing since the last push; IOSurface's rule is that the pixels are
+ * written between a lock and its unlock): the window server's frames named a full-screen surface or two in every
+ * submission, and 2.3 GB a second went through the cache maintenance, ~100 ms of the processors' a second (log k246).
+ */
+static uint32_t gGPUFlushAll;
 static bool gGPUSaidSetIova;                    /* MSM_INFO_SET_IOVA has been refused out loud once */
 
 /* What the last seconds' submissions were and cost here, for the log. */
@@ -569,6 +577,7 @@ HKGPUStart(void)
 	uint32_t cached = 0;
 
 	gGPUCached = PE_parse_boot_argn("gpu_cached", &cached, sizeof(cached)) && cached != 0;
+	PE_parse_boot_argn("gpu_flush_all", &gGPUFlushAll, sizeof(gGPUFlushAll));
 	gGPULock = IOLockAlloc();
 	gpu = OSTypeAlloc(HKGPU);
 	if (gpu == NULL || provider == NULL || !gpu->init() || !gpu->attach(provider)) {
@@ -1240,7 +1249,12 @@ HKGPUUserClient::submit(struct msm_gem_submit * request)
 		if (b->surface != NULL && b->surface->scanout != NULL) {
 			continue;                       /* (write-combined: never in this processor's cache) */
 		}
-		if (b->surface != NULL) {
+		if (b->surface != NULL && !gGPUFlushAll) {
+			if (!b->surface->cpuDirty) {
+				continue;
+			}
+			b->surface->cpuDirty = false;
+		} else if (b->surface != NULL) {
 			uint32_t seed = b->surface->shared()->seed;
 
 			if (seed == b->seed && !b->seen && began - b->pushed < again) {
@@ -1352,6 +1366,12 @@ HKGPUUserClient::submit(struct msm_gem_submit * request)
 		absolutetime_to_nanoseconds(gGPUStat.making, &making);
 		IOLog("HKGPU: buffers: %u made in %llu us each, %u kept ones given again (%llu MB kept)\n", gGPUStat.made,
 		    gGPUStat.made ? making / NSEC_PER_USEC / gGPUStat.made : 0, gGPUStat.given_again, fKeptBytes >> 20);
+		if (gpu_log) {
+			/* "tl: s": the same, short, where gpu_log's lines go (the loader's log) */
+			hk_tl("tl: s %u submissions in %llu ms: %llu KB out of the cache, %llu us flushing in all; %u waits of %llu us\n",
+			    gGPUStat.submissions, nanos / NSEC_PER_MSEC, gGPUStat.flushed >> 10, flushing / NSEC_PER_USEC, gGPUStat.waits,
+			    gGPUStat.waits ? waiting / NSEC_PER_USEC / gGPUStat.waits : 0);
+		}
 		/* (printf: the console, where a live run's log is read; IOLog's lines reach only the kernel's buffer) */
 		printf("HKGPU: %u submissions in %llu ms: %u command buffers and %u buffers named, %llu KB out of the cache "
 		    "in %llu us a submission; the GPU worked %llu us on each of %u (%u under 0.1 ms, %u under 0.25, %u under 0.5, "

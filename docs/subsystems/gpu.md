@@ -224,6 +224,25 @@ What limited Maps while panning, and what was done (before -> after):
   8-12 ms of GPU a frame, at 30-85 frames a second (a 30 a second rhythm is always there while Maps is open). With
   Maps panning the GPU was 92-98 % busy, about 60 % of it the window server's. It is the backdrop blur of iOS's
   materials, not a fault of the GL path; Reduce Transparency would remove those passes (not tried).
+- **What an iPhone does and this port did not (2026-11-07, RAM images 235-251, the owner's push for it):**
+  - *Backdrops at a fraction of the screen's size.* Maps' backdrop group (`MapsTheme`) asks for scale 0.25 (seen with
+    `hkmetal.m`'s `-[CABackdropLayer setScale:]` probe), but the window server captured the screen behind the bars at almost
+    full size. QuartzCore's own `CA_BACKDROP_SCALE` (a debug option of its render server) set to 0.125 in backboardd
+    (`inject.c`, `ca_backdrop=0` to leave it out): the window server's frame went from ~10 to ~5 ms of GPU, Maps' pans from
+    5-15 to 40-55 frames a second, the bars' blur the same in screenshots.
+  - *No cache maintenance for pixels no processor wrote.* `HKGPU.cpp` pushed every IOSurface a submission named out of the
+    processor's cache when its seed moved and every 4 ms: 2.3 GB a second with Maps panning. Now only a surface locked for
+    writing since (`MiniIOSurface.h` `cpuDirty`); `eagl.c`'s seed-only locks say so (`kHKLockSeedOnly`, 0x40000000) and
+    are not made to wait for the GPU either; the display driver's own copies forget stale lines first
+    (`MiniIOSurfaceFromGPU`). 0 KB a second since; `gpu_flush_all=1` as before.
+  - *Pictures wrapped, not copied.* `surf_wrap` is on by default: refused, the window server made and filled surfaces of its
+    own for Maps' pictures every frame (7.5 % of its time). Copies are added up (`surface_changed()`) only for wrapped memory
+    (`glsum=all`: all), seldom once still (`glstill` on by default): that had become 55 % of the window server's time.
+  - Measured with `hkprof_at=SECONDS hkprof_for=SECONDS` (`inject.c`, the in-process sampler `hkprof.h` on a timer; it now
+    also puts samples in system code on their first caller outside it) and `iphont processes` (CPU time by process):
+    backboardd was 83 % of a core while Maps panned. Still the largest: Mesa's bookkeeping per submission (buffer tables,
+    ringbuffer objects) at ~35 % of backboardd's samples, QuartzCore ~17 %. Rendering the window server without tile memory
+    (`glsysmem=1`) was slower.
 - **Do not boot `metal_sync=1` with Metal on everywhere:** image 222 (with it) never came up and the phone left USB until the
   owner reset it; there was no saved log. `metal_sync_in=NAME` waits per draw in that one process only.
 
