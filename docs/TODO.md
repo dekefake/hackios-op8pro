@@ -23,6 +23,8 @@ Order inside each section is by priority. Update an item when you change its sta
 | T04 | Motion, light and proximity sensors (screen rotation, auto-brightness) | In Progress (8 Pro: the DSP's sensors report, verified 2026-11-07; rotation and proximity into iOS built, unverified; see T47) | P1 |
 | T05 | Bluetooth | Working in RAM runs (owner-verified); gaps listed | P1 |
 | T47 | 8 Pro: Wi-Fi auto-join, sleep, AirDrop, sensors, charging | Open (see section) | P1 |
+| T48 | Apple ID and App Store sign-in do not work properly | Not Started (owner's priority, 2026-11-08) | P0 |
+| T49 | Hardware video encoding: the Snapdragon's Venus (H.264/H.265) for VideoToolbox | Not Started | P1 |
 | T06 | Cellular modem, telephony, SMS | In progress (image 44, built and RAM-tested, not flashed: **Settings > Cellular, the status bar's LTE and bars, SIM and operator through CoreTelephony** (stand-in for CommCenter, research/modem-sdx55.md); flashed image 43: LTE registration, SIM PIN, **mobile data on en1 (verified)**, SMS send, SMS receive with iOS notifications (verified: banner, lock screen, Messages list and conversation), bars, RTC date; open: calls/VoLTE/VoWiFi, tethering, IPv6) | P1 |
 | T07 | OnePlus 8 cameras | Partial (back and front stream, autofocus, flash: owner-tested 2026-10-27; 2026-11-07 fixes built, unverified) | P1 |
 | T08 | Headphones / USB-C audio | Not Started | P1 |
@@ -42,7 +44,7 @@ Order inside each section is by priority. Update an item when you change its sta
 | T22 | CoreAnimation fidelity gaps (sb3, poster switcher, CC glyph opacity, switcher wallpaper) | Partial | P2 |
 | T23 | Display: late swaps, cold-start jank | Partial | P2 |
 | T24 | Speaker protection (TFADSP) and other microphones | Partial | P2 |
-| T25 | Video and Live Photo recording; redwood-only camera parity | Not Started | P2 |
+| T25 | Video and Live Photo recording; redwood-only camera parity | In Progress (8 Pro: the scaler stood in for, recording starts, no movie saved yet) | P1 |
 | T26 | Storage: writable APFS, fsck, HFS write speed | Partial | P2 |
 | T27 | Boot menu usability (5 s countdown, graphics) | Partial | P2 |
 | T28 | Security model: stand-ins protect nothing | Partial | P2 |
@@ -245,6 +247,28 @@ TFA9874 protection runs in Android's audio DSP (AFE module `0x1000B911` on `TERT
 README lists video and Live Photo recording as not working (redwood). No encoder path is built (software HEVC decode only is known: `VCPHEVC.videocodec`). Depends on T07 for OnePlus.
 - **2026-10-27 (OnePlus 8 Pro, measured on the phone, `userland/src/vt_test.c`, runs vid1/vid3):** VideoToolbox lists only h263/jpeg/sjpg; `avc1` fails with -12908 (kVTCouldNotFindVideoEncoderErr) at the first frame, `h264.rtvc.sw` and `h264.rtvc` too, `jpeg` cannot create a session (-8888). `hvc1` works only through the software VCPHEVC encoder `inject_media.c` registers in mediaserverd, and is **1.4-2.1 frames/s** (720p/1080p): no real-time recording from Apple's codecs. A recording needs our own H.264 encoder behind VideoToolbox (a VTVideoEncoder plug-in registered with `VTRegisterVideoEncoderWithInfo`, or the VTCompressionSession entry points interposed in mediaserverd); an intra-only baseline CAVLC encoder (I16x16 DC, IDR every frame, slices over 8 cores) is about 600 lines and ~30 Mbit/s at 720p30; nothing of it exists yet. The laggy viewfinder was the ISP (numbers: `camera_isp.c`'s `linecache` comment and the `redwood: camera: timing:` log lines): 31 ms a frame -> about 4.5 ms averaged per sensor frame with the cell-row cache and a 30/60 fps pacing.
 - **Flash for photographs (2026-10-27, built, not yet verified by eye):** `camera_device.c` lights the LED (`/dev/hk-torch` at 1000, i.e. 125 mA a channel) for a photograph asked for with FlashMode ForceFlashOn (or Auto in the dark), see the comment above `still_wants_flash()`; the settings dictionary of every photograph is logged (`stream: a photograph's settings:`) because the exact key is from CMCapture's strings, not from a captured request.
+
+- **2026-11-08 (OnePlus 8 Pro, RAM images 262-267):** mediaserverd asked for `AppleM2ScalerCSCDriver` (the iPhone's scaler,
+  through IOSurfaceAccelerator) 639-1878 times a recording. `userland/src/m2scaler.c` (in libhackios-media) now answers the
+  framework's seven functions itself -- their first instructions go to ours (a private copy of the code page; the kernel lets
+  mediaserverd run with it), transfers done by vImage (scaling, BGRA <-> 420v/420f) -- and the lookups stopped. Patching only the
+  callers' stub slots (`m2scaler=slots`) caught ImageIO but not the video pipeline. Recording now starts (the timer runs) but no
+  movie is saved, and in Video mode the viewfinder is black: the camera streams (75 frames) and gives the graph 0 pictures with
+  no refusal said -- the video mode's outputs are not ones `camera_device.c` delivers to. Next: log the outputs and properties
+  the graph sets in Video mode (stream properties, output configurations), deliver to them, then see the encoder (the software
+  HEVC of VCPHEVC is registered; T49 is the hardware one).
+
+### T48 Apple ID and App Store sign-in — Accounts · Not Started · P0
+- **The owner (2026-11-08):** signing in with an Apple ID, and to the App Store, does not work properly; a priority. Nothing
+  investigated yet in this session; see the existing store work (`userland/src/inject_app.c`, appstored's storefront,
+  STOREFRONT=1 in `userland/build.sh`) and `docs/research/` for what is known.
+
+### T49 Hardware video encoding (Venus) — Camera · Not Started · P1
+- **The owner (2026-11-08):** if HEVC in hardware is not possible as on an iPhone, use the Snapdragon's own encoder. The SM8250
+  has Qualcomm's Venus video block (H.264 and H.265 in hardware): a kernel driver for it (its firmware from the phone's
+  partitions, Qualcomm's HFI protocol, as Linux's `venus` driver) and a VideoToolbox encoder of ours registered for 'avc1' and
+  'hvc1' (as `register_hevc_encoder()` registers VCPHEVC's software one). Until then H.264 has no encoder at all here and HEVC
+  only the software one.
 
 ### T26 Storage — Storage · Partial · P2
 Transactions for a writable APFS (the in-place write and the slot store exist; `tools/apfs/txn-probe.py` measures why transactions are hard); no `fsck_hfs`; HFS write speed limited by the loader's read-back;
