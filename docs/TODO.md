@@ -20,18 +20,18 @@ Order inside each section is by priority. Update an item when you change its sta
 | T01 | Verify the unverified power work on the phone | Built, Unverified | P0 |
 | T02 | Wi-Fi radio through system sleep | Built, Unverified | P0 |
 | T03 | Install the current build / keep installed bundle current | Partial | P1 |
-| T04 | Motion, light and proximity sensors (screen rotation, auto-brightness) | Not Started | P1 |
+| T04 | Motion, light and proximity sensors (screen rotation, auto-brightness) | In Progress (8 Pro: the DSP's sensors report, verified 2026-11-07; rotation and proximity into iOS built, unverified; see T47) | P1 |
 | T05 | Bluetooth | Working in RAM runs (owner-verified); gaps listed | P1 |
 | T47 | 8 Pro: Wi-Fi auto-join, sleep, AirDrop, sensors, charging | Open (see section) | P1 |
 | T06 | Cellular modem, telephony, SMS | In progress (image 44, built and RAM-tested, not flashed: **Settings > Cellular, the status bar's LTE and bars, SIM and operator through CoreTelephony** (stand-in for CommCenter, research/modem-sdx55.md); flashed image 43: LTE registration, SIM PIN, **mobile data on en1 (verified)**, SMS send, SMS receive with iOS notifications (verified: banner, lock screen, Messages list and conversation), bars, RTC date; open: calls/VoLTE/VoWiFi, tethering, IPv6) | P1 |
-| T07 | OnePlus 8 cameras | Partial (power-up and bus rungs, sensor never answers) | P1 |
+| T07 | OnePlus 8 cameras | Partial (back and front stream, autofocus, flash: owner-tested 2026-10-27; 2026-11-07 fixes built, unverified) | P1 |
 | T08 | Headphones / USB-C audio | Not Started | P1 |
 | T09 | Fingerprint / biometric authentication | Not Started | P1 |
-| T10 | Metal: from experimental to usable | In Progress | P1 |
+| T10 | Metal: from experimental to usable | In Progress (8 Pro: on by default since loader 12, every home-screen app opened without a crash, Maps and Photos right: verified 2026-11-07) | P1 |
 | T11 | Heterogeneous CPU scheduling (Edge) | Partial (working, uncommitted) | P1 |
 | T12 | Sleep power: SoC low-power states | Blocked | P1 |
 | T13 | Battery drain measurement | Not Started | P1 |
-| T14 | Location (GPS) | Not Started | P2 |
+| T14 | Location (GPS) | Partial (8 Pro: the modem's GNSS, a fix observed 2026-11-02; delivery to apps unconfirmed; research/modem-sdx55.md) | P2 |
 | T15 | App Store, Apple ID, FairPlay, push (Secure Enclave dependent) | Blocked | P2 |
 | T16 | Brightness: prove the light changes | Partial | P2 |
 | T17 | CPU time after wake (widgets, chronod) | Partial | P2 |
