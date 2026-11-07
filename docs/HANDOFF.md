@@ -4,7 +4,25 @@ Short, actionable, and dated. It does **not** replace [TODO.md](TODO.md) (roadma
 it says where the work stands *today*. **Update this file after every substantial session** (rules in [../AGENTS.md](../AGENTS.md)); keep it under ~150 lines and move
 anything that has aged into the right permanent page.
 
-**Last updated: 2026-11-02** (section 0, OnePlus 8 Pro cellular); before that 2026-10-26 ~04:55 MSK by the scheduler session (sections 2, 3, 4, 7 for the scheduler; the rest as the documentation session left it at ~03:30). **Checked state** = what I ran/read on that date; **historical** = taken from earlier session notes and flagged as such.
+**Last updated: 2026-11-07** (section 0a); before that 2026-11-02 (section 0, OnePlus 8 Pro cellular); before that 2026-10-26 ~04:55 MSK by the scheduler session (sections 2, 3, 4, 7 for the scheduler; the rest as the documentation session left it at ~03:30). **Checked state** = what I ran/read on that date; **historical** = taken from earlier session notes and flagged as such.
+
+## 0a. OnePlus 8 Pro, 2026-11-06/07: Metal for the whole system, GPS fields, the sensor DSP started on
+
+- **boot_a holds image 145** (flashed by the owner; `metal=2 metal_profile=1 applog=1` on its line). Everything below was RAM runs (images 134-160), nothing else flashed.
+- **Metal on by default** (loader `out/loader-8pro-uefimenu12.efi`: `metal=2 metal_profile=1` in `default_args`; `metal=0` opts out). Verified on the phone: Maps (whole map,
+  right colours, no flicker), Photos (opens, thumbnails, full photo), every app on both home pages without a crash (not Phone, not Camera), Freeform's PencilKit.
+  The fixes and how they were found: [subsystems/gpu.md](subsystems/gpu.md) "2026-11-07"; KNOWN_ISSUES K01. Kernel `data53`+ (kHKSurface per plane, `kern.hackios.fb_layers`).
+- **The Mesa library** (`libhackiosair.dylib`) is built in the `hk-ws` volume with `CPATH` pointing at `tools/mesa/ios-include` (an `endian.h` the iOS SDK lacks): copy
+  `tools/mesa/air/*` into the volume, `AIR=1 bash tools/mk-mesa.sh`, then into `out/tree/r42/lib/` and `codesign -f -s -`. The host frontend `air2nir` is in the volume at
+  `build/mesa-host/build/src/compiler/air/air2nir` (prints any dumped shader, `metal_dump=NAME`).
+- **GPS (hk_location.m):** QMI LOC TLVs fixed (speed 0x18, vertical accuracy 0x1c; 0x19/0x1d were the speed's uncertainty and the vertical confidence), the test file
+  `hk_location_on` removed. Built and in `out/tree/r42/bin`; not yet seen against a fix (the phone was indoors).
+- **Sensors (T47), working on the DSP side (verified, RAM image 174, kernel `data69`):** `hk_slpi.c` + `hk_fastrpc.c` (both in `xnu/hackios.patch`'s
+  `conf/files` hunk), `slpi=1`. SEE reports accel, gyro, light, proximity and the derived sensors; no magnetometer yet. Firmware from the modem
+  partition at boot (ADSP too: audio verified that way, `adsp.*` no longer in `out/tree/r42/fw`). Sensor registry/configs under
+  `out/tree/r42/sensors/` (copied from the phone's persist/vendor/odm, untracked `fw-sensors/`). How it works: subsystems/input-peripherals.md
+  "Sensors". Next: feed iOS (HID services), the magnetometer, `slpi=1` default. TODO T47.
+- **Uncommitted:** all of the above (both repositories). The phone is on RAM images; a reboot gives back image 145.
 
 ## 0. OnePlus 8 Pro, 2026-10-28 (this session; the rest of the file is older)
 

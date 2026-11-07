@@ -68,9 +68,15 @@ Nothing is marked "works" merely because a driver exists: evidence is stated. Fo
 - **Side finding:** repacking a root image extracted with `7z` turns the absolute symlinks (`hal/HKAudio.driver`, `ext/HKMetal.bundle`) into links to the extraction directory: iOS then loads no audio HAL plugin and no sound or haptics play. Restore them with `ln -sfn /hackios/lib/... ` after extracting
   (the scratchpad procedure of image 30: extract, re-link from `7z l -slt`'s "Symbolic Link", replace the library, `mkapfs.py`, compare the listing with the original).
 
-## K01 Metal graphics — OnePlus 8 · Graphics · **Partial** (experimental) · S2
-- **Expected:** apps and the system draw with Metal like an iPhone. **Actual:** OpenGL ES (Mesa) draws the whole UI and is solid. Metal is an experimental driver, off by default (`metal=1` test programs;
-  `metal=2 metal_profile=1` hands it the whole system and reaches the home screen). See the exact breakdown in [gpu.md](subsystems/gpu.md#metal-work-in-progress-instantnoodle-only).
+## K01 Metal graphics — OnePlus 8 · Graphics · **Partial** (on by default since 2026-11-07) · S2
+- **2026-11-07, verified on the phone (RAM images 141-158):** `metal=2 metal_profile=1` is in the loader's defaults (`metal=0` opts out). Apple Maps draws its whole map with correct colours,
+  labels, POIs and shields, without flicker (consecutive frames differ by < 0.1/255); Photos opens (it crashed on launch) and shows its thumbnails and the full photo; every app on both home pages
+  opened with no crash (Phone and Camera not tried); Freeform's PencilKit draws strokes. Causes found and fixed: CoreAnimation detached Maps' layer to a display plane the framebuffer does not
+  composite (`CA_DISABLE_DETACHED`, inject.c); 16-bit varyings mismatched between stages; blend colour, scissor, viewport, vertex textures, pack/unpack, run-time insertelement were missing; the
+  driver called the library from several threads unlocked (a crash in fd6_draw_vbos); nil textures/buffers the shader declares were refused (now zeroed stand-ins); YCbCr and ASTC/ETC2 textures.
+  Still missing: see below. The window server itself still composites with OpenGL ES.
+- **Before 2026-11-07:** OpenGL ES (Mesa) drew the whole UI; Metal was an experimental driver, off by default (`metal=1` test programs;
+  `metal=2 metal_profile=1` handed it the whole system and reached the home screen). See the exact breakdown in [gpu.md](subsystems/gpu.md#metal-work-in-progress-instantnoodle-only).
 - **Works (measured):** blits, clears, 4x MSAA resolve, fences/events/shared events (in-process), heaps (no suballocation), 263 of 271 system fragment shaders draw (258 compared agree with softpipe), compute kernels; Apple Maps' pipelines build and its command buffers complete (no picture checked).
 - **Broken / missing:** mesh and object shaders, tessellation, indirect command buffers, tile shading/imageblocks, function tables, indirect draw/dispatch, multiple viewports, vertex amplification, counters, texture views, wide lines; cross-process shared events; chronod widgets still have 2 pipelines refused under `metal=2`;
   135 AIR library modules are not entry points; no third-party Metal app has been tried; Weather, Photos and Measure never opened a Metal device. Siri's orb once aborted SpringBoard on Metal (48 times in the 2026-10-21 boot); current behaviour under `metal=2` not recorded.
@@ -127,7 +133,7 @@ App Store shows LOADING for ever (the bag request is built but never resolved; a
 Safari, Settings, Sileo/Procursus (apt, tweaks) work. `nsurlsessiond` must run or Sileo downloads sit "Queued". Work: T15.
 
 ## K12 Location — all · **Unsupported** · S2
-No GNSS (modem not started); `locationd` denied; Maps has no position. Work: T14 (blocked by T06).
+2026-11-02: the modem's GNSS works and `hk_location` feeds `locationd` (research/modem-sdx55.md); a first fix was seen by a window (RAM runs). Whether apps receive it is not yet confirmed; Maps' map stays grey (Metal is off by default).
 
 ## K13 Security properties — all · **By design (stand-ins)** · S3
 AMFI and Sandbox answer "allowed" to everything; entitlements come from the signature; no trust cache. `AppleKeyStore` models a device with no passcode and never locked: keychain items are "wrapped" with a reversible transformation that protects nothing, and the keychain lives in `/private/var`.

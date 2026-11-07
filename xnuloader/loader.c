@@ -657,7 +657,10 @@ static const struct platform platform_instantnoodlep = {
 	.default_args = "cpus=8 bootcpu=7 cpufreq=1 torch=3 cam=5 ufs_8pro=1 haptic=5 gpu=1 fb_push=2 fb_dcs=1 fb_hz=120 adsp=1 sound=4 sound_amps=1 sound_below=96 "
 	    "wifi=1 bt=6 bt_after=45 fbwidth=1290 fbheight=2796 root_apfs=ufs_darwin ufs_write=1 hk_data=1 var_data=hfs var_data_format=1 var_store=1 hk_fast_halt=1 "
 	    "sb_delay=8 modem=5 modem_quiet=3 modem_chans=2187 modem_bringup=1 modem_tftp=1 modem_blk=1024 modem_efs=1 modem_service=1 modem_qrtr=100000000 modem_secs=60 "
-	    "modem_data=1 modem_diag=0 mic=4 voice=3 voice_sat=1 hk_slot_ok=1",
+	    "modem_data=1 modem_diag=0 mic=4 voice=3 voice_sat=1 hk_slot_ok=1 "
+	    /* Metal for the whole system (hkmetal.m, docs/metal.md): Maps, Photos and every app on both home pages checked on
+	     * the phone 2026-11-07; metal=0 on the image's line opts out */
+	    "metal=2 metal_profile=1",
 };
 
 /*

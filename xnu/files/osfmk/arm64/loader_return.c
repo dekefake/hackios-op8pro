@@ -52,6 +52,7 @@ extern void hk_wifi_stop(void);
 extern void hk_wifi_quiesce(void);
 extern void hk_adsp_stop(void);
 extern void hk_adsp_quiesce(void);
+extern void hk_slpi_quiesce(void);
 extern void hk_ddr_quiesce(void);
 extern void hk_haptic_quiesce(void);
 extern void hk_torch_quiesce(void);
@@ -413,6 +414,7 @@ loader_return(void)
 	hk_adreno_quiesce();       /* the GPU block, if it was started, has tables in memory that is about to be reused */
 	hk_wifi_quiesce();         /* the Wi-Fi DSP, if it still runs (a panic), is not left to itself */
 	hk_adsp_quiesce();         /* nor the audio DSP */
+	hk_slpi_quiesce();         /* nor the sensor DSP */
 	hk_ddr_quiesce();          /* and the vote for the memory's bandwidth taken away */
 	hk_haptic_quiesce();       /* the vibration motor's chip back into reset, if it was let out */
 	hk_torch_quiesce();        /* the flashlight off, if it was lit */

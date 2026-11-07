@@ -194,6 +194,7 @@ static TUNABLE(uint32_t, gThreads, "fb_threads", 3);
  */
 static TUNABLE(uint32_t, gThreadPriority, "fb_pri", 0);
 extern "C" uint32_t hk_fb_frames;                   /* kern.hackios.fb_frames (hk_cpufreq.c) */
+extern "C" uint32_t hk_fb_layers[7];                /* kern.hackios.fb_layers (hk_cpufreq.c) */
 extern "C" kern_return_t kernel_thread_start_priority(thread_continue_t continuation, void * parameter, integer_t priority,
     thread_t * new_thread);
 
@@ -3346,6 +3347,14 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 	}
 	fSwapsShown++;
 	hk_fb_frames++;
+	hk_fb_layers[0] = layers;
+	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
+		hk_fb_layers[1 + layer] = swapWord(swap, SWAP_SURFACE(layer));
+	}
+	if ((layers & ~1u) != 0) {
+		hk_fb_layers[5]++;
+		hk_fb_layers[6] = layers;
+	}
 	if (gTouchLat) {
 		hk_tl("tl: v %u ready %llu shown %llu done %llu\n", swapWord(swap, SWAP_ID), micros(ready), micros(shown),
 		    micros(drawn));

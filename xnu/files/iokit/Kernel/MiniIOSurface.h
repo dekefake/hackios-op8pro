@@ -126,6 +126,7 @@ public:
 	IOMemoryMap *                   scanoutMap;
 	task_t                          scanoutOwner;   /* (not held: only compared) */
 	uint32_t                        drawn;          /* the GPU's last submission that names the pixels (0: none; HKGPU.cpp) */
+	uint32_t                        cpuFresh;       /* ... the one after which this processor's cache was last emptied of them (lockCommon()) */
 	struct minisurf_result          info;           /* addresses not filled in */
 	struct minisurf_plane           planes[MINISURF_MAX_PLANES];
 	OSDictionary *                  values;

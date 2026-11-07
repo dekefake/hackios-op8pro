@@ -22,6 +22,7 @@ DYN="xnu-clang -arch arm64 -isysroot /opt/theos/sdks/iPhoneOS16.5.sdk -O1"
 for t in "$@"; do
 	case $t in
 	media) $DYN -O2 -dynamiclib -install_name /hackios/lib/libhackios-media.dylib -framework CoreFoundation -framework CoreMedia -framework CoreVideo -framework IOSurface -lobjc -o obj/libhackios-media.dylib src/inject_media.c src/camera_device.c src/camera_isp.c ;;
+	inject) $DYN -dynamiclib -install_name /hackios/lib/libhackios.dylib -framework CoreFoundation -framework IOKit -lobjc -o obj/libhackios.dylib src/inject.c ;;
 	sb) $DYN -dynamiclib -install_name /hackios/lib/libhackios-sb.dylib -framework CoreFoundation -framework CoreGraphics -framework IOKit -lobjc -o obj/libhackios-sb.dylib src/inject_sb.c ;;
 	gl) M=/ws/xnu-deps/build/mesa/out; python3 mkeagl.py src/eagl_slots.txt $M/gl.xml $M/exported-gl.txt src/eagl.c > obj/eagl_gen.h; $DYN -dynamiclib -install_name /hackios/lib/libhackios-gl.dylib -Iobj -framework CoreFoundation -framework IOKit -framework IOSurface -lobjc $M/libOSMesa.8.dylib -o obj/libhackios-gl.dylib src/eagl.c src/gl_osmesa.c; rm -f obj/eagl_gen.h ;;
 	phone) $DYN -O2 -dynamiclib -install_name /hackios/lib/libhackios-phone.dylib -lobjc -o obj/libhackios-phone.dylib src/inject_phone.c ;;
@@ -35,6 +36,7 @@ for t in "$@"; do
 	time) $DYN -O2 -o obj/hk_time src/hk_time.c ;;
 	sysctl) $DYN -O2 -o obj/hk_sysctl src/hk_sysctl.c ;;
 	lun) $DYN -O2 -o obj/hk_lun src/hk_lun.c ;;
+	metal) M="-framework Foundation -framework IOKit -framework Metal -lobjc"; $DYN -dynamiclib -install_name /hackios/lib/libhackiosmetal.dylib $M -o obj/libhackiosmetal.dylib src/hkmetal.m src/hkdrawable.m && $DYN -bundle $M -o obj/HKMetal src/hkmetal.m src/hkdrawable.m ;;
 	location) $DYN -O1 -fobjc-arc -framework Foundation -framework CoreLocation -lobjc -o obj/hk_location src/hk_location.m ;;
 	objcdump) $DYN -O2 -lobjc -o obj/hk_objcdump src/hk_objcdump.c ;;
 	logcfg) $DYN -O2 -o obj/hk_logcfg src/hk_logcfg.c ;;

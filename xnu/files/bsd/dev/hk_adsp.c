@@ -1061,6 +1061,19 @@ static const uint8_t *
 image_file(const char *name, uint64_t *size)
 {
 	{
+		/* the phone's own modem partition first: Android's /vendor/firmware_mnt/image (instantnoodle_modem.c's FAT reader) */
+		extern uint8_t *hk_fw_partition_file(const char *path, uint64_t *size_out);
+		char path[64];
+		const uint8_t *data;
+
+		snprintf(path, sizeof(path), "image/%s", name);
+		data = instantnoodlep_board() ? hk_fw_partition_file(path, size) : NULL;
+		if (data != NULL) {
+			from_root = true;       /* (ours, kalloc_data: given back once written, as the root's) */
+			return data;
+		}
+	}
+	{
 		const uint8_t *data = hk_image_file("fw", name, size, NULL);  /* (hk_image.c) */
 
 		if (data != NULL) {
@@ -1075,8 +1088,7 @@ image_file(const char *name, uint64_t *size)
 			return data;
 		}
 	}
-	printf("adsp: %u: no fw/%s in the small image nor on the root: put the phone's /vendor/firmware_mnt/image/%s into "
-	    "fw-audio/ and run SYSTEM=1 userland/build.sh (or ADSP=1, for the small image)\n", step, name, name);
+	printf("adsp: %u: no image/%s in the modem partition, nor fw/%s in the small image or on the root\n", step, name, name);
 	return NULL;
 }
 

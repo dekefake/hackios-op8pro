@@ -82,7 +82,7 @@ diff --git a/bsd/conf/files b/bsd/conf/files
 index 44274016a4cf..be89ffb15144 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -109,6 +109,53 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
+@@ -109,6 +109,55 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
  bsd/dev/unix_startup.c			standard
  
  bsd/dev/monotonic.c optional monotonic
@@ -126,6 +126,8 @@ index 44274016a4cf..be89ffb15144 100644
 +bsd/dev/hk_mic.c		standard
 +bsd/dev/hk_wifi.c		standard
 +bsd/dev/hk_adsp.c		standard
++bsd/dev/hk_slpi.c		standard
++bsd/dev/hk_fastrpc.c		standard
 +bsd/dev/hk_image.c		standard
 +bsd/dev/hk_virtio_blk.c	standard
 +bsd/dev/hk_sparse.c	standard

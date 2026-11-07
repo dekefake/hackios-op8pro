@@ -1192,8 +1192,51 @@ fat_lookup(uint32_t dir_cluster, const char *want, uint32_t *cluster, uint32_t *
 }
 
 /* The file at a path of directories and a name ("image/sdx55m/sbl1.mbn"): its first cluster and its size. */
+static bool fat_open_locked(const char *path, uint32_t *cluster, uint32_t *size);
+static int fat_read(uint32_t first, uint32_t size, uint64_t offset, uint8_t *dst, uint64_t len);
+static LCK_GRP_DECLARE(fat_lock_group, "hk-modem-fat");
+static LCK_MTX_DECLARE(fat_lock, &fat_lock_group);      /* the mount and the directory buffer: the modem's thread and the DSPs' (hk_fw_partition_file) */
+
 static bool
 fat_open(const char *path, uint32_t *cluster, uint32_t *size)
+{
+	bool ok;
+
+	lck_mtx_lock(&fat_lock);
+	ok = fat_open_locked(path, cluster, size);
+	lck_mtx_unlock(&fat_lock);
+	return ok;
+}
+
+/*
+ * A whole file of the phone's own modem partition (Android's /vendor/firmware_mnt: "image/slpi.mdt"), in memory of ours
+ * (kalloc_data; kfree_data with its size), or NULL. The DSPs' firmware is read from there at boot (hk_adsp.c, hk_slpi.c)
+ * instead of being carried in the image: it is the phone's own, of the version its other firmware expects.
+ */
+uint8_t *hk_fw_partition_file(const char *path, uint64_t *size_out);
+uint8_t *
+hk_fw_partition_file(const char *path, uint64_t *size_out)
+{
+	uint32_t cluster = 0, size = 0;
+	uint8_t *data;
+
+	if (!fat_open(path, &cluster, &size) || size == 0) {
+		return NULL;
+	}
+	data = kalloc_data(size, Z_WAITOK);
+	if (data == NULL) {
+		return NULL;
+	}
+	if (fat_read(cluster, size, 0, data, size) != 0) {
+		kfree_data(data, size);
+		return NULL;
+	}
+	*size_out = size;
+	return data;
+}
+
+static bool
+fat_open_locked(const char *path, uint32_t *cluster, uint32_t *size)
 {
 	char part[64];
 	uint32_t dir = 0;
@@ -6067,7 +6110,10 @@ run_steps(void)
 	/* the application processor's two lines to the modem as Android's esoc driver sets them when it powers the modem on: AP2MDM status (the processor is up) high, error low */
 	instantnoodle_gpio_output(PIN_AP2MDM_ERRFATAL, false, INSTANTNOODLE_PULL_NONE, 2);
 	instantnoodle_gpio_output(PIN_AP2MDM_STATUS, true, INSTANTNOODLE_PULL_NONE, 2);
-	if (last_step >= 3 && !fat_mount()) {
+	lck_mtx_lock(&fat_lock);
+	bool mounted = last_step < 3 || fat_mount();
+	lck_mtx_unlock(&fat_lock);
+	if (last_step >= 3 && !mounted) {
 		lck_mtx_unlock(&modem_pcie_lock);
 		return;
 	}

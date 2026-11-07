@@ -1080,11 +1080,31 @@ HKGPUUserClient::surfaceBuffer(struct hk_surface * request)
 		MiniIOSurfaceDrop(s);
 		return kIOReturnNoMemory;
 	}
+	/*
+	 * `planes` in: 0 for the surface as a whole (its first plane), or N + 1 for plane N, whose geometry is then
+	 * what comes back -- the buffer is the whole surface either way, and a plane is an offset and a row length
+	 * into it. A two-plane YCbCr surface ('420f': Photos' thumbnails) is drawn from as two textures, its luma as
+	 * R8 and its chroma as RG8, and a plane's place is IOSurface.framework's: the base plus the plane's offset.
+	 */
+	uint32_t plane = request->planes;
+
 	request->size = size;
 	request->offset = s->info.offset;
 	request->rowBytes = s->info.bytesPerRow;
 	request->width = s->info.width;
 	request->height = s->info.height;
+	if (plane != 0 && plane <= s->info.planeCount && plane <= MINISURF_MAX_PLANES) {
+		const struct minisurf_plane * p = &s->planes[plane - 1];
+
+		request->offset = s->info.offset + p->offset;
+		request->rowBytes = p->bytesPerRow;
+		request->width = p->width;
+		request->height = p->height;
+	} else if (plane != 0) {
+		memory->release();
+		MiniIOSurfaceDrop(s);
+		return kIOReturnBadArgument;
+	}
 	request->pixelFormat = s->info.pixelFormat;
 	request->planes = s->info.planeCount;
 	if (request->handle == kHKDescribe) {

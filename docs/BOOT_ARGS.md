@@ -229,6 +229,25 @@ Rules of thumb: a bare `./xl enter` or a bad arg can hang a phone; **never pass 
 | `sleep_max` | Cap every system sleep to S seconds (timed runs need it). |
 | `syssleep` | 0 refuses system sleep (default on with board=instantnoodle, off elsewhere). |
 
+### `bsd/dev/hk_slpi.c` (OnePlus 8 Pro: the sensor DSP) and `bsd/dev/hk_fastrpc.c` (its file service)
+
+| Boot-arg | Meaning |
+|---|---|
+| `slpi` | 1: start the sensor DSP (SLPI), its SEE client and FastRPC listener. |
+| `slpi_delay` | Seconds after the root is mounted before starting (default 30). |
+| `slpi_step` / `slpi_upto` | Run steps 1..N and stop / pause after step N (like `adsp_step`). |
+| `slpi_settle_ms` | ms after the DSP says up before the next step (default 300). |
+| `slpi_loud` | 1: every step's lines to the loader's log too. |
+| `slpi_oplus` | 0: do not fill OnePlus SMEM item 130 (sensor list from `oplus,sensor-devinfo`; without it SEE has no IMU). |
+| `slpi_sns` | 0: no SEE client (QMI service 400). |
+| `slpi_watch` | Seconds the SEE client streams events after start (default 90; then on-change only). |
+| `slpi_hz` | Sample rate asked of streaming sensors (default 10). |
+| `slpi_frpc` | 0: no FastRPC listener (SEE then finds no sensors: it cannot read its registry). |
+| `slpi_frpc_pd` | Bitmask of DSP processes attached: 1 root, 2 sensors (default 3). |
+| `slpi_frpc_trace` | 1: log every FastRPC call served. |
+
+Sysctls: `kern.hackios.sensors` (the sensors SEE reported and their last values), `kern.hackios.fastrpc` (listener state, calls served), `kern.hackios.slpi_charger`.
+
 ### `bsd/dev/hk_sound.c`
 
 | Boot-arg | Meaning |
@@ -455,7 +474,7 @@ Rules of thumb: a bare `./xl enter` or a bad arg can hang a phone; **never pass 
 | `fbwidth`, `fbheight` | The size iOS renders at (default 1125 x 2436, the iPhone X), GPU-scaled to the panel with `fb_push=2`. OnePlus 8 Pro: `fbwidth=1290 fbheight=2796` (iPhone 14/15 Pro Max size, 3x, since 2026-10-28: at the 1320 x 2868 used before, iOS 16.5's keyboard has no digits plane, K43; about 1.25% stretch to QHD+ 1440 x 3168, 2% to the FHD+ panel mode now driven; status bar needs `libhackios-ui`). |
 | `fb_subtype=N` | Overrides the DT `/product artwork-device-subtype` (iPhone X: 2436). It changes UIKit's whole layout class; not needed with `libhackios-ui`. |
 | `fb_probe` | 1: dump the OnePlus 8 display pipeline; 2: the mode registers of a QHD+ switch too; 3: also the VIG pipes' scalers (SSPP + 0xa00: version, state, coefficient tables), read only. |
-| `metal` | 1 Metal driver for test programs; 2 whole system (with metal_profile=1). |
+| `metal` | 1 Metal driver for test programs; 2 whole system (with metal_profile=1). **Default `metal=2 metal_profile=1` since 2026-11-07** (loader defaults); `metal=0` opts out. |
 
 ### `iokit/Kernel/MiniIOSurface.cpp`
 
@@ -503,6 +522,9 @@ Rules of thumb: a bare `./xl enter` or a bad arg can hang a phone; **never pass 
 | `hkprof=1/2` | `hkprof.h` | userland sampling profiler (2: from process start) |
 | `gltrace*`, `glcensus`, `glshaders`, `glshow*`, `glskip`, `glplain`, `glwait`, `glcopy`, `glfetch`, `glgroup`, `vblur`, `glenv`, `glslow` | `eagl.c` | OpenGL ES debugging; see the header of `eagl.c` |
 | `metal_profile=1` | `hkmetal.m` | with `metal=2`: whole system on Metal; `metal_sync=1` fence per draw |
+| `metal_dump=NAME`, `metal_skip=NAME`, `metal_texlog=1` | `hkmetal.m` | the AIR of every pipeline function whose name has NAME, into `/private/var/tmp/hk_air/` (for `build/mesa-host/.../air2nir`); leave out the draws of pipelines whose "vertex / fragment" names contain NAME; each different fragment texture a draw samples, once, with texels of its first and last level (with `applog=1`) |
+| `ca_detach=1` | `inject.c` | lets CoreAnimation detach a layer to a display plane again (default: `CA_DISABLE_DETACHED=1` in backboardd: the framebuffer shows one layer only) |
+| `metal_probe=1` | `hkmetal.m` | every 4th drawable a process draws: how much of it is black, in nine columns (needs `applog=1` to be seen); every 30th command buffer: its passes and the last target's middle column |
 | `softpipe`, `llvmpipe` | `gl_osmesa.c` | Mesa software driver choice |
 | `root_apfs`, `var_store`, `var_data`, `var_data_format`, `var_save_every` | `init.c`, `var_store.c` | root and persistence (see storage.md) |
 | `exctrace=1 applog=1 applog_name=APP`, `systrace=1/2 systrace_name=NAME` | kernel `user_exception_trace.c` (`applog` is only mentioned in its comment) | trace failing syscalls / crashes (`usertrap:`, `userabort:` in the log) |
@@ -526,7 +548,7 @@ Sysctls added 2026-10-29: `kern.hackios.cellular_data` (bit 0 the modem's IPv4 s
 
 Added 2026-11-01/02 (OnePlus 8 Pro cellular): `modem_diag=0` (the modem's DIAG channel is opened but the modem is not asked for its debug messages; default 1 asks for all of them, a stream that never stops: use 0 on a daily image); `im_sms_in=1` (libhackios-im in imagent tries to hand received SMS to imagent's own session, an experiment that does not work yet; default off). The daily images no longer pass `applog=1` (every program's standard output and error on the console). hk_commcenter's answers file (`/hackios/etc/hk_commcenter.json`, or a newer `hk_cc*.json` put on the phone with `iphont put` during this boot): `verbose`, `capture_plain`, `snapshot`, `dump`, `dump_strings`, `describe`, `call`, `mg`, `unlink`, `set_settings`, `setters`, `legacy`, `legacy_extra`, `notify_state`, `serve_commcenter_xpc` (research/modem-sdx55.md).
 
-Added 2026-11-02: `surf_wrap=1` (surfaces around a client's pictures, upstream hakios 759b620; default 0: no difference measured on the 8 Pro), `fb_pri=N` (priority of the panel's threads, upstream cd8fdbb; default 0, the same), `glstill=1` (still surfaces looked at every 8th frame, 759b620; default off, the same), `glstats=1` (the OpenGL statistics every 20 and 200 frames; off by default: they were 5000 of 12000 log lines in 9 minutes), `sbsigtry=1` (the cellular views given modes 0, 2 and 1 in turn, for measuring). `mic=4` is now in the daily set. Sysctl `kern.hackios.fb_frames`: frames put on the panel since boot. `/private/var/tmp/hk_sb_cell.log`: what the status bar was told, as it changes (`inject_sb.c`).
+Added 2026-11-02: `surf_wrap=1` (surfaces around a client's pictures, upstream hakios 759b620; default 0: no difference measured on the 8 Pro), `fb_pri=N` (priority of the panel's threads, upstream cd8fdbb; default 0, the same), `glstill=1` (still surfaces looked at every 8th frame, 759b620; default off, the same), `glstats=1` (the OpenGL statistics every 20 and 200 frames; off by default: they were 5000 of 12000 log lines in 9 minutes), `sbsigtry=1` (the cellular views given modes 0, 2 and 1 in turn, for measuring). `mic=4` is now in the daily set. Sysctl `kern.hackios.fb_frames`: frames put on the panel since boot. Sysctl `kern.hackios.fb_layers` (2026-11-06): seven words, the last swap's layer mask and its four surfaces, how many swaps had more than one layer, and the last such mask. `/private/var/tmp/hk_sb_cell.log`: what the status bar was told, as it changes (`inject_sb.c`).
 
 Also 2026-11-02, a call's sound (none yet, research/modem-sdx55.md): `voice=N` (`hk_mic.c`: 1 the DSP's voice version, 2 and the mailbox, 3 and the sessions while `kern.hackios.voice_call` is set), `voice_bridge=1` (QRTR forwarded between the modem and the DSP; a call then drops after 5 s). The answers file's `"voice": 0`, `"voice_dry_run": 1`, `"voice_session": N`, `"voice_fake_incoming": "NUMBER"` and `"rat"` are read by `hk_commcenter`.
 

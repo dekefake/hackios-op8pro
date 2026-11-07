@@ -129,6 +129,23 @@ switcher, `sb3` blur refusal, the Control Center glyph opacity workaround).
 
 ## Metal (work in progress, instantnoodle only)
 
+**2026-11-07: on by default, whole system** (loader `default_args`; `metal=0` opts out). What it took, each verified on the phone (RAM images 134-158):
+- **Maps black but for strips:** not Metal. Maps' drawables were complete (`metal_probe=1` reads them after the fence: 0% black, alpha set); CoreAnimation
+  *detached* Maps' full-screen CAMetalLayer to a hardware display layer and composited the rest with a hole (colour 0, blending off: `gltrace_place`). The
+  swaps had two layers (`kern.hackios.fb_layers` 0x3) and MiniIOMobileFramebuffer shows one. `CA_DISABLE_DETACHED=1` in backboardd (inject.c; `ca_detach=1`).
+- **Maps' colours** (buildings red/green/yellow, labels green): the DaVinci ground shader takes its lighting through `half3` varyings; 16-bit varyings now
+  cross the stage boundary as 32-bit (`is_wide_varying`, air_to_nir.c). Varyings are also linked by name now (`link_varyings_by_name`, air_metal.c).
+- **Maps' first launch crashed** in fd6_draw_vbos (NULL rasterizer): the driver called the library from several threads with no lock; every call takes
+  `rw_pipe_lock` now (recursive). Found with the image list the driver prints at start (`image 0x... /hackios/lib/...`) and `llvm-symbolizer` on the
+  unstripped library in the build volume.
+- **Photos crashed on launch:** `insertelement` at a run-time index refused (now `nir_vector_insert`); then its grid drew nothing: its uber-shader declares
+  textures it binds as nil (legal in Metal) -- zeroed stand-ins now (`stand_in_texture`/`stand_in_buffer`); thumbnails are '420f' surfaces read as R8 + RG8
+  planes (kHKSurface answers per plane: `planes` = N+1 in), as format 500 (an RGBA copy of Y, Cb, Cr), or with rows not a multiple of 64 (a copy); ASTC and
+  ETC2 textures are served (block-aware strides).
+- Also added: blend colour, scissor and viewport rectangles, vertex textures and samplers, `air.pack/unpack.{u,s}norm`.
+- Tools: `metal_dump=NAME` + `build/mesa-host/build/src/compiler/air/air2nir` (in the `hk-ws` volume) read any app's shader as NIR; `metal_skip=NAME` finds
+  which pipeline paints what; `metal_texlog=1`. The cross build of the library needs `CPATH` to a one-file `endian.h` (the SDK has only machine/endian.h).
+
 **Do not read "Metal runs" as "Metal apps work".** What exists is an experimental driver, off by default.
 
 - `metal=1`: Metal serves test programs. `metal=2 metal_profile=1`: Metal is handed to the whole system (backboardd's

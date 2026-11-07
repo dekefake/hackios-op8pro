@@ -1866,11 +1866,42 @@ IOSurfaceRootUserClient::trapDecrementUseCount(void * p1, void * p2, void * p3, 
  * Lock and unlock do not exclude anybody: the memory is shared and always mapped.
  * What matters is the seed, which tells readers that the pixels may have changed.
  */
+extern "C" bool hk_gpu_done(uint32_t fence);
+extern "C" void hk_gpu_sleep(uint32_t fence, uint64_t until);
+extern "C" void hk_gpu_to_memory(void * start, uint64_t size);
+
+/*
+ * A lock is where a program says it is about to touch a surface's pixels with the processor. If the GPU has drawn into the
+ * surface since this processor last looked, what the cache holds of it may be from before -- a line read while the GPU was
+ * still drawing, by the window server's own look at whether it changed (userland/src/eagl.c, surface_changed()) -- and the
+ * processor would read that and not the picture: Apple Maps came to the screen black with strips of map in it while its
+ * own drawable, read on the GPU's side, held the whole map (2026-11-06, metal_probe=1). The GPU's cache is pushed out
+ * before each submission (HKGPU.cpp); this is the other half: the GPU's work waited for (100 ms at most) and this
+ * processor's lines of the surface forgotten, once per submission that drew into it.
+ */
+static void
+surfaceFromGPU(MiniIOSurface * s)
+{
+	uint32_t drawn = s->drawn;
+	uint64_t deadline;
+
+	if (drawn == 0 || drawn == s->cpuFresh || s->scanout != NULL || s->memory == NULL) {
+		return;
+	}
+	clock_interval_to_deadline(100, kMillisecondScale, &deadline);
+	while (!hk_gpu_done(drawn) && mach_absolute_time() < deadline) {
+		hk_gpu_sleep(drawn, deadline);
+	}
+	hk_gpu_to_memory(s->memory->getBytesNoCopy(), s->memory->getLength());
+	s->cpuFresh = drawn;
+}
+
 IOReturn
 IOSurfaceRootUserClient::lockCommon(uint32_t sid, uint32_t options, user_addr_t seedOut)
 {
 	struct minisurf_client_ref * ref;
 	uint32_t seed = 0;
+	MiniIOSurface * fresh = NULL;
 
 	IOLockLock(gSurfaceLock);
 	ref = findRef(sid, false);
@@ -1881,10 +1912,20 @@ IOSurfaceRootUserClient::lockCommon(uint32_t sid, uint32_t options, user_addr_t 
 			sh->seed++;
 		}
 		seed = sh->seed;
+		if (ref->surface->drawn != ref->surface->cpuFresh) {
+			fresh = ref->surface;
+			surfaceHold(fresh);
+		}
 	}
 	IOLockUnlock(gSurfaceLock);
 	if (ref == NULL) {
 		return kIOReturnNotFound;
+	}
+	if (fresh != NULL) {
+		surfaceFromGPU(fresh);          /* (not under the table's lock: it may wait for the GPU) */
+		IOLockLock(gSurfaceLock);
+		surfaceUnhold(fresh);
+		IOLockUnlock(gSurfaceLock);
 	}
 	if (seedOut != 0) {
 		copyout(&seed, seedOut, sizeof(seed));

@@ -522,6 +522,11 @@ sysctl_top(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int a
 /* frames put on the panel since boot (MiniIOMobileFramebuffer.cpp): two readings and the time between them are the frame rate, no log needed */
 uint32_t hk_fb_frames;
 SYSCTL_UINT(_kern_hackios, OID_AUTO, fb_frames, CTLFLAG_RD | CTLFLAG_LOCKED, &hk_fb_frames, 0, "frames put on the panel since boot");
+/* what the window server's swaps are made of: [0] the last swap's layers (bit per layer with a surface), [1]-[4] its four
+ * surfaces, [5] swaps with more than the bottom layer, [6] the last such swap's layers (MiniIOMobileFramebuffer.cpp) */
+uint32_t hk_fb_layers[7];
+SYSCTL_OPAQUE(_kern_hackios, OID_AUTO, fb_layers, CTLFLAG_RD | CTLFLAG_LOCKED, hk_fb_layers, sizeof(hk_fb_layers), "IU",
+    "the last swap's layers and surfaces, and how many swaps had more than one layer");
 SYSCTL_PROC(_kern_hackios, OID_AUTO, top, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, NULL, 0, sysctl_top, "A",
     "processor time by process since the last read, in ms: the first eight");
 

@@ -140,9 +140,30 @@ Not on the OnePlus 8 (no driver), and no video or Live Photo recording. See [../
 
 ### Sensors, ambient light, location
 
-Not present. The accelerometer, gyroscope, compass, light, proximity and barometer hang off the audio DSP behind its
-sensor framework ("SEE"), reached through QMI service 400 over QRTR; the steps and their state are in
-[../TODO.md](../TODO.md). GPS belongs to the modem, which is not started.
+**OnePlus 8 Pro (2026-11-07, verified on the phone, RAM image 174):** the sensors hang off the sensor DSP (SLPI), not the audio DSP.
+`hk_slpi.c` (`slpi=1`) starts it the way `hk_adsp.c` starts the ADSP: firmware (`slpi.mdt`/`.bNN`) read at boot from the modem partition's
+FAT (`image/`, `hk_fw_partition_file()` in `instantnoodle_modem.c`; nothing bundled), PAS 12 through TrustZone at 0x90600000, SMP2P
+(ours 430, theirs 481), GLINK over IPCC client 4 with two channels: "IPCRTR" (QRTR, node 9) and "fastrpcglink-apps-dsp".
+
+- **SEE client:** QMI service 400, `SNS_CLIENT_REQ` 0x20 carrying protobuf `sns_client_request_msg`; the SUID sensor (SUID `0xabab...`) is
+  asked for each data type (`sns_suid_req`, msg 512, answer event 768), then each found sensor gets `std_sensor_config` (513) or on-change
+  (514) and sends sensor events (1025) as indications 0x21/0x22. Values are in `kern.hackios.sensors`.
+  Reported: accel (about (-0.5, -0.9, 10.0) m/s^2 flat on a table), gyro, ambient_light, rgb, proximity, gravity, game_rv, device_orient,
+  pedometer, sig_motion, amd, motion_detect, gyro_cal. **Not found:** mag (AKM09918/MMC5603 on the DSP's I2C 1: not yet known why), pressure
+  (probably not fitted).
+- **FastRPC listener (`hk_fastrpc.c`):** SEE reads its registry and configs through the application processor's file service (Android's
+  `adsprpcd`/`sscrpcd`). Without it SEE starts and finds nothing. The listener maps a 2 MB pool through the SMMU (stream 0x541, IOVA 0x80000000),
+  attaches to the root process (pd 0) and the sensors process (pd 2), then serves `adsp_listener` `next2` calls: `apps_remotectl`, `apps_std`
+  (fopen/fread/fwrite/fseek/stat/opendir/readdir/mkdir/frename...), paths mapped from `/mnt/vendor/persist/`, `/vendor/`, `/odm/`,
+  `/data/vendor/sensors/` onto `/hackios/sensors/{persist,vendor,odm}` (read-only, in the image; from the phone's own partitions, not in git)
+  and `/private/var/hackios/sensors` (writable; made by the kernel). Context ids carry the process in their low bits and are unique across both
+  sessions (a collision hung the DSP after ~257 calls).
+- **OnePlus SMEM item 130** (`struct sensor_info`, Android's `oplus_sensor_devinfo.c`): which parts are fitted, filled from the dt node
+  `oplus,sensor-devinfo` before the DSP starts. Without it SEE registered no IMU. The bootloader allocates it (4768 bytes here, the 2-source layout).
+- **Not done:** nothing feeds iOS yet (no IOHIDEventSystem services for accelerometer/gyro/proximity/ALS, so no auto-rotation, no screen off at
+  the ear, no auto-brightness, no CoreMotion). `slpi=1` is not in the default arguments yet. See [../TODO.md](../TODO.md) T47.
+
+GPS belongs to the modem (QMI LOC, `userland/src/hk_location.m`, research/modem-sdx55.md). Redwood: not present.
 
 ## Files
 
