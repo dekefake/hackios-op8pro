@@ -243,6 +243,13 @@ What limited Maps while panning, and what was done (before -> after):
     backboardd was 83 % of a core while Maps panned. Still the largest: Mesa's bookkeeping per submission (buffer tables,
     ringbuffer objects) at ~35 % of backboardd's samples, QuartzCore ~17 %. Rendering the window server without tile memory
     (`glsysmem=1`) was slower.
+- **Later the same evening (RAM images 252-257):** Maps' own CPU (`metal_prof_in=Maps metal_prof_at=S metal_prof_for=S`:
+  `hkprof.h` in a Metal process) was VectorKit 28-31 %, malloc/objc/kernel calls ~40 %, our Metal stack ~11 %:
+  `-[HKMetalWork dealloc]` released all 6 x 32 slots of every draw (now only the filled ones), `check_bindings`
+  formatted a sentence for every buffer of every draw (now only for a refusal). Maps never went past ~60 frames a second
+  because applications' display links are held to the iPhone X's 60: `hk_hifps.h` (inject_ui.c, hkmetal.m) lifts them as
+  SpringBoard's are, but with every application at 120 the GPU was 95 % busy and Maps panned worse (13-36), so it is off
+  unless `app_fps=1`. The owner found Maps smooth with the defaults (2026-11-07).
 - **Do not boot `metal_sync=1` with Metal on everywhere:** image 222 (with it) never came up and the phone left USB until the
   owner reset it; there was no saved log. `metal_sync_in=NAME` waits per draw in that one process only.
 

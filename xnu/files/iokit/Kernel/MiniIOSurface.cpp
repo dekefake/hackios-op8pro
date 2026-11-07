@@ -150,6 +150,7 @@ static uint32_t         gSurfacesNotKept[2];    /* memory not kept: somebody els
 static IOLock *         gSurfaceKeptLock;
 static thread_call_t    gSurfaceClearing;
 static uint32_t         gSurfacesGivenAgain;    /* for MiniIOSurfaceCost() */
+static volatile SInt64  gSurfaceClearedBytes, gSurfaceClearedTime;     /* for MiniIOSurfaceClearCost() */
 /* boot-arg surf_clear=0: kept memory is given out as it is (to see what the clearing costs; a surface is then not all zeroes) */
 static TUNABLE(uint32_t, gSurfaceClear, "surf_clear", 1);
 /*
@@ -176,7 +177,11 @@ MiniIOSurfaceClearKept(void)
 		}
 		gSurfaceKept[i].busy = true;
 		IOLockUnlock(gSurfaceKeptLock);
+		uint64_t began = mach_absolute_time();
+
 		bzero(memory->getBytesNoCopy(), memory->getCapacity());
+		OSAddAtomic64((SInt64) memory->getCapacity(), &gSurfaceClearedBytes);
+		OSAddAtomic64((SInt64) (mach_absolute_time() - began), &gSurfaceClearedTime);
 		IOLockLock(gSurfaceKeptLock);
 		gSurfaceKept[i].busy = false;
 		gSurfaceKept[i].clear = true;
@@ -308,6 +313,15 @@ MiniIOSurface::free(void)
 	OSObject::free();
 	OSAddAtomic64((SInt64) (mach_absolute_time() - began), (SInt64 *) &gSurfaceFreeing);
 	OSIncrementAtomic(&gSurfacesFreed);
+}
+
+void
+MiniIOSurfaceClearCost(uint64_t * bytes, uint64_t * nanoseconds)
+{
+	uint64_t ticks = (uint64_t) OSAddAtomic64(-gSurfaceClearedTime, &gSurfaceClearedTime);
+
+	*bytes = (uint64_t) OSAddAtomic64(-gSurfaceClearedBytes, &gSurfaceClearedBytes);
+	absolutetime_to_nanoseconds(ticks, nanoseconds);
 }
 
 /* How many surfaces were made and freed since this was last asked, and the microseconds each took on average. */

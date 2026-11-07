@@ -176,6 +176,8 @@ MiniIOSurface * MiniIOSurfaceCopy(uint32_t sid);
  * each; how many got memory that was kept from one before.
  */
 void            MiniIOSurfaceCost(uint32_t * made, uint64_t * making, uint32_t * freed, uint64_t * freeing, uint32_t * again);
+/* how much kept memory was cleared since this was last asked, and the nanoseconds it took (MiniIOSurfaceClearKept()) */
+void            MiniIOSurfaceClearCost(uint64_t * bytes, uint64_t * nanoseconds);
 /* Clear the memory that is kept of surfaces that are gone, for the next ones: when the caller has a moment. */
 void            MiniIOSurfaceClearKept(void);
 /* Wait, for so many milliseconds at most, until the GPU is done with a surface's pixels (HKGPU.cpp). */

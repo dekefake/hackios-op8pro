@@ -3626,6 +3626,17 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 		absolutetime_to_nanoseconds(fStatDrawing, &drawing);
 		absolutetime_to_nanoseconds(fStatWaiting, &waiting);
 		absolutetime_to_nanoseconds(fStatBeatWait, &beat);
+		{
+			/* "tl: f": the same, short, for the loader's log -- and what surfaces cost the kernel meanwhile */
+			uint32_t made, freed, again;
+			uint64_t making, freeing, cleared, clearing;
+
+			MiniIOSurfaceCost(&made, &making, &freed, &freeing, &again);
+			MiniIOSurfaceClearCost(&cleared, &clearing);
+			hk_tl("tl: f %u frames in %llu ms, %llu us each here, %u by the GPU; surfaces %u made (%llu us, %u again), %u freed "
+			    "(%llu us); %llu MB cleared in %llu ms\n", fStatFrames, nanos / NSEC_PER_MSEC, drawing / fStatFrames / NSEC_PER_USEC,
+			    fStatPanel, made, making, again, freed, freeing, cleared >> 20, clearing / NSEC_PER_MSEC);
+		}
 		IOLog("MiniIOMobileFramebuffer: %u frames in %llu ms (%llu a second), %llu us each in the driver, after %llu us "
 		    "waiting for the GPU and, %u of them, %llu us for the next refresh; %u swaps waited for the frame before, "
 		    "%u gave up; %u swaps came a refresh late themselves; %u frames scaled by the GPU\n", fStatFrames, nanos / NSEC_PER_MSEC,
