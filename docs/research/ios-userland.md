@@ -118,7 +118,11 @@ All [observed] by disassembling backboardd 20F66 (`otool -tV`; the `objc_msgSend
   0x100046f2c: the keys' CFStrings and two `__objc_intobj` numbers, 0xff00 and 8) and reads kIOHIDEventTypeProximity's detection mask
   (field 0xe0000) at 0x10002cd4c: with detection on, mode 6 takes bit 0x40, other modes 0x40 if any of 0x240; bit 6 of that is
   `_locked_setObjectWithinProximity:` (screen off, touches ignored); with detection off only bit 0x400 is kept.
-- **Ambient light:** CoreBrightness waits for an ALS service (1.5); none is made yet.
+- **Ambient light:** CoreBrightness waits for an ALS service (1.5). Given one (0xff00, 4), `-[CBDisplayContaineriOS addHIDServiceClient:]` asks it
+  for ALSSensorType, Orientation, Placement, crgb, then `setColorMitigations` reaches `-[CBABModuleiOS shouldMitigateHarmony:]` (0x1af03a028), which
+  passes the module's own object (ivar offset at 0x1ddda5140) to a function reading +0x1c8: NULL for this ALS, a crash (2026-11-07). Guarded in inject.c.
+- **The proximity wrapper's condition:** the block at 0x100047134 (given to `initWithMatchingDictionary:instantiateWrapperUsingBlock:`) makes a
+  wrapper only if the service's "Placement" is 1 ("discrete prox service %llX top placement"); else nil, which went into the list as NSNull.
 
 ### 1.6 Frame rate
 `ca_rates=1` lists CA's display classes' rate methods: `idealRefreshRate` was 60, `vblDelta` 16.7 ms. The ideal rate is set by

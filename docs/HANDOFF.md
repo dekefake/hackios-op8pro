@@ -11,8 +11,8 @@ anything that has aged into the right permanent page.
 - **Verified:** Camera.app opens, switches back/front six times and closes with the sensor DSP on (two bugs fixed: mediaserverd's filter
   thumbnails, the camera's io_map leak that panicked the kernel); the front camera's colour tuning; orientation (face up) from the
   accelerometer; `slpi=1` by default (loader 15). Loader 14+ gives the whole returned log and the panic text ("== PANIC LOG ==").
-- **Off by default because they crash backboardd:** `als=1` (CoreBrightness wants ALSSensorType/Orientation/Placement/crgb), `prox=1`
-  (NSNull sensor wrapper). Next: answer those properties / find what the wrapper wants (research/ios-userland.md 1.5a).
+- **Off by default, no longer crashing (RAM images 187, 188):** `als=1` (CoreBrightness's True Tone check guarded; lux arrives; not yet
+  seen following the light) and `prox=1` ("Placement" = 1 for backboardd's sensor controller; SEE has sent no near/far event yet).
 - **Not seen (needs a hand):** the screen turning, tap-to-focus (back camera), proximity. Compass: SEE never registers a mag; the DSP's own
   log (`slpi_dsplog=1`) does not come yet (only the root process got init2; no lines).
 - **After a kernel return:** `fastboot getvar result` then `fastboot get_staged` before anything else (never `xl screenshot`/`oem log` first).

@@ -247,8 +247,8 @@ Rules of thumb: a bare `./xl enter` or a bad arg can hang a phone; **never pass 
 | `slpi_frpc_trace` | 1: log every FastRPC call served. |
 | `slpi_dsplog` | 1: ask the DSP for its own log lines (adspmsgd_adsp1 init2, as Android's adspmsgd); they are logged as `frpc: dsp:`. |
 
-| `als` | 1: an ambient light sensor service in backboardd (auto-brightness; userland `inject.c`). **Crashes backboardd** today: CoreBrightness asks the service for ALSSensorType, Orientation, Placement and crgb and dies on their absence (RAM image 175); off by default. |
-| `prox` | 1: a proximity service in backboardd (userland `inject.c`). **Crashes backboardd** today ("-[NSNull applyUIMode:]": its sensor controller cannot wrap a virtual service, RAM image 176); off by default. |
+| `als` | 1: an ambient light sensor service in backboardd (auto-brightness; userland `inject.c`). Off by default until it is seen to follow the light (RAM image 187: no crash since `shouldMitigateHarmony:` is guarded; the lux arrives). |
+| `prox` | 1: a proximity service in backboardd (userland `inject.c`; "Placement" 1 makes backboardd's sensor controller take it, RAM image 188). Off by default until a near/far is seen: SEE has sent no proximity data event yet. |
 | `orient` | 0: backboardd's device orientation stays CoreMotion's (userland `inject.c`; default: from the accelerometer when there is one). |
 
 Sysctls: `kern.hackios.sensors` (the sensors SEE reported and their last values), `kern.hackios.sensor_values` (the same as a struct, for `inject.c`), `kern.hackios.fastrpc` (listener state, calls served), `kern.hackios.slpi_charger`.
