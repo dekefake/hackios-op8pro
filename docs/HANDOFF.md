@@ -4,7 +4,22 @@ Short, actionable, and dated. It does **not** replace [TODO.md](TODO.md) (roadma
 it says where the work stands *today*. **Update this file after every substantial session** (rules in [../AGENTS.md](../AGENTS.md)); keep it under ~150 lines and move
 anything that has aged into the right permanent page.
 
-**Last updated: 2026-11-07** (section 0a); before that 2026-11-02 (section 0, OnePlus 8 Pro cellular); before that 2026-10-26 ~04:55 MSK by the scheduler session (sections 2, 3, 4, 7 for the scheduler; the rest as the documentation session left it at ~03:30). **Checked state** = what I ran/read on that date; **historical** = taken from earlier session notes and flagged as such.
+**Last updated: 2026-11-07** (sections 0a, 0b); before that 2026-11-02 (section 0, OnePlus 8 Pro cellular); before that 2026-10-26 ~04:55 MSK by the scheduler session (sections 2, 3, 4, 7 for the scheduler; the rest as the documentation session left it at ~03:30). **Checked state** = what I ran/read on that date; **historical** = taken from earlier session notes and flagged as such.
+
+## 0b. OnePlus 8 Pro, 2026-11-07 later: built and committed, NOT yet run (the phone is unreachable)
+
+- **The phone is off the USB bus** since 05:58: after Camera.app ended a RAM run (cause below), its loader stayed on USB answering nothing
+  (an interrupted `get_staged` left it waiting for the host to take an upload); a libusb reset from the Mac then took it off the bus, and
+  the loader waits for a cable change. **It needs a hand: unplug/replug, or Power+VolUp.** Loader 13 (`out/loader-8pro-uefimenu13.efi`)
+  gives such an upload up after 10 s.
+- **Next run, one boot:** `/private/tmp/.../scratchpad/test175.sh` = `KERNEL=data73 LOADER=out/loader-8pro-uefimenu13.efi
+  UEFI_FD=out/uefi-8pro-menu4.fd out/tree/ram.sh 175 slpi=1 slpi_delay=20 slpi_dsplog=1 als=1`, then Camera.app (no kernel return?
+  colours with the new tuning? tap-to-focus), the log for `orientation:`, `proximity:`, `ambient light:`, `frpc: dsp:` (why no mag).
+  If the kernel returns: `fastboot getvar result` and `fastboot get_staged` FIRST; never `xl log`/`oem log` (it throws the kernel log away).
+- **What is in it** (kernel `data73`, userland in `out/tree/r42`): the camera/FastRPC SMMU clash fixed; focus by exposure-time lens position;
+  the 8 Pro's colour tuning (`fw/camera-imx689.isp`, `camera-imx471.isp`, vendor data, untracked); backboardd orientation from the
+  accelerometer, a proximity service, an ALS service (`als=1`); `kern.hackios.sensor_values`; SEE proximity messages 773/774;
+  `slpi_dsplog=1`. Details: subsystems/input-peripherals.md, research/ios-userland.md 1.5a, TODO T07/T47 (AirDrop assessment there).
 
 ## 0a. OnePlus 8 Pro, 2026-11-06/07: Metal for the whole system, GPS fields, the sensor DSP started on
 
