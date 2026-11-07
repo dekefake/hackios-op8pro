@@ -21,7 +21,7 @@ export PATH=/ws/xnu-deps/host/bin:$PATH
 DYN="xnu-clang -arch arm64 -isysroot /opt/theos/sdks/iPhoneOS16.5.sdk -O1"
 for t in "$@"; do
 	case $t in
-	media) $DYN -O2 -dynamiclib -install_name /hackios/lib/libhackios-media.dylib -framework CoreFoundation -framework CoreMedia -framework CoreVideo -framework IOSurface -lobjc -o obj/libhackios-media.dylib src/inject_media.c src/camera_device.c src/camera_isp.c ;;
+	media) $DYN -O2 -dynamiclib -install_name /hackios/lib/libhackios-media.dylib -framework CoreFoundation -framework CoreMedia -framework CoreVideo -framework IOSurface -framework Metal -framework Foundation -lobjc -o obj/libhackios-media.dylib src/inject_media.c src/camera_device.c src/camera_isp.c src/camera_gpu.m ;;
 	inject) $DYN -dynamiclib -install_name /hackios/lib/libhackios.dylib -framework CoreFoundation -framework IOKit -lobjc -o obj/libhackios.dylib src/inject.c ;;
 	sb) $DYN -dynamiclib -install_name /hackios/lib/libhackios-sb.dylib -framework CoreFoundation -framework CoreGraphics -framework IOKit -lobjc -o obj/libhackios-sb.dylib src/inject_sb.c ;;
 	gl) M=/ws/xnu-deps/build/mesa/out; python3 mkeagl.py src/eagl_slots.txt $M/gl.xml $M/exported-gl.txt src/eagl.c > obj/eagl_gen.h; $DYN -dynamiclib -install_name /hackios/lib/libhackios-gl.dylib -Iobj -framework CoreFoundation -framework IOKit -framework IOSurface -lobjc $M/libOSMesa.8.dylib -o obj/libhackios-gl.dylib src/eagl.c src/gl_osmesa.c; rm -f obj/eagl_gen.h ;;
