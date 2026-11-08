@@ -42,6 +42,7 @@ for t in "$@"; do
 	objcdump) $DYN -O2 -lobjc -o obj/hk_objcdump src/hk_objcdump.c ;;
 	logcfg) $DYN -O2 -o obj/hk_logcfg src/hk_logcfg.c ;;
 	buddy) $DYN -O2 -framework CoreFoundation -o obj/hk_buddy src/hk_buddy.c ;;
+	prefs) $DYN -O2 -framework CoreFoundation -o obj/hk_prefs src/hk_prefs.c ;;
 	wifijoin) $DYN -O2 -framework CoreFoundation -o obj/hk_wifijoin src/hk_wifijoin.c ;;
 	camera_test) $DYN -O2 -o obj/camera_test src/camera_test.c src/camera_isp.c ;;
 	camera_avtest) $DYN -fobjc-arc -framework Foundation -framework AVFoundation -o obj/camera_avtest src/camera_avtest.m ;;

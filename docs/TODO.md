@@ -267,6 +267,24 @@ README lists video and Live Photo recording as not working (redwood). No encoder
   enough. Next: make MPS take the device (what GetMPSDevice reads off it), or find which node of the video graph needs
   Espresso/MPS and whether it can be done without (the photo graph runs without them).
 
+- **2026-11-08 night (RAM images 273-307):** Metal now carries MetalPerformanceShaders and Espresso in mediaserverd
+  (`mediamtl=1`): protocol conformance of queue/buffer/encoders, `-[HKMetalHeap protectionOptions]`, texture views
+  (`rwa_texture_view`), dispatch-sized threadgroup memory (`rwa_dispatch_threadgroup`), depth stores dropped for
+  colour+depth shaders, loop-carried/stack-array pointers, run-time texture choice, calls with offset pointers, many
+  intrinsics (is_uniform, simdgroup.barrier, llvm.smax.., sinpi/cospi, bitcasts), bicubic samplers as linear, R16Float &c.
+  over IOSurfaces, smaller-than-surface textures. Person segmentation, VideoStabilizationV2, GNR and DisparityV3 all
+  initialise with no FigSignalErrorAt left (`media_oslog=1` traces them with caller addresses). `m2scaler.c` now patches
+  IOSurfaceAccelerator.framework's own copies too (IOSurface.framework exports the same seven; `m2scaler=one`: old way).
+  `oslog_mirror.c` bounds the capture audio's silence padding (it hung a queue in bzero once: an audio clock gap).
+- **But (verified, images 299-307): no capture session starts at all now, Photo included** -- the first session after
+  boot asks for the back stream and then the front one (`-[BWFigCaptureDeviceVendor _copyStreamsWithPositions:...]`,
+  the iPhone X's Dual Camera source), streams 75 frames and never calls Start; mediaserverd then takes no new session,
+  even after the Camera application is killed and reopened. Not caused by: media_oslog, mediamtl, m2scaler (=0 too),
+  the front stream (`cam_front=0`). Image 266 (00:11, same kernel data92) still had a second, working session. Next:
+  bisect userland (libhackios-media/HKMetal/libhackiosair from commit 90a35e3 and before) and kernel against image
+  266's; `tools`: `hk_prefs` (Camera prefs: `hk_prefs set com.apple.camera mobile CAMUserPreferenceCaptureMode int 0`),
+  `iphont threads PID` (PC/LR per thread; stack reads are refused), the `figimage`/`figerror` lines.
+
 ### T48 Apple ID and App Store sign-in — Accounts · Not Started · P0
 - **The owner (2026-11-08):** signing in with an Apple ID, and to the App Store, does not work properly; a priority. Nothing
   investigated yet in this session; see the existing store work (`userland/src/inject_app.c`, appstored's storefront,
