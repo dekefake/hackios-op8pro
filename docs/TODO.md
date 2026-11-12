@@ -296,6 +296,14 @@ README lists video and Live Photo recording as not working (redwood). No encoder
   Next: the lost/doubled frames, Live Photo, the Dual Camera group (`kFigCaptureDeviceProperty_SupportedSynchronizedStreamsGroups`,
   H10ISP.mediacapture has Apple's), Venus (T49).
 
+- **2026-11-12 evening (kernel data96/97, RAM images 322-361, verified on the phone):** photographs are 4000x3000 sensor frames
+  (IMX689 res1; video in res4 2000x1128, chosen by the stream's format) and go through iOS's own noise reduction (GNR.videoprocessor
+  on Metal: ModuleInfo/SensorID/tuning, Metal texture views, see subsystems/input-peripherals.md); the capture stack keeps the Metal
+  device (the scene classifier's sink no longer blocks the stop); the Photos grid's thumbnails are in true colour; the exposure keeps
+  MinimumFrameRate (video stays at 30 fps in a dim room). Open: SIS/HDR brackets (more than one frame per still request), the scene
+  classifier's MPS pooling kernel (threadgroup memory length 0), Live Photo, the Dual Camera's synchronized streams group, a daylight
+  look at photo quality, and whether the recording's frame rate is a steady 30 now (movie IMG_0089 being measured).
+
 ### T48 Apple ID and App Store sign-in — Accounts · Not Started · P0
 - **The owner (2026-11-08):** signing in with an Apple ID, and to the App Store, does not work properly; a priority. Nothing
   investigated yet in this session; see the existing store work (`userland/src/inject_app.c`, appstored's storefront,

@@ -198,6 +198,26 @@ writes a finished movie (the mdat's size filled in, a moov after it).
   as `AVCaptureDeviceTypeBuiltInTelephotoCamera` (camera_avtest, image 321), so applications can use it. The iPhone X's 2x
   button belongs to its *Back Dual Camera*, which needs a `FigCaptureSynchronizedStreamsGroup` from the device; the device offers none yet.
 
+**Photographs through iOS's own processing, OnePlus 8 Pro, 2026-11-12 (kernel data96/97, RAM images 322-361, verified on the phone):**
+- *Real pixels.* The IMX689 ran its res4 (2000x1128, 4x4 binned, 16:9): a photograph was a 1504x1128 crop scaled up to 4032x3024. The
+  kernel now runs res1 (4000x3000, 30 fps, the 48 MP array binned 2x2) for Photo and res4 for video (the stream's format 1): the stream
+  asks with `HK_CAMERA_SENSOR` b = 1 or 4 and the kernel restarts the sensor (`cam_main=4`: res4 always, as before).
+- *iOS's noise reduction (GNR).* The capture graph's `BWGNRNode` (GNR.videoprocessor, Metal) now processes every photograph. What it
+  needed: the stream's `ModuleInfo` (`sensorID` 0x0343/0x0354/0x0353, so CMCapture finds the iPhone X camera's tuning in
+  `CMCapture.framework/D22/CameraSetup.plist`, and lens/actuator/integrator IDs for its `FocalLengthCharacterization`); frames with
+  `SensorID`, still frames with `BracketedCaptureSequenceNumber`; the white balance gains, `TotalSensorCropRect`, `ExposureBias` and an
+  SNR from the signal; the Metal device in mediaserverd (now the default, `mediamtl=0` hides it); and from the Metal driver: textures
+  of other texel formats over the same IOSurface or YCbCr plane (`-[FigMetalContext rebindTex:...]`), `-iosurface` on a texture, a
+  texture "over a buffer" (memory of its own), integer formats. `photo_gnr=0` goes past GNR as before; `photo_gnr_trace=1` traces it.
+- *Stopping.* With Metal in mediaserverd the scene classifier's sink (`BWSceneClassifierSinkNode`, an Espresso network whose MPS
+  pooling kernel this driver does not dispatch) never went idle and mediaserverd was killed 10 s after Camera.app closed. It is
+  now taken for idle at stop (`scene_classifier=1` leaves it). `media_stopwatch=1` lists a slow stop's sinks and the end of data.
+- *Exposure.* The longest frame is the graph's `MinimumFrameRate`'s: in a dim room a recording ran at 15 fps; now 30 with more gain.
+- *Photos' thumbnails were cyan* (then magenta): the grid's shader samples a two-plane YCbCr texture (Metal format 500) as RGB, which
+  the GPU's YCbCr conversion gives. The driver's copy for it is now converted with BT.601 (`hkmetal.m`). Verified in the grid.
+- Not yet: SIS (multi-frame low light, `photo_sis=1` asks for it; the stream gives one frame per request), the scene classifier,
+  Live Photo, the Dual Camera (2x).
+
 No Live Photo recording. See [../KNOWN_ISSUES.md](../KNOWN_ISSUES.md).
 
 ### Sensors, ambient light, location
