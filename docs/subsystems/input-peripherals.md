@@ -184,9 +184,18 @@ writes a finished movie (the mdat's size filled in, a moov after it).
   set up before: `hk_prefs set com.apple.camera mobile CAMUserPreferenceCaptureEncodingBehavior int 1`. With *High Efficiency* (iOS's default) a
   movie goes to the software HEVC, the graph cannot keep up and does not stop in time, and mediaserverd is killed ("Timed out waiting for the
   capture graph to stop"); the movie is left without a moov. Photos under *Most Compatible* are JPEG.
-- The first Camera session after a boot still shows a black viewfinder (the session asks for the back, telephoto and front streams and never
-  starts the graph); closing Camera and opening it again gives a live viewfinder.
-- The telephoto (S5K3M5, sensor 3) is offered as a third stream, "Back Telephoto Camera" (the iPhone X's `:2` device). The iPhone X's 2x
+- On the phone (image 321) the encoder takes 17.4 ms a 1080p frame (30 fps needs 33) and runs about 12% over the bitrate asked
+  (17.1 Mbit/s for 15.3). A movie of image 319 checked on the Mac: H.264 Constrained Baseline 1920x1080 with AAC, decoded by ffmpeg
+  without an error, but 315 frames in 13.4 s (23.6 a second) and a few repeated time stamps: frames are lost or doubled on the way.
+- Image 319's first Camera session after boot showed a black viewfinder (it asked for the back, telephoto and front streams and never
+  started the graph; closing and reopening Camera cured it). Images 320 and 321 opened live the first time.
+- *Orientation (fixed 2026-11-12, image 321, seen on the phone standing upright):* the viewfinder of both cameras was turned a quarter
+  turn counter-clockwise. The sensors' pictures were right (landscape, as the iPhone's: the vendor's tables flip the IMX689 and IMX471
+  with register 0x0101 = 3, as Android does); the capture graph stands them up for the portrait screen with the M2 scaler's
+  `Transform` option (4: a quarter turn clockwise), which `m2scaler.c` ignored. It now honours it (bits: 1 mirror left-right, 2
+  top-bottom, 4 a quarter turn clockwise after them, as IOSurfaceAccelerator's own check reads them).
+- The telephoto (S5K3M5, sensor 3) is offered as a third stream, "Back Telephoto Camera" (the iPhone X's `:2` device); AVFoundation lists it
+  as `AVCaptureDeviceTypeBuiltInTelephotoCamera` (camera_avtest, image 321), so applications can use it. The iPhone X's 2x
   button belongs to its *Back Dual Camera*, which needs a `FigCaptureSynchronizedStreamsGroup` from the device; the device offers none yet.
 
 No Live Photo recording. See [../KNOWN_ISSUES.md](../KNOWN_ISSUES.md).

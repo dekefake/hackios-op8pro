@@ -290,8 +290,11 @@ README lists video and Live Photo recording as not working (redwood). No encoder
   (`CAMUserPreferenceCaptureEncodingBehavior = 1`, now the new-volume default) the graph opens it for 1920x1080 30 fps at 15.3 Mbit/s
   and the movie gets its moov. *High Efficiency* still goes to the software HEVC and kills mediaserverd at the stop. The black first
   session after boot is still there (a second opening works). Telephoto: a third stream (S5K3M5) iOS opens as "Back Telephoto
-  Camera"; the Dual Camera (Camera's 2x) needs a synchronized streams group. Next: playback check and speed on the phone (the
-  encoder logs ms a frame every 300 frames), Live Photo, the Dual Camera group, the first-session black, Venus (T49).
+  Camera"; the Dual Camera (Camera's 2x) needs a synchronized streams group. Later the same day (images 320-321): the movie plays
+  (ffmpeg, no error) but has 23.6 frames a second for 30 and repeated time stamps; the encoder takes 17.4 ms a 1080p frame on the
+  phone; the viewfinder's quarter turn is fixed (`m2scaler.c` honours `Transform`); the telephoto is listed to applications.
+  Next: the lost/doubled frames, Live Photo, the Dual Camera group (`kFigCaptureDeviceProperty_SupportedSynchronizedStreamsGroups`,
+  H10ISP.mediacapture has Apple's), Venus (T49).
 
 ### T48 Apple ID and App Store sign-in — Accounts · Not Started · P0
 - **The owner (2026-11-08):** signing in with an Apple ID, and to the App Store, does not work properly; a priority. Nothing
