@@ -44,7 +44,7 @@ Order inside each section is by priority. Update an item when you change its sta
 | T22 | CoreAnimation fidelity gaps (sb3, poster switcher, CC glyph opacity, switcher wallpaper) | Partial | P2 |
 | T23 | Display: late swaps, cold-start jank | Partial | P2 |
 | T24 | Speaker protection (TFADSP) and other microphones | Partial | P2 |
-| T25 | Video and Live Photo recording; redwood-only camera parity | In Progress (8 Pro: the scaler stood in for, recording starts, no movie saved yet) | P1 |
+| T25 | Video and Live Photo recording; redwood-only camera parity | In Progress (8 Pro: H.264 movies recorded through our software encoder, h264enc.c; no Live Photo) | P1 |
 | T26 | Storage: writable APFS, fsck, HFS write speed | Partial | P2 |
 | T27 | Boot menu usability (5 s countdown, graphics) | Partial | P2 |
 | T28 | Security model: stand-ins protect nothing | Partial | P2 |
@@ -284,6 +284,14 @@ README lists video and Live Photo recording as not working (redwood). No encoder
   bisect userland (libhackios-media/HKMetal/libhackiosair from commit 90a35e3 and before) and kernel against image
   266's; `tools`: `hk_prefs` (Camera prefs: `hk_prefs set com.apple.camera mobile CAMUserPreferenceCaptureMode int 0`),
   `iphont threads PID` (PC/LR per thread; stack reads are refused), the `figimage`/`figerror` lines.
+
+- **2026-11-12 (RAM image 319, verified on the phone): a movie is recorded and finished.** `userland/src/h264enc.c` (our H.264
+  encoder) behind VideoToolbox for `avc1` (`h264_vt.c`, registered in mediaserverd): with Camera on *Most Compatible*
+  (`CAMUserPreferenceCaptureEncodingBehavior = 1`, now the new-volume default) the graph opens it for 1920x1080 30 fps at 15.3 Mbit/s
+  and the movie gets its moov. *High Efficiency* still goes to the software HEVC and kills mediaserverd at the stop. The black first
+  session after boot is still there (a second opening works). Telephoto: a third stream (S5K3M5) iOS opens as "Back Telephoto
+  Camera"; the Dual Camera (Camera's 2x) needs a synchronized streams group. Next: playback check and speed on the phone (the
+  encoder logs ms a frame every 300 frames), Live Photo, the Dual Camera group, the first-session black, Venus (T49).
 
 ### T48 Apple ID and App Store sign-in — Accounts · Not Started · P0
 - **The owner (2026-11-08):** signing in with an Apple ID, and to the App Store, does not work properly; a priority. Nothing

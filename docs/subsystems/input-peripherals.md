@@ -170,7 +170,26 @@ focus, a higher code is further, so iOS position = 1000 - code. Not measured: wh
   vendor data, not in git) in `out/tree/r42/fw/`; `camera_device.c` picks them by sensor on `board=instantnoodle`. The front camera's own file has
   an identity colour matrix (its tuning does colour elsewhere), so only its lens shading and white balance lights change.
 
-Not on the OnePlus 8 (no driver), and no video or Live Photo recording. See [../KNOWN_ISSUES.md](../KNOWN_ISSUES.md).
+**Video recording, OnePlus 8 Pro, 2026-11-12 (RAM image 319, verified on the phone):** VideoToolbox here has no H.264 encoder (the
+iPhone's are its AVE hardware) and only Apple's software HEVC, at 1.4-2.1 frames a second. `userland/src/h264enc.c` is an H.264 encoder of
+ours (Constrained Baseline, CAVLC; I16x16 and P16x16 with integer-pel motion search and P_Skip; one slice per band of macroblock rows, the
+bands on threads; one QP a frame from a bit budget; no deblocking), and `userland/src/h264_vt.c` puts it behind VideoToolbox as an encoder
+for `'avc1'` (`VTRegisterVideoEncoderWithInfo`, a CoreMedia derived object of `VTVideoEncoderGetClassID()`; the encoder class's layout is in
+the file's header), registered in mediaserverd by `inject_media.c` (`h264enc=0`: not registered). On the Mac it decodes without an error in
+ffmpeg and is bit-identical to its own reconstruction (`userland/src/h264enc_test.c`; 1080p at 16 Mbit/s: 37.8 dB, 16.8 ms a frame on 8
+threads). On the phone the capture graph opens it for a 1920x1080 30 fps movie at 15.3 Mbit/s (the bitrate the graph asks for), and Camera
+writes a finished movie (the mdat's size filled in, a moov after it).
+- Camera must ask for H.264: *Settings > Camera > Formats > Most Compatible*, i.e. `CAMUserPreferenceCaptureEncodingBehavior = 1` in
+  `com.apple.camera` (mobile). A new data volume gets it from `userland/var/mobile/Library/Preferences/com.apple.camera.plist`; on a phone
+  set up before: `hk_prefs set com.apple.camera mobile CAMUserPreferenceCaptureEncodingBehavior int 1`. With *High Efficiency* (iOS's default) a
+  movie goes to the software HEVC, the graph cannot keep up and does not stop in time, and mediaserverd is killed ("Timed out waiting for the
+  capture graph to stop"); the movie is left without a moov. Photos under *Most Compatible* are JPEG.
+- The first Camera session after a boot still shows a black viewfinder (the session asks for the back, telephoto and front streams and never
+  starts the graph); closing Camera and opening it again gives a live viewfinder.
+- The telephoto (S5K3M5, sensor 3) is offered as a third stream, "Back Telephoto Camera" (the iPhone X's `:2` device). The iPhone X's 2x
+  button belongs to its *Back Dual Camera*, which needs a `FigCaptureSynchronizedStreamsGroup` from the device; the device offers none yet.
+
+No Live Photo recording. See [../KNOWN_ISSUES.md](../KNOWN_ISSUES.md).
 
 ### Sensors, ambient light, location
 
