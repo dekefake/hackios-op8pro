@@ -41,6 +41,7 @@
 #include <sys/hk_input.h>
 #include <sys/reboot.h>
 #include <sys/systm.h>
+#include <sys/sysctl.h>
 
 
 #define GAUGE_ADDR              0x55
@@ -82,6 +83,10 @@ static volatile int battery_last_percent = -1, battery_last_external = -1;
 #define USBIN_ICL_OPTIONS       0x66
 #define USBIN_ICL_CFG           0x70
 #define DCDC_AICL_ICL_STATUS    0x08
+#define PM8150B_TYPEC           0x215
+#define TYPEC_SNK_STATUS        0x06
+#define SNK_RP_3P0              (1u << 1)
+#define SNK_RP_1P5              (1u << 2)
 #define APSD_CDP                (1u << 2)
 #define APSD_DCP                (1u << 3)
 #define ICL_OVERRIDE            (1u << 0)
@@ -132,17 +137,68 @@ icl_follow(bool plugged)
 		}
 		return;
 	}
-	if (icl.applied || hk_spmi_read(PM8150B_USBIN, USBIN_APSD_RESULT, &apsd, 1) != 0 || !(apsd & (APSD_CDP | APSD_DCP))) {
+	if (icl.applied || hk_spmi_read(PM8150B_USBIN, USBIN_APSD_RESULT, &apsd, 1) != 0) {
 		return;
 	}
-	ma = (apsd & APSD_DCP) ? ICL_DCP_MA : ICL_CDP_MA;
+	/*
+	 * (2026-11-12) And what the port says over Type-C (TYPE_C_SNK_STATUS 0x1506: Rp 3.0 A bit 1, 1.5 A bit 2): a USB-C
+	 * computer's port or charger advertises 3 A there whatever its BC1.2 kind (a Mac's: CDP and 3 A, image 370). The larger
+	 * of the two; a port that says neither (SDP, default Rp) is left at the firmware's 500 mA.
+	 */
+	{
+		uint8_t snk = 0;
+		uint32_t rp = 0;
+
+		if (hk_spmi_read(PM8150B_TYPEC, TYPEC_SNK_STATUS, &snk, 1) == 0) {
+			rp = (snk & SNK_RP_3P0) ? 3000 : (snk & SNK_RP_1P5) ? 1500 : 0;
+		}
+		ma = (apsd & APSD_DCP) ? ICL_DCP_MA : (apsd & APSD_CDP) ? ICL_CDP_MA : 0;
+		if (rp > ma) {
+			ma = rp;
+		}
+		if (ma == 0) {
+			return;
+		}
+	}
 	err = icl_write(icl.options | USBIN_MODE_CHG, icl.load | ICL_OVERRIDE_AFTER_APSD, (uint8_t)(ma / ICL_STEP_MA),
 	    icl.override & ~ICL_OVERRIDE);
 	icl.applied = true;
 	delay_for_interval(500, NSEC_PER_MSEC);
 	hk_spmi_read(PM8150B_DCDC, DCDC_AICL_ICL_STATUS, &now, 1);
 	printf("battery: a %s: the charger's input limit to %u mA (high-current mode)%s; %u mA after AICL\n",
-	    (apsd & APSD_DCP) ? "charger (DCP)" : "charging port (CDP)", ma, err ? ": NOT ALL WRITTEN" : "", now * ICL_STEP_MA);
+	    (apsd & APSD_DCP) ? "charger (DCP)" : (apsd & APSD_CDP) ? "charging port (CDP)" : "port with Type-C current", ma,
+	    err ? ": NOT ALL WRITTEN" : "", now * ICL_STEP_MA);
+}
+
+/*
+ * (2026-11-12) Charging itself. The boot chain leaves the PM8150B's charging command off (CHARGING_ENABLE_CMD 0x1042 bit 0
+ * clear; the charge state then reads 7, "disable"), and nothing turned it on: with the cable in the phone ran from USB and the
+ * battery stayed where it was, all day at 46% (image 370: status1 0x47, chg_en_cmd 0). Android's smb5 votes it on at its start
+ * (qpnp-smb5.c smb5_init_hw: "enable the charging path", smblib_chg_disable_vote_callback writes the bit). It is set here
+ * while a cable is in, read back; the PMIC's own JEITA, float voltage (fv_cfg) and fast-charge current (fcc_cfg) limits stay
+ * as the firmware set them. charge_enable=0: left as it is.
+ */
+#define CHGR_CHARGING_ENABLE_CMD        0x42
+#define CHARGING_ENABLE_CMD_BIT         (1u << 0)
+static uint32_t charge_enable_on = 1;
+
+static void
+charge_enable(bool plugged)
+{
+	uint8_t cmd = 0;
+	static bool said;
+
+	if (!charge_enable_on || !plugged || hk_spmi_read(PM8150B_CHGR, CHGR_CHARGING_ENABLE_CMD, &cmd, 1) != 0 ||
+	    (cmd & CHARGING_ENABLE_CMD_BIT)) {
+		return;
+	}
+	hk_spmi_write(PM8150B_CHGR, CHGR_CHARGING_ENABLE_CMD, cmd | CHARGING_ENABLE_CMD_BIT);
+	cmd = 0;
+	hk_spmi_read(PM8150B_CHGR, CHGR_CHARGING_ENABLE_CMD, &cmd, 1);
+	if (!said || !(cmd & CHARGING_ENABLE_CMD_BIT)) {
+		said = true;
+		printf("battery: charging enabled (CHARGING_ENABLE_CMD reads %#x)\n", cmd);
+	}
 }
 
 /* For the system's sleep (bsd/dev/hk_power.c): the battery low and no charger at the last reading. */
@@ -153,6 +209,17 @@ instantnoodle_battery_low(void)
 {
 	return battery_last_external == 0 && battery_last_percent >= 0 && battery_last_percent <= BATTERY_LOW_PERCENT;
 }
+
+/*
+ * (2026-11-12) The last account, for sysctl kern.hackios.charger_pm8150b (hk_sysctl on the phone): the log's tail is a minute or two
+ * of a busy run, and the account is said only every ten minutes.
+ */
+static char charger_line[512];
+static int battery_stage;               /* how far the thread has come: 1 started, 2 gauge asked, 3 in its loop (+ ticks * 10) */
+SYSCTL_DECL(_kern_hackios);
+SYSCTL_INT(_kern_hackios, OID_AUTO, battery_stage, CTLFLAG_RD | CTLFLAG_LOCKED, &battery_stage, 0, "the OnePlus gauge thread's progress");
+SYSCTL_STRING(_kern_hackios, OID_AUTO, charger_pm8150b, CTLFLAG_RD | CTLFLAG_LOCKED, charger_line, sizeof(charger_line),
+    "the PM8150B charger's registers, the last reading");
 
 /* The charger's own account (reads only): a line */
 static void
@@ -170,8 +237,13 @@ charger_say(void)
 		{ PM8150B_DCDC, 0x06, "icl_max" }, { PM8150B_DCDC, 0x07, "icl_status" }, { PM8150B_DCDC, 0x08, "aicl_icl" },
 		{ PM8150B_DCDC, 0x0a, "aicl" },
 		{ PM8150B_DCDC, 0x0b, "power_path" }, { PM8150B_MISC, 0x51, "wd_cfg" },
+		/* (2026-11-12) the Type-C port (TYPEC 0x1500, smb5-reg.h): what the source advertises (SNK_STATUS: 3A bit 1, 1.5A
+		 * bit 2, default bit 3) and the port's state; USBIN's interrupt status; the charger's enable bits */
+		{ 0x215, 0x06, "typec_snk" }, { 0x215, 0x07, "typec_snk_dbg" }, { 0x215, 0x0b, "typec_misc" },
+		{ PM8150B_USBIN, 0x10, "usbin_rt" }, { PM8150B_CHGR, 0x08, "status3" }, { PM8150B_CHGR, 0x0e, "chgr_rt" },
+		{ PM8150B_CHGR, 0x60, "chgr_cfg" }, { PM8150B_CHGR, 0x52, "pre_cfg" }, { PM8150B_MISC, 0x40, "misc_cmd" },
 	};
-	char line[400];
+	char line[512];
 	size_t n = 0;
 
 	n += snprintf(line + n, sizeof(line) - n, "battery: charger");
@@ -185,6 +257,7 @@ charger_say(void)
 		}
 	}
 	printf("%s\n", line);
+	strlcpy(charger_line, line, sizeof(charger_line));
 }
 
 /* An empty battery, three readings in a row with no charger: the system shut down in order. */
@@ -339,6 +412,7 @@ battery_thread(__unused void *parameter, __unused wait_result_t result)
 	int type, flags;
 	uint8_t chgr;
 
+	battery_stage = 1;
 	printf("battery: bq27541 at %#x on %s (gpio%u/%u): pins cfg %#x %#x\n", GAUGE_ADDR, bus.name, bus.sda.pin,
 	    bus.scl.pin, instantnoodle_gpio_cfg(bus.sda), instantnoodle_gpio_cfg(bus.scl));
 	instantnoodle_i2c_recover(&bus);
@@ -362,17 +436,20 @@ battery_thread(__unused void *parameter, __unused wait_result_t result)
 	}
 	printf("battery: the gauge says device type %#x: %s register map\n", type, map.name);
 	gauge_ready = type >= 0;
+	battery_stage = 2;
 	if (gauge_ready) {
 		hk_power_bench_start();
 	}
 
 	for (unsigned tick = 0;; tick++) {
+		battery_stage = 3 + 10 * (int)tick;
 		if (sample(&b, &flags, &chgr)) {
 			failed = 0;
 			hk_battery_report(&b);
 			empty_check(&b);
 			icl_follow(b.external);
-			if (tick % 120 == 0 || b.external != said_external) {
+			charge_enable(b.external);
+			if (tick % 120 == 0 || b.external != said_external || (b.external && tick % 12 == 0)) {
 				said_external = b.external;     /* (every ten minutes, and when the cable goes in or out) */
 				charger_say();
 			}
@@ -405,6 +482,7 @@ instantnoodle_battery_init(void)
 	PE_parse_boot_argn("battery_shutdown", &shutdown_on, sizeof(shutdown_on));
 	PE_parse_boot_argn("battery_empty_mv", &empty_mv, sizeof(empty_mv));  /* (a test: above the cell's voltage, unplugged) */
 	PE_parse_boot_argn("charge_icl", &icl_on, sizeof(icl_on));
+	PE_parse_boot_argn("charge_enable", &charge_enable_on, sizeof(charge_enable_on));
 	if (!enabled) {
 		return;
 	}
