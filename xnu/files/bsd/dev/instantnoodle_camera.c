@@ -1332,7 +1332,7 @@ fp_sensor_table(const char *name)
 	return true;
 }
 
-static volatile uint32_t *fp_phy, *fp_phy0, *fp_phy3, *fp_refgen;   /* fp_phy: the CSIPHY of the sensor that runs (0 the main, 3 the front) */
+static volatile uint32_t *fp_phy, *fp_phy0, *fp_phy2, *fp_phy3, *fp_refgen;   /* fp_phy: the CSIPHY of the sensor that runs (0 the main, 3 the front) */
 static bool fp_refgen_set, fp_ldoa9;
 static inline void pwr(uint32_t offset, uint32_t value) { fp_phy[offset / 4] = value; }
 
@@ -1447,7 +1447,7 @@ fp_csiphy_up_dphy(uint32_t settle)
 	}
 	pwr(0x828, 1);
 	pwr(0x828, 0);
-	say("camera: CSIPHY 3 configured: four D-PHY lanes, settle count %u\n", settle);
+	say("camera: CSIPHY %u configured: four D-PHY lanes, settle count %u\n", fp_phy == fp_phy2 ? 2u : 3u, settle);
 }
 
 static void
@@ -1852,6 +1852,12 @@ down:
 struct fpd_mode { uint32_t width, height, stride, frame, line_ns, fl_min, fl_default, bayer, sensor; const char *name; };
 #define FPD_MODE_MAIN   { 2000, 1128, 2512, 2512 * 1128, 3517, 1184, 8000, 3, 1, "IMX689 (iOS)" }      /* 3872 clocks of the sensor's 1100.8 MHz */
 #define FPD_MODE_FRONT  { 2328, 1748, 2912, 2912 * 1748, 12372, 2685, 2685, 3, 2, "IMX471 (iOS)" }
+/*
+ * (2026-11-12) The telephoto S5K3M5 (slot 3, CSIPHY 2, CCI1 master 0): its module's res3, 2104 x 1560 (2 x 2 binned), four D-PHY lanes at
+ * 578.568 Mpixel/s (1.45 Gbit/s a lane), a line of 4848 clocks, 1656 lines for 60 fps -- 10059 ns a line; streamed at 30 fps (3312 lines).
+ * Its Bayer order is GRBG (Samsung's readout; checked by eye on the first frames). Gain is the SMIA code, 32 a unit (fpd_gain_code).
+ */
+#define FPD_MODE_TELE   { 2104, 1560, 2640, 2640 * 1560, 10059, 1656, 3312, 1, 3, "S5K3M5 (iOS)" }
 static struct fpd_mode fpd_m = FPD_MODE_MAIN;
 #define FPD_WIDTH       (fpd_m.width)
 #define FPD_HEIGHT      (fpd_m.height)
@@ -1875,14 +1881,22 @@ static vm_size_t fpd_place;
 static bool fpd_wanted, fpd_broken, fpd_streaming, fpd_up_now, fpd_made;
 static vm_offset_t fpd_keep;
 static uint64_t fpd_sequence, fpd_given, fpd_last_read_ms;
-static uint32_t fpd_sensor_index = 1;   /* the camera iOS asked for last (HK_CAMERA_SENSOR): 1 the main one, 2 the front one */
-static uint32_t fpd_cur;                /* the camera that is powered (fpd_up_now): 1 or 2 */
+static uint32_t fpd_sensor_index = 1;   /* the camera iOS asked for last (HK_CAMERA_SENSOR): 1 the main one, 2 the front one, 3 the telephoto */
+static uint32_t fpd_cur;                /* the camera that is powered (fpd_up_now): 1, 2 or 3 */
+static bool fpd_tele_failed;            /* the S5K3M5 did not come up: its place is the main sensor's frames (as the front's) */
 static bool fpd_switch, fpd_front_failed;   /* fpd_switch: the stream stops for the other sensor; fpd_front_failed: the IMX471 did not come up, its place is the main sensor's frames */
 static uint64_t fpd_auto_until;         /* cam_auto: the run's own request (see fpd_thread) */
 static uint64_t fpd_again_at;           /* cam_auto_again=1: after the first stream, the kernel asks again from the standby (the resume path) */
 static uint32_t fpd_rx_cfg0 = 0x01002102;   /* CSID RX_CFG0: the main sensor's three C-PHY trios on CSIPHY 0 */
 static uint32_t fpd_lines = 1120, fpd_gain = FPD_GAIN_UNITY, fpd_fl = FPD_FL_DEFAULT;
 static struct { uint32_t lines, gain, frame_lines; bool pending; } fpd_ask;
+
+/* the sensor that serves camera `index`: a front or telephoto that did not come up is served by the main one */
+static uint32_t
+fpd_serving(uint32_t index)
+{
+	return index == 2 && !fpd_front_failed ? 2u : index == 3 && !fpd_tele_failed ? 3u : 1u;
+}
 
 static uint64_t
 fpd_ms(void)
@@ -1897,6 +1911,9 @@ static uint32_t
 fpd_gain_code(uint32_t gain)
 {
 	gain = gain < FPD_GAIN_UNITY ? FPD_GAIN_UNITY : gain > FPD_GAIN_MAX ? FPD_GAIN_MAX : gain;
+	if (fpd_m.sensor == 3) {
+		return gain / 8;        /* Samsung's SMIA analogue gain: 0x20 a unit, 16x at 0x200 (FPD_GAIN_MAX) */
+	}
 	return 1024 - 1024 * FPD_GAIN_UNITY / gain;
 }
 
@@ -2069,7 +2086,7 @@ fpd_phy_clocks(unsigned phy)
 	fp_rcgs[5].cmd = 0x6000 + 0x20 * phy;
 	fp_branches[10].cbcr = 0x601c + 0x20 * phy;
 	fp_branches[11].cbcr = 0x6018 + 0x20 * phy;
-	fp_phy = phy == 3 ? fp_phy3 : fp_phy0;
+	fp_phy = phy == 3 ? fp_phy3 : phy == 2 ? fp_phy2 : fp_phy0;
 }
 
 static uint32_t fpd_settle_now = 0x22;                  /* the settle count the running stream's PHY got */
@@ -2083,11 +2100,11 @@ fpd_settle(void)
 	return v;
 }
 
-/* the sensor's PHY: the main one's three C-PHY trios or the front one's four D-PHY lanes */
+/* the sensor's PHY: the main one's three C-PHY trios or the front's or the telephoto's four D-PHY lanes */
 static void
 fpd_phy_up(uint32_t settle)
 {
-	if (fpd_cur == 2) {
+	if (fpd_cur != 1) {
 		fp_csiphy_up_dphy(settle);
 	} else {
 		fp_csiphy_up(settle);
@@ -2148,46 +2165,53 @@ fpd_front_sweep(uint32_t first, bool all)
 static bool
 fpd_up(unsigned which)
 {
-	const bool front = which == 2;
-	const struct fpd_mode mode = front ? (struct fpd_mode)FPD_MODE_FRONT : (struct fpd_mode)FPD_MODE_MAIN;
+	const bool front = which == 2, tele = which == 3;
+	const struct fpd_mode mode = front ? (struct fpd_mode)FPD_MODE_FRONT : tele ? (struct fpd_mode)FPD_MODE_TELE :
+	    (struct fpd_mode)FPD_MODE_MAIN;
+	const char *name = front ? "IMX471" : tele ? "S5K3M5" : "IMX689";
 	uint32_t settle = 0x22;
 
 	(void)PE_parse_boot_argn("cam_settle", &settle, sizeof(settle));
 	if (front) {
 		settle = fpd_settle();
+	} else if (tele) {
+		/* the HS-settle window of a 1.45 Gbit/s lane is 89..152 ns: 0x24 counts of the 300 MHz timer, in its middle (cam_tsettle) */
+		settle = 0x24;
+		(void)PE_parse_boot_argn("cam_tsettle", &settle, sizeof(settle));
 	}
 	if (!gcc) {
 		gcc = (volatile uint32_t *)ml_io_map(GCC_PHYS, GCC_SIZE);
 	}
 	lck_mtx_lock(&fpd_lock);
 	fpd_m = mode;
-	fpd_rx_cfg0 = front ? 0x00332103 : 0x01002102;   /* front: 4 lanes | lane assignment 0x3210 << 4 | PHY 3 << 20 | D-PHY; main: 3 trios, 0x210, PHY 0, C-PHY */
-	fpd_lines = front ? 1500 : 1120;
+	fpd_rx_cfg0 = front ? 0x00332103 : tele ? 0x00232103 : 0x01002102;   /* front: 4 lanes | lane assignment 0x3210 << 4 | PHY 3 << 20 | D-PHY; tele: the same on PHY 2; main: 3 trios, 0x210, PHY 0, C-PHY */
+	fpd_lines = front ? 1500 : tele ? 1600 : 1120;
 	fpd_gain = FPD_GAIN_UNITY;
 	fpd_fl = mode.fl_default;
 	fpd_ask.pending = false;
 	lck_mtx_unlock(&fpd_lock);
 	fpd_cur = which;
-	sensor = &sensors[front ? 2 : 0];
+	sensor = &sensors[front ? 2 : tele ? 3 : 0];
 	if (!power_up()) {
 		return false;
 	}
 	fpd_up_now = true;
-	if (front) {
+	if (front || tele) {
 		if (!fpd_read_id_quick()) {
 			return false;
 		}
 	} else {
 		read_id();
 	}
-	if (!fp_tab_load(front ? "camera-imx471.tab" : "camera-imx689.tab")) {
+	if (!fp_tab_load(front ? "camera-imx471.tab" : tele ? "camera-s5k3m5.tab" : "camera-imx689.tab")) {
 		return false;
 	}
 	if (!fp_phy0) {
 		fp_phy0 = (volatile uint32_t *)ml_io_map(0x0ac6a000UL, 0x2000);
+		fp_phy2 = (volatile uint32_t *)ml_io_map(0x0ac6e000UL, 0x2000);   /* (kona: CSIPHY n at 0x0ac6a000 + 0x2000 n) */
 		fp_phy3 = (volatile uint32_t *)ml_io_map(0x0ac70000UL, 0x2000);
 	}
-	fpd_phy_clocks(front ? 3 : 0);
+	fpd_phy_clocks(front ? 3 : tele ? 2 : 0);
 	fpd_mx = instantnoodle_rail_level("mx.lvl", 192);
 	fp_ldoa9 = instantnoodle_supply("ldoa9", 1200, true);
 	if (!fp_refgen) {
@@ -2204,7 +2228,7 @@ fpd_up(unsigned which)
 		lite_regs = (volatile uint32_t *)ml_io_map(LITE_PHYS, 0x4000);
 		smmu_regs = (volatile uint32_t *)ml_io_map(SMMU_PHYS, 0x4000);
 	}
-	if (!fp_sensor_table("init") || !fp_sensor_table(front ? "res1" : "res4")) {
+	if (!fp_sensor_table("init") || !fp_sensor_table(front ? "res1" : tele ? "res3" : "res4")) {
 		return false;
 	}
 	fpd_exposure(fpd_lines, fpd_gain, fpd_fl);
@@ -2228,10 +2252,10 @@ fpd_up(unsigned which)
 		return false;
 	}
 	fpd_streaming_hw = true;
-	if (!front) {
+	if (!front && !tele) {
 		instantnoodle_lens_init(&bus);           /* the main camera's lens motor (instantnoodle_lens.c; cam_focus=N and cam_lensscan=1 are its) */
 	}
-	say("camera: /dev/hk-camera: the %s is streaming into slot 0\n", front ? "IMX471" : "IMX689");
+	say("camera: /dev/hk-camera: the %s is streaming into slot 0\n", name);
 	return true;
 }
 
@@ -2249,7 +2273,7 @@ fpd_resume(void)
 		return false;
 	}
 	fpd_streaming_hw = true;
-	say("camera: /dev/hk-camera: the %s is streaming again (from the standby)\n", fpd_cur == 2 ? "IMX471" : "IMX689");
+	say("camera: /dev/hk-camera: the %s is streaming again (from the standby)\n", fpd_cur == 2 ? "IMX471" : fpd_cur == 3 ? "S5K3M5" : "IMX689");
 	return true;
 }
 
@@ -2317,10 +2341,21 @@ instantnoodlep_camera_quiesce(void)
 	if (!fpd_up_now || lite_regs == NULL) {
 		return;
 	}
+	/*
+	 * (2026-11-12) The sensor stops sending first and the IFE's last write is let finish before its SMMU context goes: the
+	 * phone went to CrashDump when a run was ended (iphont stop) with the telephoto streaming into iOS (cam_lock=1), the
+	 * context switched off right behind the write master. One frame (40 ms) is the longest a write can be in flight.
+	 */
+	if (fpd_streaming_hw && fp_tab_head != NULL) {
+		static const uint8_t off[3] = { 0x01, 0x00, 0x00 };     /* MIPI's mode_select 0x0100 = 0: software standby */
+
+		(void)instantnoodle_i2c_write(&bus, (uint8_t)(fp_tab_head->slave >> 1), off, 3);
+	}
 	lwr(0x1c00, 0);
 	lwr(0x20, 1);
 	lwr(CS(0x200), 0);
 	lwr(CS(0x100), 0);
+	IODelay(40000);
 	if (fp_phy != NULL) {
 		fp_csiphy_down();
 	}
@@ -2409,9 +2444,13 @@ fpd_stream(void)
 		if (fpd_ms() - last_frame_ms > 1500) {
 			say("camera: /dev/hk-camera: no frame for 1.5 s (csid rx irq %#x rdi %#x, ife bus irq %#x): the camera is switched off\n", lrd(CS(0x20)),
 			    lrd(CS(0x30)), lrd(0x1a28));
-			if (fpd_cur == 2) {
-				/* the front sensor streams nothing: the main sensor's frames serve its place from now on */
-				fpd_front_failed = true;
+			if (fpd_cur == 2 || fpd_cur == 3) {
+				/* the front or telephoto sensor streams nothing: the main sensor's frames serve its place from now on */
+				if (fpd_cur == 2) {
+					fpd_front_failed = true;
+				} else {
+					fpd_tele_failed = true;
+				}
 				fpd_switch = true;
 			} else {
 				fpd_broken = true;
@@ -2474,11 +2513,11 @@ static void
 fpd_thread(__unused void *parameter, __unused wait_result_t result)
 {
 	{
-		/* cam_auto=N (1 main, 2 front), cam_after=S: the camera is asked for by the kernel itself S seconds after the boot (a run without iOS's reads);
+		/* cam_auto=N (1 main, 2 front, 3 telephoto), cam_after=S: the camera is asked for by the kernel itself S seconds after the boot (a run without iOS's reads);
 		 * it streams cam_auto_secs (default 8) and leaves its last frame for the host (xl camera) */
 		uint32_t which = 0, after = 25;
 
-		if (PE_parse_boot_argn("cam_auto", &which, sizeof(which)) && (which == 1 || which == 2)) {
+		if (PE_parse_boot_argn("cam_auto", &which, sizeof(which)) && (which == 1 || which == 2 || which == 3)) {
 			uint32_t secs = 8;
 
 			uint32_t again = 0;
@@ -2488,7 +2527,7 @@ fpd_thread(__unused void *parameter, __unused wait_result_t result)
 			(void)PE_parse_boot_argn("cam_after", &after, sizeof(after));
 			(void)PE_parse_boot_argn("cam_auto_secs", &secs, sizeof(secs));
 			IOSleep(after * 1000);
-			say("camera: cam_auto=%u: the kernel asks for the %s camera now (streams %u s after it is up)\n", which, which == 2 ? "front" : "main", secs);
+			say("camera: cam_auto=%u: the kernel asks for the %s camera now (streams %u s after it is up)\n", which, which == 2 ? "front" : which == 3 ? "telephoto" : "main", secs);
 			lck_mtx_lock(&fpd_lock);
 			fpd_sensor_index = which;
 			fpd_wanted = true;
@@ -2508,19 +2547,24 @@ fpd_thread(__unused void *parameter, __unused wait_result_t result)
 		}
 		fpd_last_read_ms = fpd_ms();
 		fpd_switch = false;
-		want = fpd_sensor_index == 2 && !fpd_front_failed ? 2 : 1;
+		want = fpd_serving(fpd_sensor_index);
 		lck_mtx_unlock(&fpd_lock);
 		if (fpd_up_now && fpd_cur != want) {
-			say("camera: /dev/hk-camera: the camera changes: everything down, then the %s\n", want == 2 ? "IMX471 (front)" : "IMX689 (main)");
+			say("camera: /dev/hk-camera: the camera changes: everything down, then the %s\n", want == 2 ? "IMX471 (front)" :
+			    want == 3 ? "S5K3M5 (telephoto)" : "IMX689 (main)");
 			fpd_down();
 		}
 		ok = fpd_up_now ? fpd_resume() : fpd_up(want);
-		if (!ok && want == 2) {
-			/* the front sensor does not come up: its place is served with the main sensor's frames, as before it had a driver, so that the app does not wait for ever */
-			say("camera: /dev/hk-camera: the front camera did not come up: the main sensor's frames serve its place\n");
+		if (!ok && (want == 2 || want == 3)) {
+			/* the front or telephoto sensor does not come up: its place is served with the main sensor's frames, so that the app does not wait for ever */
+			say("camera: /dev/hk-camera: the %s camera did not come up: the main sensor's frames serve its place\n", want == 2 ? "front" : "telephoto");
 			fpd_stop_stream();
 			fpd_down();
-			fpd_front_failed = true;
+			if (want == 2) {
+				fpd_front_failed = true;
+			} else {
+				fpd_tele_failed = true;
+			}
 			ok = fpd_up(1);
 		}
 		if (ok) {
@@ -2698,7 +2742,7 @@ fpd_write(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 		return 0;
 	}
 	if (c.command == HK_CAMERA_SENSOR) {
-		if (c.a != 1 && c.a != 2) {
+		if (c.a != 1 && c.a != 2 && c.a != 3) {
 			return EINVAL;
 		}
 		{
@@ -2713,7 +2757,7 @@ fpd_write(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 		lck_mtx_lock(&fpd_lock);
 		if (fpd_sensor_index != c.a) {
 			fpd_sensor_index = c.a;
-			fpd_switch = fpd_up_now && fpd_cur != (c.a == 2 && !fpd_front_failed ? 2u : 1u);
+			fpd_switch = fpd_up_now && fpd_cur != fpd_serving(c.a);
 		}
 		lck_mtx_unlock(&fpd_lock);
 		wakeup(&fpd_sequence);
@@ -2736,9 +2780,9 @@ fpd_init(void)
 	int major;
 
 	{
-		static const struct fpd_mode main_mode = FPD_MODE_MAIN, front_mode = FPD_MODE_FRONT;
+		static const struct fpd_mode main_mode = FPD_MODE_MAIN, front_mode = FPD_MODE_FRONT, tele_mode = FPD_MODE_TELE;
 
-		fpd_place = round_page(MAX(main_mode.frame, front_mode.frame));           /* (a slot holds either sensor's frame) */
+		fpd_place = round_page(MAX(MAX(main_mode.frame, front_mode.frame), tele_mode.frame));   /* (a slot holds any sensor's frame) */
 	}
 	if (kmem_alloc_contig(kernel_map, &fpd_ring, fpd_place * FPD_RING, PAGE_MASK, 0, 0, KMA_KOBJECT | KMA_ZERO | KMA_DATA,
 	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
