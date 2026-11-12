@@ -1850,7 +1850,14 @@ down:
  * the main camera's code keeps its text; fpd_m changes only with the sensor, under fpd_lock, with every slot empty.
  */
 struct fpd_mode { uint32_t width, height, stride, frame, line_ns, fl_min, fl_default, bayer, sensor; const char *name; };
-#define FPD_MODE_MAIN   { 2000, 1128, 2512, 2512 * 1128, 3517, 1184, 8000, 3, 1, "IMX689 (iOS)" }      /* 3872 clocks of the sensor's 1100.8 MHz */
+/*
+ * The main camera (2026-11-12): the module's res1, 4000 x 3000 (the 48 MP quad array binned 2 x 2, the full field of view), 3 C-PHY trios,
+ * a line of 11856 clocks of the sensor's 1100.8 MHz = 10770 ns, 3094 lines for 30 fps. Until then it was res4, 2000 x 1128 (4 x 4 binned and
+ * cropped to 16:9, up to 240 fps): a photograph was a 1504 x 1128 crop blown up to 4032 x 3024, and a room's light needed 16x gain and
+ * more. cam_main=4 is the old mode (FPD_MODE_MAIN4).
+ */
+#define FPD_MODE_MAIN   { 4000, 3000, 5008, 5008 * 3000, 10770, 3094, 3094, 3, 1, "IMX689 (iOS)" }
+#define FPD_MODE_MAIN4  { 2000, 1128, 2512, 2512 * 1128, 3517, 1184, 8000, 3, 1, "IMX689 (iOS)" }      /* 3872 clocks of the sensor's 1100.8 MHz */
 #define FPD_MODE_FRONT  { 2328, 1748, 2912, 2912 * 1748, 12372, 2685, 2685, 3, 2, "IMX471 (iOS)" }
 /*
  * (2026-11-12) The telephoto S5K3M5 (slot 3, CSIPHY 2, CCI1 master 0): its module's res3, 2104 x 1560 (2 x 2 binned), four D-PHY lanes at
@@ -2166,8 +2173,12 @@ static bool
 fpd_up(unsigned which)
 {
 	const bool front = which == 2, tele = which == 3;
+	uint32_t main_res = 1;
+
+	(void)PE_parse_boot_argn("cam_main", &main_res, sizeof(main_res));
+	const bool main4 = main_res == 4;
 	const struct fpd_mode mode = front ? (struct fpd_mode)FPD_MODE_FRONT : tele ? (struct fpd_mode)FPD_MODE_TELE :
-	    (struct fpd_mode)FPD_MODE_MAIN;
+	    main4 ? (struct fpd_mode)FPD_MODE_MAIN4 : (struct fpd_mode)FPD_MODE_MAIN;
 	const char *name = front ? "IMX471" : tele ? "S5K3M5" : "IMX689";
 	uint32_t settle = 0x22;
 
@@ -2185,7 +2196,7 @@ fpd_up(unsigned which)
 	lck_mtx_lock(&fpd_lock);
 	fpd_m = mode;
 	fpd_rx_cfg0 = front ? 0x00332103 : tele ? 0x00232103 : 0x01002102;   /* front: 4 lanes | lane assignment 0x3210 << 4 | PHY 3 << 20 | D-PHY; tele: the same on PHY 2; main: 3 trios, 0x210, PHY 0, C-PHY */
-	fpd_lines = front ? 1500 : tele ? 1600 : 1120;
+	fpd_lines = front ? 1500 : tele ? 1600 : main4 ? 1120 : 1500;
 	fpd_gain = FPD_GAIN_UNITY;
 	fpd_fl = mode.fl_default;
 	fpd_ask.pending = false;
@@ -2228,7 +2239,7 @@ fpd_up(unsigned which)
 		lite_regs = (volatile uint32_t *)ml_io_map(LITE_PHYS, 0x4000);
 		smmu_regs = (volatile uint32_t *)ml_io_map(SMMU_PHYS, 0x4000);
 	}
-	if (!fp_sensor_table("init") || !fp_sensor_table(front ? "res1" : tele ? "res3" : "res4")) {
+	if (!fp_sensor_table("init") || !fp_sensor_table(front ? "res1" : tele ? "res3" : main4 ? "res4" : "res1")) {
 		return false;
 	}
 	fpd_exposure(fpd_lines, fpd_gain, fpd_fl);
