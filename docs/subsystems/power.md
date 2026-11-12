@@ -184,6 +184,27 @@ The cable-replug fix was not re-run.
   switches the phone off. The flag counts once. A cable put into a phone switched off without one still starts it,
   as on an iPhone. QEMU scenario `off-charging` covers only the flag (no PMIC there); the behaviour was **never run
   on the phone**.
+- **OnePlus 8 Pro, 2026-11-12 (verified on the phone, kernel data101-102, a Mac's USB-C port):** the boot chain leaves the
+  PM8150B's charging *command* off (`CHARGING_ENABLE_CMD` 0x1042 bit 0 clear, charge state 7 "disable"): the phone ran from
+  USB and the battery never charged (46% all day, 0 mA). `instantnoodle_battery.c` now sets it while a cable is in, as
+  Android's smb5 does at its start (`charge_enable=0`: left alone), and the input limit also follows the port's Type-C
+  current (Rp 3 A / 1.5 A, `TYPE_C_SNK_STATUS` 0x1506; the larger of it and the BC1.2 kind's). Measured: charge state 3
+  (full-on), input limit 3000 mA after AICL (the Mac's port is CDP with Rp 3 A), +1966 mA into the cell (the firmware's
+  fast-charge current, 2000 mA, `fcc_cfg` 0x28; float voltage `fv_cfg` 0x4b), iOS `IsCharging` yes. On a 5 V wall
+  charger (DCP) the limit is 2000 mA. `sysctl kern.hackios.charger_pm8150b` (with `hk_sysctl` on the phone) gives the
+  charger's registers at any time. The gauge thread's own log lines fall in the part of a busy run's log the loader does
+  not keep; `kern.hackios.battery_stage` says how far it is.
+- **Warp (VOOC) fast charging: not done.** The 8 Pro's device tree (OxygenOS 13) has an STM8S MCU, `oplus,stm8s-fastcg`
+  at I2C 0x26 on the gauge's bus (se16), with the USB D+/D- switch on gpio 82, its reset on gpio 10, a clock on gpio 131
+  and data on gpio 129 (TLMM north, north, south, south), firmware type 0x27, and its charging limits in the charger node
+  (`qcom,input_current_vooc_*`, `qcom,vooc_*`). Read on the phone (`kern.hackios.warp`): the MCU does not answer at 0x26
+  (its I2C is its bootloader's, for firmware updates), the switch and reset lines low, clock and data high. OnePlus's
+  Android 11 driver (`OnePlusOSS/android_kernel_oneplus_sm8250`, `drivers/oneplus/power/supply/qcom/oneplus_fastchg.c`,
+  "dash") reads a 7-bit message from the MCU by toggling the clock (1 ms low, 19 ms high, then the data bit, MSB first)
+  after a rising edge on data, and answers 4 bits the same way (ALLOW 0x2, REJECT 0x11, current limits 1-6); what each
+  message means and the decisions are in its userspace daemon (dashd), not in the kernel, and the OPPO "vooc" driver of
+  the OxygenOS 13 tree was not found in public sources. Next: the message codes (dashd, or OPPO's oplus_vooc.h), then the
+  AP's half behind a boot-arg, tried with a Warp adapter in the port (it needs the owner: a charger and cable).
 - Hardware JEITA limits come from the UEFI's `QcomChargerCfg.cfg` (hard hot 55 C).
 
 ## Shutdown, restart, the stock modes

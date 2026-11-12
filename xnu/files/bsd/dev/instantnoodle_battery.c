@@ -403,6 +403,35 @@ instantnoodle_battery_meter(int *charge_uah, int *avg_ma, int *mv, int *external
 
 void hk_power_bench_start(void);        /* bsd/dev/hk_power.c */
 
+/*
+ * (2026-11-12) The Warp (VOOC) fast-charge MCU, only looked at: an STM8S at 0x26 on this bus (the 8 Pro's device tree:
+ * "oplus,stm8s-fastcg"), with the USB data switch on gpio 82, its reset on gpio 10, the clock on gpio 131 and the data on
+ * gpio 129 (north, north, south, south: Linux pinctrl-sm8250.c). Whether it answers its address (an empty write: nothing is
+ * told to it) and how its lines are set, for kern.hackios.warp. Nothing drives it yet: without the AP's half of the handshake
+ * the adapter stays at 5 V and the PM8150B charges as on any charger.
+ */
+static char warp_line[256];
+SYSCTL_STRING(_kern_hackios, OID_AUTO, warp, CTLFLAG_RD | CTLFLAG_LOCKED, warp_line, sizeof(warp_line),
+    "the Warp fast-charge MCU: whether it answers, its lines");
+
+static void
+warp_look(void)
+{
+	static const struct { struct instantnoodle_pin p; const char *name; } pins[] = {
+		{ { INSTANTNOODLE_TLMM_NORTH, 82 }, "switch" }, { { INSTANTNOODLE_TLMM_NORTH, 10 }, "reset" },
+		{ { INSTANTNOODLE_TLMM_SOUTH, 131 }, "clock" }, { { INSTANTNOODLE_TLMM_SOUTH, 129 }, "data" },
+	};
+	size_t n = 0;
+	int answer = instantnoodle_i2c_write(&bus, 0x26, NULL, 0);
+
+	n += snprintf(warp_line + n, sizeof(warp_line) - n, "warp: the MCU at 0x26 %s;", answer == 0 ? "answers" : "does not answer");
+	for (unsigned i = 0; i < sizeof(pins) / sizeof(pins[0]) && n < sizeof(warp_line); i++) {
+		n += snprintf(warp_line + n, sizeof(warp_line) - n, " %s gpio%u cfg %#x level %d", pins[i].name, pins[i].p.pin,
+		    instantnoodle_gpio_cfg(pins[i].p), instantnoodle_gpio_level(pins[i].p));
+	}
+	printf("%s\n", warp_line);
+}
+
 static void
 battery_thread(__unused void *parameter, __unused wait_result_t result)
 {
@@ -437,6 +466,7 @@ battery_thread(__unused void *parameter, __unused wait_result_t result)
 	printf("battery: the gauge says device type %#x: %s register map\n", type, map.name);
 	gauge_ready = type >= 0;
 	battery_stage = 2;
+	warp_look();
 	if (gauge_ready) {
 		hk_power_bench_start();
 	}
