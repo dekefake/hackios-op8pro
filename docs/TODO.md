@@ -302,7 +302,16 @@ README lists video and Live Photo recording as not working (redwood). No encoder
   device (the scene classifier's sink no longer blocks the stop); the Photos grid's thumbnails are in true colour; the exposure keeps
   MinimumFrameRate (video stays at 30 fps in a dim room). Open: SIS/HDR brackets (more than one frame per still request), the scene
   classifier's MPS pooling kernel (threadgroup memory length 0), Live Photo, the Dual Camera's synchronized streams group, a daylight
-  look at photo quality, and whether the recording's frame rate is a steady 30 now (movie IMG_0089 being measured).
+  look at photo quality. Video: IMG_0089 (image 361) had 30.0 frames a second on average but 28 ms steps with a 56 ms gap every
+  sixth frame (the 2000x1128 mode ran at 35.6 fps); the mode now runs at 30.0 (9478 lines, kernel data98: 30.1 a second measured).
+- **Dual Camera (2x), 2026-11-12, work in progress (`dual=1`):** `camera_device.c` makes a FigCaptureSynchronizedStreamsGroup of
+  the wide and telephoto streams (properties as `-[BWFigCaptureSynchronizedStreamsGroup initWithFigCaptureSynchronizedStreams
+  Group:captureDevice:]` reads them: SupportedPropertiesDictionary, SynchronizationMaster, SupportedStreams, ActiveStreams ...)
+  and the device lists it; CMCapture takes it (it sets ActiveStreams, at every frame) but still makes no "Back Dual Camera" source
+  (D22's entry `built-in_video:3`, deviceType 4, synchronizedStreamUniqueIDs :0 and :2): no stream pair is ever requested and
+  nothing says why. Next: decompile the dual branch of `csu_createVideoCaptureSourceInfoForCaptureDevice` (CMCapture 0x1a2063ab8,
+  Ghidra headless with -noanalysis: `$S/ghidra/proj2`), and the vendor's `copyStreamsWithUniqueIDs:forDevice:error:` (0x1a20c0d18).
+  The kernel streams one sensor at a time, so the group's slave stream idles while the master's runs (dual_active/dual_master).
 
 ### T48 Apple ID and App Store sign-in — Accounts · Not Started · P0
 - **The owner (2026-11-08):** signing in with an Apple ID, and to the App Store, does not work properly; a priority. Nothing
