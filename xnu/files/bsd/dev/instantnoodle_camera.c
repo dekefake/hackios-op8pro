@@ -1857,7 +1857,8 @@ struct fpd_mode { uint32_t width, height, stride, frame, line_ns, fl_min, fl_def
  * more. cam_main=4 is the old mode (FPD_MODE_MAIN4).
  */
 #define FPD_MODE_MAIN   { 4000, 3000, 5008, 5008 * 3000, 10770, 3094, 3094, 3, 1, "IMX689 (iOS)" }
-#define FPD_MODE_MAIN4  { 2000, 1128, 2512, 2512 * 1128, 3517, 1184, 8000, 3, 1, "IMX689 (iOS)" }      /* 3872 clocks of the sensor's 1100.8 MHz */
+/* (2026-11-12: its default frame 9478 lines, 30.0 fps -- 8000 gave 35.6, and a 30 fps recording took 5 frames in 6: a judder) */
+#define FPD_MODE_MAIN4  { 2000, 1128, 2512, 2512 * 1128, 3517, 1184, 9478, 3, 1, "IMX689 (iOS)" }      /* 3872 clocks of the sensor's 1100.8 MHz */
 #define FPD_MODE_FRONT  { 2328, 1748, 2912, 2912 * 1748, 12372, 2685, 2685, 3, 2, "IMX471 (iOS)" }
 /*
  * (2026-11-12) The telephoto S5K3M5 (slot 3, CSIPHY 2, CCI1 master 0): its module's res3, 2104 x 1560 (2 x 2 binned), four D-PHY lanes at
