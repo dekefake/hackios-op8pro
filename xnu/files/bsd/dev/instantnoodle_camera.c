@@ -1889,6 +1889,9 @@ static bool fpd_wanted, fpd_broken, fpd_streaming, fpd_up_now, fpd_made;
 static vm_offset_t fpd_keep;
 static uint64_t fpd_sequence, fpd_given, fpd_last_read_ms;
 static uint32_t fpd_sensor_index = 1;   /* the camera iOS asked for last (HK_CAMERA_SENSOR): 1 the main one, 2 the front one, 3 the telephoto */
+/* (2026-11-12) the main camera's mode iOS asked for last (HK_CAMERA_SENSOR's b): 1 its 4000 x 3000 (photographs), 4 its 2000 x 1128
+ * (video: 16:9 and near 1080p, a quarter of the pixels to make into pictures); 0 until asked: boot-arg cam_main's, else 1 */
+static uint32_t fpd_main_res, fpd_cur_res;
 static uint32_t fpd_cur;                /* the camera that is powered (fpd_up_now): 1, 2 or 3 */
 static bool fpd_tele_failed;            /* the S5K3M5 did not come up: its place is the main sensor's frames (as the front's) */
 static bool fpd_switch, fpd_front_failed;   /* fpd_switch: the stream stops for the other sensor; fpd_front_failed: the IMX471 did not come up, its place is the main sensor's frames */
@@ -2176,6 +2179,9 @@ fpd_up(unsigned which)
 	uint32_t main_res = 1;
 
 	(void)PE_parse_boot_argn("cam_main", &main_res, sizeof(main_res));
+	if (fpd_main_res != 0) {
+		main_res = fpd_main_res;
+	}
 	const bool main4 = main_res == 4;
 	const struct fpd_mode mode = front ? (struct fpd_mode)FPD_MODE_FRONT : tele ? (struct fpd_mode)FPD_MODE_TELE :
 	    main4 ? (struct fpd_mode)FPD_MODE_MAIN4 : (struct fpd_mode)FPD_MODE_MAIN;
@@ -2195,6 +2201,7 @@ fpd_up(unsigned which)
 	}
 	lck_mtx_lock(&fpd_lock);
 	fpd_m = mode;
+	fpd_cur_res = front || tele ? 0 : main4 ? 4 : 1;
 	fpd_rx_cfg0 = front ? 0x00332103 : tele ? 0x00232103 : 0x01002102;   /* front: 4 lanes | lane assignment 0x3210 << 4 | PHY 3 << 20 | D-PHY; tele: the same on PHY 2; main: 3 trios, 0x210, PHY 0, C-PHY */
 	fpd_lines = front ? 1500 : tele ? 1600 : main4 ? 1120 : 1500;
 	fpd_gain = FPD_GAIN_UNITY;
@@ -2560,9 +2567,10 @@ fpd_thread(__unused void *parameter, __unused wait_result_t result)
 		fpd_switch = false;
 		want = fpd_serving(fpd_sensor_index);
 		lck_mtx_unlock(&fpd_lock);
-		if (fpd_up_now && fpd_cur != want) {
+		if (fpd_up_now && (fpd_cur != want || (want == 1 && fpd_main_res != 0 && fpd_cur_res != fpd_main_res))) {
 			say("camera: /dev/hk-camera: the camera changes: everything down, then the %s\n", want == 2 ? "IMX471 (front)" :
-			    want == 3 ? "S5K3M5 (telephoto)" : "IMX689 (main)");
+			    want == 3 ? "S5K3M5 (telephoto)" : fpd_main_res == 4 ? "IMX689 (main) in its 2000x1128 mode" :
+			    "IMX689 (main) in its 4000x3000 mode");
 			fpd_down();
 		}
 		ok = fpd_up_now ? fpd_resume() : fpd_up(want);
@@ -2769,6 +2777,13 @@ fpd_write(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 		if (fpd_sensor_index != c.a) {
 			fpd_sensor_index = c.a;
 			fpd_switch = fpd_up_now && fpd_cur != fpd_serving(c.a);
+		}
+		/* (2026-11-12) the main camera's mode: b 4 its 2000 x 1128, 1 its 4000 x 3000; another while it streams restarts it */
+		if (c.a == 1 && (c.b == 1 || c.b == 4) && fpd_main_res != c.b) {
+			fpd_main_res = c.b;
+			if (fpd_up_now && fpd_cur == 1 && fpd_cur_res != c.b) {
+				fpd_switch = true;
+			}
 		}
 		lck_mtx_unlock(&fpd_lock);
 		wakeup(&fpd_sequence);
