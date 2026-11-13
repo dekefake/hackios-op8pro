@@ -3825,9 +3825,14 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	 */
 	dt_identity(&w, identity_root, sizeof(identity_root) / sizeof(identity_root[0]), identity_root_data);
 	dt_prop_str(&w, "platform-name", "t8015");
-	/* what iBoot takes from the factory configuration of a real phone; fixed size fields */
-	dt_prop_padded(&w, "serial-number", "RDW00POCOX5P", 32);
-	dt_prop_padded(&w, "mlb-serial-number", "RDW00POCOX5PMLB00", 32);
+	/* What iBoot takes from the factory configuration of a real phone; fixed size fields. A synthetic but
+	 * well-formed iPhone X identity (iPhone10,3 / D22AP, which this build already presents as): the serial
+	 * follows Apple's pre-2021 12-char scheme -- factory F2L, V = 2017 second half, H = week, XK0 unique,
+	 * G5QH model/config -- so iOS, and Apple's account/anisette services, see a consistent iPhone X rather
+	 * than the old "RDW00POCOX5P" redwood placeholder. It is not a real device's serial (no collision). The
+	 * UDID (UniqueDeviceID) is derived below from this serial + unique-chip-id + the addresses. */
+	dt_prop_padded(&w, "serial-number", "F2LVHXK0G5QH", 32);
+	dt_prop_padded(&w, "mlb-serial-number", "F2LVHXK0G5QH7A1B2", 32);
 	dt_prop_padded(&w, "model-number", "MQAC2", 32);
 	dt_prop_padded(&w, "region-info", "LL/A", 32);
 	dt_prop_padded(&w, "regulatory-model-number", "A1865", 32);
@@ -3858,7 +3863,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	static const uint8_t bluetooth_address[6] = { 0x02, 0x52, 0x44, 0x57, 0x00, 0x02 };
 	static const uint8_t manifest_hash[48] = { 0x72, 0x65, 0x64, 0x77, 0x6f, 0x6f, 0x64 };
 	static const uint8_t no_behavior[16];
-	dt_prop_u64(&w, "unique-chip-id", 0x000052445730001ULL);
+	dt_prop_u64(&w, "unique-chip-id", 0x0000134AC5F9E2B1ULL);   /* synthetic ECID (was the "RDW0"-encoded placeholder); feeds the UDID with the serial + the addresses below */
 	dt_prop_u32(&w, "chip-id", 0x8015);
 	dt_prop_u32(&w, "board-id", 0x06);
 	dt_prop(&w, "mac-address-wifi0", wifi_address, sizeof(wifi_address));
