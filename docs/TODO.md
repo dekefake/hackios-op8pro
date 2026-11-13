@@ -323,10 +323,28 @@ README lists video and Live Photo recording as not working (redwood). No encoder
   Ghidra headless with -noanalysis: `$S/ghidra/proj2`), and the vendor's `copyStreamsWithUniqueIDs:forDevice:error:` (0x1a20c0d18).
   The kernel streams one sensor at a time, so the group's slave stream idles while the master's runs (dual_active/dual_master).
 
-### T48 Apple ID and App Store sign-in — Accounts · Not Started · P0
-- **The owner (2026-11-08):** signing in with an Apple ID, and to the App Store, does not work properly; a priority. Nothing
-  investigated yet in this session; see the existing store work (`userland/src/inject_app.c`, appstored's storefront,
-  STOREFRONT=1 in `userland/build.sh`) and `docs/research/` for what is known.
+### T48 Apple ID and App Store sign-in — Accounts · Partial · P0
+- **The owner (2026-11-08):** signing in with an Apple ID, and to the App Store, does not work properly; a priority.
+- **(2026-11-13) The LOADING-for-ever deadlock is broken and the store reaches Apple (verified, images 400/401).**
+  - `src/store_standin.m` (in libhackios-store, now actually injected into appstored/AppStore via STOREFRONT=1 + the
+    inject.conf line) breaks it: inject_store.c's storefront/account/cookie answers + the FairPlay device-type/Mescal
+    local answers let the bag request fire. The store UI now renders its tabs instead of an endless spinner.
+  - **Data path:** the carrier is IPv6-only (Bouygues/Orange); the modem brings up `en1` with an IPv6 RA but nothing
+    configures it, so appstored saw "no network". Running **`/hackios/bin/net_test v6store en1`** once (configd: SLAAC +
+    RA DNS + CLAT46/NAT64, en1 primary -- research/modem-sdx55.md) fixes it. **TODO: auto-run this on boot** (an rc job
+    after modem data is up) so data works without the manual step; today the store test needs it run by hand.
+  - **With data up, the store's requests to Apple COMPLETE:** `bag.itunes.apple.com/bag.xml` -> **200, 53 KB JSON**.
+    But `sf-api-token-service.itunes.apple.com/apiToken` -> **401** (the storefront API token needs a valid device
+    attestation / anisette signature, which we don't have), and `apps.mzstatic.com` (the ios-appstore.jetpack UI bundle)
+    and others drop with **NSURLErrorNetworkConnectionLost (-1005) x6** (likely modem throughput on large transfers).
+  - **So the remaining walls, in order:** (1) **anisette** -- a valid storefront token (and later Apple ID sign-in via
+    GrandSlam) needs ADI-provisioned anisette headers with a synthetic Apple device identity (serial/model/UUID,
+    Hackintosh-SMBIOS style); without it the Today/Apps tabs 401. (2) **modem stability** for large transfers (the jetpack).
+    (3) **FairPlay app DRM** for the actual install -- App Store binaries are FairPlay-encrypted per device+Apple-ID and the
+    device decrypts with SEP/FairPlay keys this OnePlus lacks, so even a free app (Spotify) downloaded from the store cannot
+    be decrypted/run without a real FairPlay root of trust. Browse + sign-in are achievable; the final install is
+    DRM-blocked unless the app is obtained decrypted another way (sideload).
+- **Refs:** `userland/src/store_standin.m`, `inject_store.c`; research/ios-userland.md §4; T15.
 
 ### T49 Hardware video encoding (Venus) — Camera · Not Started · P1
 - **The owner (2026-11-08):** if HEVC in hardware is not possible as on an iPhone, use the Snapdragon's own encoder. The SM8250
