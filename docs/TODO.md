@@ -201,6 +201,13 @@ GNSS belongs to the modem (T06); location via its QMI service 16. `locationd` de
 - **Facts:** App Store LOADING for ever: AMS builds a bag request but the promise never resolves; an AMS thread waits on `fairplayd.H2`, which exits 0 immediately every 10 s
   without touching IOKit (decision made with inlined syscalls). `apsd` runs but has no push courier; `mobileactivationd`: "Device is not activated". No Secure Enclave.
 - **Next:** find what `fairplayd.H2` decides on (Ghidra path in `inject_fairplay.c`; kernel `systrace` extension to print sysctl MIB / mac-syscall policy). Probably unachievable without an SEP stand-in.
+- **Weather (2026-11-13, RAM images 383-384, `app_oslog=Weather,WeatherWidget`):** Weather shows the place and "— —" because every
+  WeatherKit request needs a "local signature": WeatherKit asks AMS for a Mescal (FairPlay) signature of the request, and
+  `AMSFairPlayGetHardwareInfo` fails with -42184 ("Mescal Failed: Failed to fetch hardware info", AMSErrorDomain 12); the
+  app looks up `com.apple.fairplayd(.versioned)` 31 times and finds none. The JWT itself is made (WeatherKit's authservice runs).
+  Also missing, and not what stops it: `com.apple.kvsd` (iCloud key-value store), `com.apple.bird` (iCloud Drive). So Weather
+  waits on the same FairPlay as the App Store: Apple's device attestation, not something to fake. Ways around it that do not
+  touch FairPlay would change where the data comes from (another provider fed to the app), which is the owner's call.
 - **Refs:** research/ios-userland.md §4; K11.
 
 ### T16 Brightness: prove the light changes — Display · Partial · P2
