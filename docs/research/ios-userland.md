@@ -332,8 +332,21 @@ derivation"). What it establishes:
    kext/SEP. This makes a store-downloaded encrypted app run in place, but needs the per-app SINF/SUPF + credential plumbed
    to the kernel crypter -- larger, and only worth it for the native download->install flow.
 
-**Dependencies / caveats:** needs the owner's one-time credential from a real jailbroken Apple device on the target Apple
-Account; `fairplay-decrypt` is GPL-3.0 (reimplementing vs. vendoring is the owner's licensing call). Not implemented yet.
+**Getting the credential from a Mac instead of a jailbroken iPhone (2026-11-13, checked on the dev Mac -- looks feasible).**
+A Mac is a genuine Apple device with the same FairPlay root of trust, so the owner's Mac may yield the credential without a
+jailbroken iOS device. On the dev Mac (macOS 26.6) IOReg has `com_apple_driver_FairPlayIOKit`, `...FairPlayIOKitUserClient`
+and `AppleFairplayTextCrypter` live; `fairplayd` exists at `CoreFP.framework/Versions/A/XPCServices/fairplayd`; and **SIP is
+disabled** -- exactly what the retriever needs (`observer.c` does `task_for_pid` + ARM64 breakpoints on `fairplayd`, which
+SIP-off permits, and `driver.c` opens `com_apple_driver_FairPlayIOKit` with selector 9/21 -- a macOS kernel takes the 21
+branch). A macOS port of the retriever would: swap `MGCopyAnswer("UniqueDeviceID")` for the Mac's hardware UUID; swap the
+iOS SIDB path (`/private/var/mobile/Library/FairPlay/iTunes_Control/iTunes/IC-Info.sidb`) for the macOS keybag; build for
+macOS arm64 (not iphoneos). Requirement: the Mac signed into, and FairPlay-provisioned for, the target Apple Account.
+**Unverified:** whether the Mac's 16 bytes equal an iOS device's for the same account -- very likely (the credential is the
+account key; the SINF `key ` is wrapped to the account, not the device), but `credential.c` mixes the UDID into `core4_context`,
+so it must be tested. If it holds, the jailbroken-iOS-device requirement is gone and the whole path runs off the owner's Mac.
+
+**Dependencies / caveats:** the one-time credential (from a jailbroken iOS device, or -- promising -- the owner's own Mac);
+`fairplay-decrypt` is GPL-3.0 (reimplementing vs. vendoring is the owner's licensing call). Not implemented yet.
 
 ## 5. IO80211 / Wi-Fi (details in [../subsystems/wifi.md](../subsystems/wifi.md))
 - wifid → Apple80211 ioctls (`SIOCGA80211/SIOCSA80211`); `IO80211.framework` fills/reads the same structs
