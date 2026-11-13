@@ -302,6 +302,39 @@ All in `userland/src/inject_sb.c` (replacements located by class, selector and e
   - Not given: air quality (empty), alerts, weather changes; the maps' overlays are answered 404.
   - `weather_standin=0` turns it off.
 
+## 4b. FairPlay app DRM is breakable offline (2026-11-13) [from the owner's pointer; not yet implemented here]
+
+The earlier conclusion that App Store installs are permanently DRM-walled is **wrong**. The owner pointed at
+`github.com/EthanArbuckle/fairplay-decrypt` (GPL-3.0, "Offline FairPlay App Store IPA decryption with independent key
+derivation"). What it establishes:
+
+- **The decryption itself needs no FairPlay, no Secure Enclave, no Apple hardware, and no `mremap_encrypted`.** It is a
+  pure reimplementation (Python + AES/MD5): `derive_work16(credential, sinf)` (md5(name+iviv) IV, AES-CBC of the SINF
+  `priv` record with the credential XOR `0x30*16`, markers `itun`/`key `/`iviv`, work key = `clear[24:40]`),
+  `derive_page_key(wrapped, page_index, work)` (three AES-ECB block transforms + a custom `finish()` mixing with constants
+  like `0x68547C2E`), then AES-CBC of each 4096-byte page with the SUPF page IV, and `cryptid` zeroed. So a non-Apple
+  device **can** decrypt and run App Store binaries -- the port already runs `cryptid=0` / ad-hoc binaries (AMFI accepts
+  everything, [kernel-standins.md](kernel-standins.md)).
+- **The one input it cannot reproduce is a 16-byte account credential** (`credential.bin`). It is extracted *once* by
+  running a native retriever against a **genuine jailbroken Apple device** that has a working `fairplayd` and an installed
+  App Store app from the same Apple Account (it restarts `fairplayd`, observes its UID layer while an app is triggered,
+  verified against iOS 16.3.1 `fairplayd.H2`). It is **per Apple Account, reusable, and device-independent** -- "Each
+  credential works with apps from the Apple Account it came from". The OnePlus cannot produce it (no `fairplayd`/SEP), so
+  this step needs a real Apple device the owner controls, once.
+
+**Two integration paths for this port:**
+1. **Offline decrypt + sideload (simple, recommended first):** given the account credential and an encrypted IPA (from the
+   App Store once sign-in works, T48, or any source), decrypt host-side to a `cryptid=0` IPA (the pure-Python path, no
+   hardware) and sideload it; it runs. No kernel change. This gets an app *running* without the App Store's native install.
+2. **Kernel FairPlay text-crypter HAL (transparent App Store installs):** register our own `text_crypter_create` hook so
+   XNU's `apple_protect_pager` (`osfmk/vm/vm_apple_protect.c`; reached by `mremap_encrypted` -> `vm_map_apple_protected`)
+   decrypts `__TEXT` pages at fault time with the reimplemented algorithm + credential, instead of the (absent) FairPlay
+   kext/SEP. This makes a store-downloaded encrypted app run in place, but needs the per-app SINF/SUPF + credential plumbed
+   to the kernel crypter -- larger, and only worth it for the native download->install flow.
+
+**Dependencies / caveats:** needs the owner's one-time credential from a real jailbroken Apple device on the target Apple
+Account; `fairplay-decrypt` is GPL-3.0 (reimplementing vs. vendoring is the owner's licensing call). Not implemented yet.
+
 ## 5. IO80211 / Wi-Fi (details in [../subsystems/wifi.md](../subsystems/wifi.md))
 - wifid → Apple80211 ioctls (`SIOCGA80211/SIOCSA80211`); `IO80211.framework` fills/reads the same structs
   (`Apple80211GetWithIOCTL`, `_getScanData`, `_addScanResultToList`, `_performAssociation`, `_dispatchAsyncAssocEvent`,

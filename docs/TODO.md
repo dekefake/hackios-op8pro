@@ -342,8 +342,12 @@ README lists video and Live Photo recording as not working (redwood). No encoder
     Hackintosh-SMBIOS style); without it the Today/Apps tabs 401. (2) **modem stability** for large transfers (the jetpack).
     (3) **FairPlay app DRM** for the actual install -- App Store binaries are FairPlay-encrypted per device+Apple-ID and the
     device decrypts with SEP/FairPlay keys this OnePlus lacks, so even a free app (Spotify) downloaded from the store cannot
-    be decrypted/run without a real FairPlay root of trust. Browse + sign-in are achievable; the final install is
-    DRM-blocked unless the app is obtained decrypted another way (sideload).
+    be decrypted/run *by Apple's runtime* without a real FairPlay root of trust. **But the DRM is breakable offline**
+    (2026-11-13, research/ios-userland.md §4b, `EthanArbuckle/fairplay-decrypt`): the page-key derivation is pure math
+    (no SEP/hardware), so given a 16-byte **account** credential -- extracted once from a genuine jailbroken Apple device
+    on the same Apple Account -- any of that account's IPAs decrypt offline to `cryptid=0` and run here (AMFI accepts
+    everything). So install is achievable via decrypt+sideload, or a kernel `text_crypter_create` HAL for the native flow;
+    the credential (from a real Apple device, one-time) is the only remaining dependency.
 - **Refs:** `userland/src/store_standin.m`, `inject_store.c`; research/ios-userland.md §4; T15.
 
 ### T49 Hardware video encoding (Venus) — Camera · Not Started · P1
