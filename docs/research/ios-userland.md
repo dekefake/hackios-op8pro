@@ -345,8 +345,21 @@ macOS arm64 (not iphoneos). Requirement: the Mac signed into, and FairPlay-provi
 account key; the SINF `key ` is wrapped to the account, not the device), but `credential.c` mixes the UDID into `core4_context`,
 so it must be tested. If it holds, the jailbroken-iOS-device requirement is gone and the whole path runs off the owner's Mac.
 
+**On-device decryptor: built and verified (2026-11-13, `userland/src/hk_fpdecrypt.c`).** The decryption half is done:
+a clean C reimplementation of `core.py` using CommonCrypto (`hk_fpdecrypt decrypt IN.macho SINF SUPF credential.bin
+OUT.macho`), built for the device (ubuild/build.sh `fpdecrypt` target, installed to `/hackios/bin`). It is **verified
+bit-identical to `core.py`** off-phone: 2000 random `finish()` + 1000 random `derive_page_key()` cases, and a synthetic
+end-to-end decrypt (SINF work-key, Mach-O `LC_ENCRYPTION_INFO_64` parse, SUPF page records, per-page AES-CBC, cryptid
+clear) all match the reference (`scratchpad/fp-mac/{cross_test,e2e_test}.py`). No FairPlay/SEP is touched at decrypt
+time. **credential.bin lives in USER DATA** (e.g. `/private/var/mobile/Library/FairPlay/credential.bin`), never in the
+kernel, boot image or iOS system data (owner's requirement). Still to do: the one-time credential (from a real Apple
+device -- the owner's Mac, pending the AMFI boot-arg); an IPA wrapper (unzip, find `SC_Info/*.sinf`/`*.supf`, decrypt
+the main binary + any encrypted frameworks, reinstall); and the optional kernel `text_crypter_create` HAL for transparent
+store installs (same crypto, run at fault time instead of ahead of time).
+
 **Dependencies / caveats:** the one-time credential (from a jailbroken iOS device, or -- promising -- the owner's own Mac);
-`fairplay-decrypt` is GPL-3.0 (reimplementing vs. vendoring is the owner's licensing call). Not implemented yet.
+`fairplay-decrypt` is GPL-3.0 (this is a clean C reimplementation of its published algorithm; its inclusion is the owner's
+licensing call).
 
 ## 5. IO80211 / Wi-Fi (details in [../subsystems/wifi.md](../subsystems/wifi.md))
 - wifid → Apple80211 ioctls (`SIOCGA80211/SIOCSA80211`); `IO80211.framework` fills/reads the same structs

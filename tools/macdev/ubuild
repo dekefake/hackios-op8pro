@@ -38,6 +38,7 @@ for t in "$@"; do
 	time) $DYN -O2 -o obj/hk_time src/hk_time.c ;;
 	sysctl) $DYN -O2 -o obj/hk_sysctl src/hk_sysctl.c ;;
 	lun) $DYN -O2 -o obj/hk_lun src/hk_lun.c ;;
+	fpdecrypt) $DYN -O2 -o obj/hk_fpdecrypt src/hk_fpdecrypt.c ;;
 	metal) M="-framework Foundation -framework IOKit -framework Metal -lobjc"; $DYN -dynamiclib -install_name /hackios/lib/libhackiosmetal.dylib $M -o obj/libhackiosmetal.dylib src/hkmetal.m src/hkdrawable.m && $DYN -bundle $M -o obj/HKMetal src/hkmetal.m src/hkdrawable.m ;;
 	cb_test) $DYN -O1 -fobjc-arc -framework Foundation -lobjc -o obj/cb_test src/cb_test.m ;;
 	location) $DYN -O1 -fobjc-arc -framework Foundation -framework CoreLocation -lobjc -o obj/hk_location src/hk_location.m ;;
