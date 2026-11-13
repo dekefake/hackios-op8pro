@@ -28,6 +28,7 @@ for t in "$@"; do
 	phone) $DYN -O2 -dynamiclib -install_name /hackios/lib/libhackios-phone.dylib -lobjc -o obj/libhackios-phone.dylib src/inject_phone.c ;;
 	call) $DYN -O2 -dynamiclib -install_name /hackios/lib/libhackios-call.dylib -framework CoreFoundation -lobjc -o obj/libhackios-call.dylib src/inject_call.c ;;
 	app) $DYN -dynamiclib -install_name /hackios/lib/libhackios-app.dylib -lobjc -framework CoreFoundation -framework CoreMedia -framework Foundation -fobjc-arc -o obj/libhackios-app.dylib src/inject_app.c src/oslog_mirror.c src/weather_standin.m ;;
+	store) $DYN -O2 -dynamiclib -install_name /hackios/lib/libhackios-store.dylib -framework CoreFoundation -framework Foundation -lobjc -lc++abi -o obj/libhackios-store.dylib src/inject_store.c src/store_standin.m ;;
 	ui) $DYN -O2 -dynamiclib -install_name /hackios/lib/libhackios-ui.dylib -lobjc -o obj/libhackios-ui.dylib src/inject_ui.c ;;
 	cell) $DYN -O2 -o obj/hk_cell src/hk_cell.c ;;
 	im) $DYN -O1 -fobjc-arc -dynamiclib -install_name /hackios/lib/libhackios-im.dylib -framework Foundation -lobjc -o obj/libhackios-im.dylib src/inject_im.m ;;
