@@ -181,7 +181,14 @@ Verify against code and evidence, state Kind, Severity, device, expected vs actu
 The physical phone still runs loader 0.5 without the new `getvar:iphont` extension. New agent commands correctly return `old_loader`; deep/control features cannot be considered working there yet. The owner deferred a RAM-only reload on 2026-10-26. No flash operation is needed to validate the extension. See [TOOLKIT.md](TOOLKIT.md), TODO T36.
 
 
-## K44 Wi-Fi does not join a saved network by itself — OnePlus 8 Pro · **Open** · S2
+## K44 Wi-Fi does not join a saved network by itself — OnePlus 8 Pro · **Fixed (hk_wifijoin)** · S2
+- **Fixed 2026-11-13 (hk_wifijoin, verified image 402):** the daemon `com.hackios.wifijoin` (`src/hk_wifijoin.c`,
+  now shipped: build.sh builds and signs it with `com.apple.wifi.manager-access` -- wifid refuses the WiFiManager
+  connection without it, "EPERM" -- and `com.apple.private.system-keychain`) asks wifid to join the saved network at
+  boot the way Settings does (`WiFiDeviceClientAssociateAsync` on a `WiFiManagerClientCopyNetworks` entry), every 20 s
+  while Wi-Fi is on and nothing is joined. At boot it found "FreeboxMarieThomas (5Ghz)", the associate returned 0, the
+  join ended with 0, and the status bar went from LTE to Wi-Fi. The *native* corewifi auto-join (below) is still broken
+  and now moot; its diagnosis is kept for whoever wants iOS's own behaviour instead of our daemon.
 - **Observed (2026-10-29, owner and RAM runs):** the saved network ("FreeboxMarieThomas (5Ghz)" is in `com.apple.wifi.plist`'s known networks, its password in the keychain) is heard at -47 dBm with an RSN element, yet wifid never sends ASSOCIATE (Apple80211 type 20); it scans (SCAN_REQ types 1-3) and logs `[corewifi] AUTO-JOIN: Scan FAILED (duration=0ms, results=0, error=(1))`, `WiFiDeviceManagerStartAutoJoinAndReply: UAJM is null`, `Event APPLE80211_M_SCAN_DONE is not expected while there is no command pending` and `__WiFiManagerUpdateFamilyPreferences: Setup not completed`; it copies the network's password every few seconds (so it tries). Joining from Settings works.
 - **Tried, no change:** answering COUNTRY_CODE (51; it was refused: "cannot get countryCode"; now answered "FR", settable), accepting the 4104-byte request 383 (a scan for several names) and the sets 365/419, one SCAN_DONE per request (reverted), purplebuddy `SetupState=SetupFinished` / `SetupFinishedAllSteps` (reverted; `SetupDone` was already true), a daemon asking wifid to join (`hk_wifijoin`, not shipped: the owner wants iOS's own behaviour). The AUTO-JOIN scan fails before our driver is asked for results; the next step is to find which request or event corewifi's auto-join scan waits for (os_log of wifid is on: `OS_ACTIVITY_DT_MODE` in its job; `hk_apple80211` now logs sets and refused gets live).
 
