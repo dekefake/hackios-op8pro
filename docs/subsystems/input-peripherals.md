@@ -302,6 +302,32 @@ FAT (`image/`, `hk_fw_partition_file()` in `instantnoodle_modem.c`; nothing bund
     with 0x10; otherwise "Read WHO-AM-I error" / "memsic Unsupported Sensor", then "Find Sensor. hw_is_present".
     Both parts on bus 1 failing that read points at the bus or the parts' supply, which the DSP owns. Its messages go
     out only through Qualcomm diag, which this phone's sensor DSP offers neither over GLINK nor QRTR here.
+  - (2026-11-13, local registry/JSON re-read, no phone) Power config confirmed: both mag parts use `num_rail=1`,
+    `rail_on_state=1` and `vddio_rail=/pmic/client/sensor_vddio` **only** — no `vdd_rail` (`kona_qrd_mmc5603x_0.json`,
+    `kona_qrd_ak991x_0.json`, and the parsed `persist/.../registry/*_platform.config`). The working ALS/SAR on I2C bus 5
+    (`alsps`, `tcs*`, `sx*`) share that same `sensor_vddio`, so VDDIO is up and the mag's power config matches Android's.
+    That rules power out and narrows the fault to **SSC I2C bus-instance 1 itself** (its LPI pins / pull-ups): bus_type 0
+    (I2C) instance 1 for both mag parts, vs the working ALS on I2C instance 5 and accel on SPI instance 3 — so the I2C
+    framework works, bus-instance 1 specifically does not. Bus 1 is LPI/DSP-owned and absent from the Linux dts (`op8p.dts`
+    has no mag/mmc/akm node, as expected). The SSC `power_manager` registry defines `power.gpio.gpio_17/18/19`
+    (`sleep_pull` set) but nothing maps them to bus 1.
+  - (2026-11-13, SLPI firmware `slpi.b04`/`b16`, no phone) The SSC I2C/SPI buses are **QUPV3_2 SE0-5**
+    (`QUPV3_2_SE0..SE5_GENI4_CFG/IMAGE/DATA` in `slpi.b04`), so bus_instance 1 = QUPV3_2 **SE1**. The firmware
+    drives its own pins (`SSC_TLMM_CSR`, `LPASS_LPASS_TLMM_CSR`, `tlmm_core_init`) from per-board DAL configs
+    `/tlmm/sm8250{mtp,qrd,cdp,qrd-iot}[0-3]` -- Qualcomm reference boards, none named for the OnePlus board, though
+    this is OnePlus's own pulled firmware so one of them is presumably selected by soc_id. The working accel (SE3)
+    and ALS (SE5) are on the **same** QUPV3_2, so the QUP is clocked and powered and **SE1 is the only failing
+    serial engine** -- which rules out a QUP-wide fault and isolates it to SE1's own pins/pull-ups or the parts.
+    The mag drivers' probe strings are in `slpi.b16`: `sns_ak0991x_sensor.c:sns_scp_register_com_port fail rc:%u`,
+    `dsns_mmc5603x_sensor.c:get client req`, and an I3C path (`dsns_mmc56x3x_hal_island.c:assign i3c address
+    failed; rv=%d`, `sns_com_port_i2c.c:CCC:SETDASA hndl:%p addr:0x%x new_addr:0x%x`) -- but the registry has the
+    mag as `bus_type` 0 (plain I2C, static 0x30 / 0x0c), so the I3C SETDASA path should not run; which line
+    actually fires is a DSP-side log that leaves only over the closed diag/QDSS. **Conclusion:** the fault is
+    isolated to QUPV3_2 SE1 (the magnetometer's own bus), inside the DSP's domain. Confirming the exact cause
+    needs the DSP diag (this SLPI opens none over GLINK or QRTR) or the board schematic for SE1's SCL/SDA pins and
+    pull-up rail. A fix from our side (drive the mag over SE1 from the AP kernel, as `instantnoodle_i2c.c` drives
+    the touch/slider buses) is possible in principle but needs those physical pins **and** would contend with the
+    DSP for SE1, with CrashDump risk -- not safe to attempt blind.
   - Next, if picked up again: the SSC's own bus-1 pins and pull-up supply (from a schematic or the firmware's GPIO and
     rail tables), or a way to the DSP's diag. With a magnetometer: the heading for iOS (CoreLocation's `CLHeading`).
 - **Not done:** CoreMotion for apps (locationd would want the iPhone X's motion coprocessor protocol). `slpi=1` is not in the default arguments yet. See [../TODO.md](../TODO.md) T47.
