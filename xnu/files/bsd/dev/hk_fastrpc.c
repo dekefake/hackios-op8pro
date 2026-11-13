@@ -713,6 +713,86 @@ lookup_either(const char *rel, vnode_t *vp, char *full, size_t size)
 	return vnode_lookup(full, 0, vp, ctx);
 }
 
+/*
+ * (2026-11-13) For finding why SEE registers no magnetometer: every name the DSP opens (kern.hackios.fastrpc_opens) and its
+ * own log lines (slpi_dsplog=1; kern.hackios.dsplog: those that speak of a magnetometer or a failure, then the last ones), kept
+ * whole here because they fall in the middle of the boot's log, which the loader does not keep. Read with hk_sysctl.
+ */
+static char trace_opens[12288], trace_dsplog[12288], trace_dsplast[4096];
+static uint32_t trace_opens_n, trace_dsplog_n, trace_dsplast_at;
+
+static bool
+trace_has_ci(const char *s, uint32_t length, const char *word)
+{
+	size_t w = strlen(word);
+
+	for (uint32_t i = 0; i + w <= length; i++) {
+		size_t j;
+
+		for (j = 0; j < w; j++) {
+			char c = s[i + j];
+
+			if (c >= 'A' && c <= 'Z') {
+				c = (char)(c - 'A' + 'a');
+			}
+			if (c != word[j]) {
+				break;
+			}
+		}
+		if (j == w) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void
+trace_append(char *buffer, size_t size, uint32_t *used, const char *text, uint32_t length)
+{
+	if (*used + length + 2 >= size) {
+		return;
+	}
+	memcpy(buffer + *used, text, length);
+	*used += length;
+	buffer[(*used)++] = '\n';
+	buffer[*used] = 0;
+}
+
+static void
+trace_dsp_line(const char *text, uint32_t length)
+{
+	static const char *const words[] = { "mag", "mmc", "ak09", "akm", "fail", "err", "probe", "not found", "absent" };
+
+	while (length > 0 && (text[length - 1] == 0 || text[length - 1] == '\n')) {
+		length--;
+	}
+	for (unsigned i = 0; i < sizeof(words) / sizeof(words[0]); i++) {
+		if (trace_has_ci(text, length, words[i])) {
+			trace_append(trace_dsplog, sizeof(trace_dsplog), &trace_dsplog_n, text, length > 300 ? 300 : length);
+			break;
+		}
+	}
+	/* the last lines, a ring of whole lines */
+	if (length > 200) {
+		length = 200;
+	}
+	if (trace_dsplast_at + length + 2 >= sizeof(trace_dsplast)) {
+		trace_dsplast_at = 0;
+	}
+	memcpy(trace_dsplast + trace_dsplast_at, text, length);
+	trace_dsplast_at += length;
+	trace_dsplast[trace_dsplast_at++] = '\n';
+	trace_dsplast[trace_dsplast_at] = 0;
+}
+
+static int
+trace_sysctl(__unused struct sysctl_oid *oidp, void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	const char *text = arg1;
+
+	return SYSCTL_OUT(req, text, strlen(text) + 1);
+}
+
 static int
 std_fopen(const char *name, const char *mode, int32_t *out)
 {
@@ -724,6 +804,19 @@ std_fopen(const char *name, const char *mode, int32_t *out)
 	int slot;
 
 	opens++;
+	{
+		const char *shown = name, *last = NULL;
+
+		for (const char *c = name; *c; c++) {
+			if (*c == '/') {
+				last = c;
+			}
+		}
+		if (last != NULL && trace_has_ci(name, (uint32_t)strlen(name), "/registry/")) {
+			shown = last + 1;
+		}
+		trace_append(trace_opens, sizeof(trace_opens), &trace_opens_n, shown, (uint32_t)strnlen(shown, 120));
+	}
 	if (!map_path(name, rel, sizeof(rel))) {
 		note_failure("not served", name);
 		if (misses++ < 40) {
@@ -1110,6 +1203,9 @@ serve(uint32_t handle, uint32_t sc, struct frpc_arg *in, struct frpc_arg *out)
 			if (in[i].length > 1 && reverse_calls < 2000) {
 				say("frpc: dsp: %.*s\n", (int)in[i].length, (const char *)in[i].ptr);
 			}
+			if (in[i].length > 1) {
+				trace_dsp_line((const char *)in[i].ptr, in[i].length);
+			}
 		}
 		return 0;
 	}
@@ -1484,6 +1580,54 @@ session_up(struct frpc_session *se)
 		if (PE_parse_boot_argn("slpi_dsplog", &dsplog, sizeof(dsplog)) && dsplog != 0) {
 			error = frpc_call(se, se->slot + 1, false, 5, SC(2, 0, 0), a, &result, 10000);
 			say("frpc: %s: adspmsgd_adsp1 init2 (the DSP's log to us): %d, result %#x\n", se->name, error, result);
+			if (error != 0 || result != 0) {
+				/* a remote_handle64 interface (quic/fastrpc adspmsgd_adsp1.h): opened by its name in a user process */
+				char mname[] = "adspmsgd_adsp1";
+				uint32_t m_in[2] = { sizeof(mname), 255 }, m_out[2] = { 0 };
+
+				dlerror[0] = 0;
+				a[0] = (struct frpc_arg){ m_in, 8 };
+				a[1] = (struct frpc_arg){ mname, sizeof(mname) };
+				a[2] = (struct frpc_arg){ m_out, 8 };
+				a[3] = (struct frpc_arg){ dlerror, 255 };
+				error = frpc_call(se, se->slot + 1, false, 0, SC(0, 2, 2), a, &result, 10000);
+				say("frpc: %s: remotectl_open(\"%s\"): %d, result %#x, handle %#x, nErr %#x%s%s\n", se->name, mname, error, result,
+				    m_out[0], m_out[1], dlerror[0] ? ", " : "", dlerror);
+				if (error == 0 && result == 0 && m_out[1] == 0) {
+					error = frpc_call(se, se->slot + 1, false, m_out[0], SC(2, 0, 0), a, &result, 10000);
+					say("frpc: %s: adspmsgd_adsp1 init2 on handle %#x: %d, result %#x\n", se->name, m_out[0], error, result);
+				}
+			}
+			/*
+			 * (2026-11-13) And which of its FARF levels it sends: none until asked, as Android's log_config.c asks when it finds
+			 * a "<process>.farf" file (quic/fastrpc): remotectl_open("adsp_current_process"), then set_logging_params2(mask,
+			 * no files), method 6 ({mask, files 0}, the files' lengths: none), or set_logging_params (method 2, a 16-bit mask).
+			 * The mask: slpi_dsplog's value when above 1, else 0x1f (every level).
+			 */
+			{
+				char pname[] = "adsp_current_process";
+				uint32_t open_in[2] = { sizeof(pname), 255 }, open_out[2] = { 0 }, log_in[2] = { dsplog > 1 ? dsplog : 0x1f, 0 };
+				uint32_t none = 0;
+
+				dlerror[0] = 0;
+				a[0] = (struct frpc_arg){ open_in, 8 };
+				a[1] = (struct frpc_arg){ pname, sizeof(pname) };
+				a[2] = (struct frpc_arg){ open_out, 8 };
+				a[3] = (struct frpc_arg){ dlerror, 255 };
+				error = frpc_call(se, se->slot + 1, false, 0, SC(0, 2, 2), a, &result, 10000);
+				say("frpc: %s: remotectl_open(\"%s\"): %d, result %#x, handle %#x, nErr %#x%s%s\n", se->name, pname, error, result,
+				    open_out[0], open_out[1], dlerror[0] ? ", " : "", dlerror);
+				if (error == 0 && result == 0 && open_out[1] == 0) {
+					a[0] = (struct frpc_arg){ log_in, 8 };
+					a[1] = (struct frpc_arg){ &none, 0 };
+					error = frpc_call(se, se->slot + 1, false, open_out[0], SC(6, 2, 0), a, &result, 10000);
+					say("frpc: %s: set_logging_params2(%#x): %d, result %#x\n", se->name, log_in[0], error, result);
+					if (error != 0 || result != 0) {
+						error = frpc_call(se, se->slot + 1, false, open_out[0], SC(2, 2, 0), a, &result, 10000);
+						say("frpc: %s: set_logging_params(%#x): %d, result %#x\n", se->name, log_in[0], error, result);
+					}
+				}
+			}
 		}
 	}
 	return true;
@@ -1545,6 +1689,12 @@ frpc_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int 
 SYSCTL_DECL(_kern_hackios);
 SYSCTL_PROC(_kern_hackios, OID_AUTO, fastrpc, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, frpc_sysctl, "A",
     "FastRPC with the sensor DSP: the listeners, what the DSP asked of our files");
+SYSCTL_PROC(_kern_hackios, OID_AUTO, fastrpc_opens, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, trace_opens, 0, trace_sysctl, "A",
+    "every name the sensor DSP opened, in order (registry files by their own name)");
+SYSCTL_PROC(_kern_hackios, OID_AUTO, dsplog, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, trace_dsplog, 0, trace_sysctl, "A",
+    "the sensor DSP's log lines (slpi_dsplog=1) of a magnetometer or a failure");
+SYSCTL_PROC(_kern_hackios, OID_AUTO, dsplog_last, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, trace_dsplast, 0, trace_sysctl, "A",
+    "the sensor DSP's last log lines (a ring)");
 
 bool
 hk_fastrpc_listening(void)

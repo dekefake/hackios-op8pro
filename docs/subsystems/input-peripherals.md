@@ -257,6 +257,25 @@ FAT (`image/`, `hk_fw_partition_file()` in `instantnoodle_modem.c`; nothing bund
   events, SEE's lux (data[0], inferred) as the level and as field 0xc000b (the illuminance: what CoreBrightness itself writes there when it
   rewrites an event, 20F66 0x1af009b14). Off by default: with an ALS iOS turns auto-brightness on, and a wrong reading would hold the screen
   at its dimmest.
+- **Compass / magnetometer (2026-11-13, kernel data106-108, RAM images 380-382; not working).** The Compass app opens and
+  shows the dial fixed at 0: iOS has no heading because SEE registers no magnetometer (`mag`, `mag_cal`, `geomag_rv`, `rotv`
+  all absent in `kern.hackios.sensors`). What is known:
+  - The DSP does load the magnetometer registry: `kern.hackios.fastrpc_opens` (every name it opened, in order) lists
+    `ak0991x_0*` and `mmc5603x_0_platform*` (config, orient, placement, fac_cal), `default_sensors.mag`, `sns_mag_cal_config`,
+    `devinfo.mag`. The firmware has both drivers (`sns_ak0991x`, `sns_mmc56x3x`, strings in `slpi.b16`/`b21`).
+  - Both parts sit on the DSP's I2C bus 1 (`bus_type` 0, `bus_instance` 1; MMC5603 at 0x30, AK09918 at 0x0c, IRQ 113),
+    the only sensors on that bus; the ones that work are on SPI 3 (LSM6DSM) and I2C 5 (TCS3707). So the bus or the parts'
+    supply (only `sensor_vddio` is listed for them) is the likely fault; nothing in the device tree shows an AP-side supply.
+  - The DSP's own log would say. `slpi_dsplog=1` now also sets its FARF mask (`adsp_current_process`
+    `set_logging_params(0x1f)`, accepted in both processes) and keeps what comes in `kern.hackios.dsplog`
+    (lines about a magnetometer or a failure) and `kern.hackios.dsplog_last`. Nothing comes: the root process takes
+    `adspmsgd_adsp1` init2 (static handle 5), but SEE runs in the sensors process, which loads the
+    interface as a module from the AP (`libadspmsgd_adsp1_skel.so`, Android's `/vendor/lib/rfsa/adsp`), and that file is
+    not in any local copy of the phone's vendor files (only part of `/vendor/lib/rfsa/adsp` and the `dsp` partition
+    were pulled). Also asked for and not served: `oemconfig.so` (not on the phone either), `sns_bring_to_ear.so` and
+    `wigig_sensing.so` (in the `dsp` partition's `sdsp/`), and an AP-side `sns_registry` module.
+  - Next: the vendor partition's `lib/rfsa/adsp` (from `super` on UFS), served for bare `.so` names; then the DSP's
+    log for the bus-1 parts. With a magnetometer: the heading for iOS (locationd/CoreLocation's `CLHeading`).
 - **Not done:** CoreMotion for apps (locationd would want the iPhone X's motion coprocessor protocol). `slpi=1` is not in the default arguments yet. See [../TODO.md](../TODO.md) T47.
 
 GPS belongs to the modem (QMI LOC, `userland/src/hk_location.m`, research/modem-sdx55.md). Redwood: not present.
