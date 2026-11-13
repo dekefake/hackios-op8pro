@@ -4,7 +4,20 @@ Short, actionable, and dated. It does **not** replace [TODO.md](TODO.md) (roadma
 it says where the work stands *today*. **Update this file after every substantial session** (rules in [../AGENTS.md](../AGENTS.md)); keep it under ~150 lines and move
 anything that has aged into the right permanent page.
 
-**Last updated: 2026-11-07** (sections 0a, 0b); before that 2026-11-02 (section 0, OnePlus 8 Pro cellular); before that 2026-10-26 ~04:55 MSK by the scheduler session (sections 2, 3, 4, 7 for the scheduler; the rest as the documentation session left it at ~03:30). **Checked state** = what I ran/read on that date; **historical** = taken from earlier session notes and flagged as such.
+**Last updated: 2026-11-13** (section 0c); before that 2026-11-07** (sections 0a, 0b); before that 2026-11-02 (section 0, OnePlus 8 Pro cellular); before that 2026-10-26 ~04:55 MSK by the scheduler session (sections 2, 3, 4, 7 for the scheduler; the rest as the documentation session left it at ~03:30). **Checked state** = what I ran/read on that date; **historical** = taken from earlier session notes and flagged as such.
+
+## 0c. OnePlus 8 Pro, 2026-11-13 (RAM images 374-396, kernels `data103`-`data113`; nothing flashed)
+
+- **Charging (verified on the phone, c20a282):** it charges (3 A in, ~2 A into the cell) under hard limits: a 95% cap (resumes at 90),
+  4.40 V, 5-45 C, 10 h, the gauge silent = off, fv 4.35 V / fcc 2 A, and the PMIC's own bark-bite watchdog, so a hung kernel stops
+  charging. Do not weaken these (owner's order). `charge_limit=N`, `charge_wd_test=1/2` (tests). [subsystems/power.md](subsystems/power.md).
+- **Weather (verified, userland 216a810):** the app and the widget show Open-Meteo's weather, answered on the phone
+  (`userland/src/weather_standin.m`; Apple's service needs FairPlay). [research/ios-userland.md](research/ios-userland.md) §4a.
+- **Compass: not working.** SEE registers no magnetometer; the MEMSIC/AKM drivers' WHO-AM-I read on the DSP's I2C bus 1 fails, and
+  the DSP's log is not reachable (no diag over GLINK/QRTR, no adspmsgd in the sensors process). Everything tried:
+  [subsystems/input-peripherals.md](subsystems/input-peripherals.md).
+- **App Store / Apple ID:** the same FairPlay wall (T15/T48); not attempted further. **AirDrop:** needs AWDL (TODO), not started.
+- The scratch boot script's default kernel is `data113` (all of the above).
 
 ## 0b. OnePlus 8 Pro, 2026-11-07 later (RAM images 175-185, kernel `data75`, loader 15; nothing flashed, boot_a still image 145)
 
