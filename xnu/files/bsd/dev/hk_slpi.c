@@ -479,6 +479,36 @@ smem_item(uint32_t item, uint32_t *size)
 	return 0;
 }
 
+/*
+ * (2026-11-13) Any SMEM item, for looking (OnePlus's sensor feedback, item 608, where the sensor DSP notes what it found):
+ * hk_sysctl kern.hackios.smem_item=N, then kern.hackios.smem_dump: its size and its first 2 KB, hex, 32 bytes a line.
+ */
+static int smem_dump_item = 608;
+SYSCTL_DECL(_kern_hackios);
+SYSCTL_INT(_kern_hackios, OID_AUTO, smem_item, CTLFLAG_RW | CTLFLAG_LOCKED, &smem_dump_item, 0, "the SMEM item smem_dump shows");
+
+static int
+smem_dump_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	static char text[8192];
+	uint32_t size = 0, at = smem_item((uint32_t)smem_dump_item, &size);
+	int n = snprintf(text, sizeof(text), "item %d: %s, %u bytes\n", smem_dump_item, at ? "there" : "NOT THERE", size);
+
+	for (uint32_t i = 0; at != 0 && i < size && i < 2048 && n < (int)sizeof(text) - 100; i += 32) {
+		uint8_t b[32] = { 0 };
+
+		smem_peek(at + i, b, 32);
+		n += snprintf(text + n, sizeof(text) - (size_t)n, "%04x:", i);
+		for (int k = 0; k < 32; k++) {
+			n += snprintf(text + n, sizeof(text) - (size_t)n, "%s%02x", k % 4 ? "" : " ", b[k]);
+		}
+		n += snprintf(text + n, sizeof(text) - (size_t)n, "\n");
+	}
+	return SYSCTL_OUT(req, text, strlen(text) + 1);
+}
+SYSCTL_PROC(_kern_hackios, OID_AUTO, smem_dump, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, smem_dump_sysctl, "A",
+    "the SMEM item kern.hackios.smem_item names: its first 2 KB");
+
 static void
 show_partition(void)
 {
@@ -1909,7 +1939,7 @@ struct glink_packet {
  * carries APR, the audio services' own protocol (below; Android's apr_tal_rpmsg.c asks for no
  * particular intents: what the DSP sends there is a few hundred bytes, up to a few kilobytes).
  */
-enum { CHANNEL_QRTR, CHANNEL_APR, CHANNEL_PMIC, CHANNEL_SAT, CHANNELS };
+enum { CHANNEL_QRTR, CHANNEL_APR, CHANNEL_PMIC, CHANNEL_SAT, CHANNEL_DIAG_CTRL, CHANNEL_DIAG_DATA, CHANNEL_DIAG_CMD, CHANNELS };
 
 struct glink_channel {
 	const char *name;
@@ -1950,6 +1980,14 @@ static struct {
 		[CHANNEL_PMIC] = { .name = "PMIC_RTR_SLPI_APPS", .ours = 3, .intents = { { 0x200, 6 }, { 0x1000, 2 }, { 0, 0 } } },
 		/* the DSP's own road to the modem (voice_sat=1, instantnoodle_modem.c): empty without it, so that this side never opens it */
 		[CHANNEL_SAT] = { .name = "mhi_sat", .ours = 4, .intents = { { 0x200, 6 }, { 0x1000, 2 }, { 0, 0 } } },
+		/*
+		 * (2026-11-13) Diag's channels, as Linux's diagfwd_glink names them, opened from our side with slpi_diag=1 (their
+		 * names are empty otherwise, which no channel of the DSP's matches): whether the DSP's log (its F3 messages) can be
+		 * had this way. What comes is kept raw in kern.hackios.slpi_diag.
+		 */
+		[CHANNEL_DIAG_CTRL] = { .name = "", .ours = 5, .intents = { { 0x400, 6 }, { 0x2000, 2 }, { 0, 0 } } },
+		[CHANNEL_DIAG_DATA] = { .name = "", .ours = 6, .intents = { { 0x2000, 8 }, { 0x4000, 2 }, { 0, 0 } } },
+		[CHANNEL_DIAG_CMD] = { .name = "", .ours = 7, .intents = { { 0x400, 4 }, { 0, 0 }, { 0, 0 } } },
 	},
 };
 
@@ -2159,6 +2197,18 @@ glink_pump(void)
 			glink_advance(length);
 			if (message.param1 == GLINK_VERSION_1 && message.param2 == glink.features) {
 				glink.agreed = true;
+				for (unsigned c = CHANNEL_DIAG_CTRL; c <= CHANNEL_DIAG_CMD; c++) {
+					struct glink_channel *d = &glink.channel[c];
+					uint32_t size = (uint32_t)strlen(d->name) + 1;
+
+					if (d->name[0] != 0 && !d->asked) {
+						bzero(name, sizeof(name));
+						strlcpy(name, d->name, sizeof(name));
+						glink_say(GLINK_OPEN, d->ours, size, name, (size + 7) & ~7u);
+						d->asked = true;
+						printf("slpi: glink: \"%s\" opened from our side as channel %u\n", d->name, d->ours);
+					}
+				}
 			} else if (message.param1 != 0) {
 				glink.features &= message.param2;
 				glink_say(GLINK_VERSION, GLINK_VERSION_1, glink.features, NULL, 0);
@@ -2844,6 +2894,11 @@ sns_request(uint64_t suid_low, uint64_t suid_high, uint32_t msg_id, const uint8_
 	return qrtr_out_packet(QRTR_DATA, SNS_PORT, sns_node, sns_port, qmi, 12 + q);
 }
 
+static char sns_suid_text[2048];
+SYSCTL_DECL(_kern_hackios);
+SYSCTL_STRING(_kern_hackios, OID_AUTO, sns_suids, CTLFLAG_RD | CTLFLAG_LOCKED, sns_suid_text, sizeof(sns_suid_text),
+    "every SUID answer of SEE: data type:number of sensors");
+
 static int
 sns_kind_of(const uint8_t *name, uint32_t length)
 {
@@ -2866,7 +2921,26 @@ sns_event(uint64_t suid_low, uint64_t suid_high, uint32_t msg_id, uint64_t times
 	if (msg_id == 768) {
 		/* the SUID sensor's answer: a kind's name, then its sensors */
 		int kind = -1;
+		char type[40] = "";
+		unsigned suids = 0;
 
+		{
+			/* (2026-11-13) every answer, its type and how many sensors, for kern.hackios.sns_suids */
+			uint32_t c_at = 0, c_field, c_wire;
+			uint64_t c_value;
+			const uint8_t *c_bytes;
+
+			while (pb_next(payload, length, &c_at, &c_field, &c_wire, &c_value, &c_bytes)) {
+				if (c_field == 1 && c_wire == 2) {
+					snprintf(type, sizeof(type), "%.*s", (int)(c_value < 39 ? c_value : 39), (const char *)c_bytes);
+				} else if (c_field == 2 && c_wire == 2) {
+					suids++;
+				}
+			}
+			size_t used = strlen(sns_suid_text);
+
+			snprintf(sns_suid_text + used, sizeof(sns_suid_text) - used, "%s:%u ", type, suids);
+		}
 		while (pb_next(payload, length, &at, &field, &wire, &value, &bytes)) {
 			if (field == 1 && wire == 2) {
 				kind = sns_kind_of(bytes, (uint32_t)value);
@@ -3103,15 +3177,31 @@ sns_start(void)
 		tell("slpi: sns: the DSP offers no service 400: no sensors\n");
 		return;
 	}
-	for (int i = 0; i < SNS_KINDS; i++) {
+	/*
+	 * (2026-11-13) sns_default=0: every sensor of a type, not only its default (default_only false); sns_more=1: also types
+	 * this file has no use for, so that kern.hackios.sns_suids says what SEE registered (the magnetometer's hunt).
+	 */
+	uint32_t default_only = 1, more = 0;
+	static const char *const more_names[] = { "mag_fusion", "devinfo", "registry", "interrupt", "async_com_port", "timer",
+		"remote_proc_state", "data_acquisition_engine", "diag_sensor", "mag_uncal", "oplus_mag", "fusion", "hall_effect",
+		"angle_hall", "mag_test", "sensor_feedback" };
+
+	PE_parse_boot_argn("sns_default", &default_only, sizeof(default_only));
+	PE_parse_boot_argn("sns_more", &more, sizeof(more));
+	for (int i = 0; i < SNS_KINDS + (more ? (int)(sizeof(more_names) / sizeof(more_names[0])) : 0); i++) {
 		uint8_t payload[64];
-		uint32_t n = pb_bytes(payload, 1, sns_kind_names[i], (uint32_t)strlen(sns_kind_names[i]));
+		const char *name = i < SNS_KINDS ? sns_kind_names[i] : more_names[i - SNS_KINDS];
+		uint32_t n = pb_bytes(payload, 1, name, (uint32_t)strlen(name));
+		bool asked;
 
 		n += pb_varint(payload + n, 2 << 3 | 0);
 		n += pb_varint(payload + n, 1);          /* register_updates */
 		n += pb_varint(payload + n, 3 << 3 | 0);
-		n += pb_varint(payload + n, 1);          /* default_only */
-		sns_kinds[i].asked = sns_request(suid_sensor, suid_sensor, 512, payload, n) == 0;
+		n += pb_varint(payload + n, default_only);
+		asked = sns_request(suid_sensor, suid_sensor, 512, payload, n) == 0;
+		if (i < SNS_KINDS) {
+			sns_kinds[i].asked = asked;
+		}
 		sleep_ms(50);
 	}
 	/*
@@ -3790,6 +3880,60 @@ battmgr_stop(void)
 
 static volatile bool link_wanted, link_runs;
 
+/* (2026-11-13) what comes on diag's channels (slpi_diag=1): kept raw, a line a packet, for kern.hackios.slpi_diag */
+static char slpi_diag_text[16384];
+static uint32_t slpi_diag_used, slpi_diag_packets;
+SYSCTL_DECL(_kern_hackios);
+
+static int
+slpi_diag_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	static char text[sizeof(slpi_diag_text) + 512];
+	int n = 0;
+
+	for (unsigned c = CHANNEL_DIAG_CTRL; c <= CHANNEL_DIAG_CMD; c++) {
+		struct glink_channel *d = &glink.channel[c];
+
+		n += snprintf(text + n, sizeof(text) - (size_t)n, "\"%s\": asked %d acknowledged %d theirs %u open %d\n", d->name,
+		    d->asked, d->acknowledged, d->theirs, d->open);
+	}
+	n += snprintf(text + n, sizeof(text) - (size_t)n, "%u packets; other channels the DSP opened: %s %s %s %s\n%s",
+	    slpi_diag_packets, glink.others[0], glink.others[1], glink.others[2], glink.others[3], slpi_diag_text);
+	return SYSCTL_OUT(req, text, strlen(text) + 1);
+}
+SYSCTL_PROC(_kern_hackios, OID_AUTO, slpi_diag, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, slpi_diag_sysctl, "A",
+    "the sensor DSP's diag channels: their state, what came (channel, length, bytes, text)");
+
+static void
+diag_input(unsigned from, const uint8_t *data, uint32_t length)
+{
+	char line[400];
+	int n;
+
+	slpi_diag_packets++;
+	n = snprintf(line, sizeof(line), "%s %u:", from == CHANNEL_DIAG_CTRL ? "ctrl" : from == CHANNEL_DIAG_DATA ? "data" : "cmd",
+	    length);
+	for (uint32_t i = 0; i < length && i < 24 && n < (int)sizeof(line) - 4; i++) {
+		n += snprintf(line + n, sizeof(line) - (size_t)n, " %02x", data[i]);
+	}
+	n += snprintf(line + n, sizeof(line) - (size_t)n, " |");
+	for (uint32_t i = 0; i < length && n < (int)sizeof(line) - 2; i++) {
+		char c = (char)data[i];
+
+		if (c >= 32 && c < 127) {
+			line[n++] = c;
+		} else if (n > 0 && line[n - 1] != '.') {
+			line[n++] = '.';
+		}
+	}
+	line[n++] = '\n';
+	line[n] = 0;
+	if (slpi_diag_used + (uint32_t)n < sizeof(slpi_diag_text) - 1) {
+		memcpy(slpi_diag_text + slpi_diag_used, line, (size_t)n + 1);
+		slpi_diag_used += (uint32_t)n;
+	}
+}
+
 static void
 link_thread(__unused void *parameter, __unused wait_result_t result)
 {
@@ -3836,6 +3980,8 @@ link_thread(__unused void *parameter, __unused wait_result_t result)
 				battmgr_input(packet->data, packet->length);
 			} else if (from == CHANNEL_SAT) {
 				/* (no satellite channel to the modem on the sensor DSP) */
+			} else if (from >= CHANNEL_DIAG_CTRL && from <= CHANNEL_DIAG_CMD) {
+				diag_input(from, packet->data, packet->length);
 			} else {
 				hk_fastrpc_input(packet->data, packet->length);   /* (FastRPC's answers: hk_fastrpc.c) */
 			}
@@ -4299,6 +4445,11 @@ hk_slpi_init(void)
 			keep = false;
 		}
 		glink.channel[CHANNEL_SAT].name = "";   /* (nothing of the modem's on the sensor DSP) */
+		if (option("slpi_diag")) {
+			glink.channel[CHANNEL_DIAG_CTRL].name = "DIAG_CTRL";
+			glink.channel[CHANNEL_DIAG_DATA].name = "DIAG_DATA";
+			glink.channel[CHANNEL_DIAG_CMD].name = "DIAG_CMD";
+		}
 		quiet = !option("slpi_loud");   /* (slpi_loud=1: every step's lines to the loader's log as well) */
 		pause_ms = 0;
 		listen_seconds = 1;

@@ -280,8 +280,30 @@ FAT (`image/`, `hk_fw_partition_file()` in `instantnoodle_modem.c`; nothing bund
     adspmsgd.c: heap 0, filter 0x1f001f, a 256 KB buffer, then `wait()`), for which the DSP asks the AP for the buffer
     through `apps_mem` (`request_map64`) and the AP maps it into the DSP (Linux fastrpc's INIT_MMAP on the process
     handle). Neither is served here yet.
-  - Next: `apps_mem` and the remote map, then init3 in the sensors process, then the DSP's log for the bus-1 parts.
-    With a magnetometer: the heading for iOS (locationd/CoreLocation's `CLHeading`).
+  - (2026-11-13, kernel data109-113, images 385-390) Tried and ruled out:
+    - `apps_mem` (request_map64 with a remote map, INIT_MMAP on handle 1) is served now, but `adspmsgd_adsp1` init3 in
+      the sensors process fails (-1) without ever asking for memory, as init2 does: handle 5 is not the log there.
+    - Diag over GLINK: `slpi_diag=1` opens `DIAG_CTRL`, `DIAG_DATA`, `DIAG_CMD` from our side. The DSP acknowledges and
+      never opens its end (`kern.hackios.slpi_diag`). The only channels it opens unasked are `mhi_sat` and
+      `LOOPBACK_CTL_DSPS`. Its QRTR services: 15 (inst. 48, 49), 24, 43, 51 (inst. 8, 12), 66, 400. No diag.
+    - `sns_default=0` (every sensor of a type) and `sns_more=1` (more types): `kern.hackios.sns_suids` lists every SUID
+      answer, and there is no `mag`, `mag_fusion`, `mag_cal` or `geomag_rv` at all.
+    - SMEM 130 matches OnePlus's `oplus_sensor_devinfo.c` (LineageOS lineage-20) field for field. The device tree has no
+      `ldo_enable` and no `mag_fusion` entry. SMEM 608 (sensor feedback) is 32 bytes and says nothing
+      (`kern.hackios.smem_item` / `smem_dump`).
+    - Booting without the audio DSP and sound (`adsp=0 sound=0 mic=0 voice=0`) changes nothing.
+    - SEE rewrites `devinfo.<sensor>` for each sensor it brings up: gsensor, gyro, als, als_rear, ps, rgb, rgb_rear. It
+      does not rewrite `devinfo.mag`.
+  - Android did run a magnetometer here: `sns_mag_fusion.bias` holds a real, updated calibration (version 1, accuracy 2),
+    and Android's `sensors_list.txt` has `geomag_rv`.
+  - How the MEMSIC driver probes (slpi.b16, disassembled with LLVM's `llvm-objdump --triple=hexagon`; SEE's printf
+    descriptors are {line|level, 8, format, 0} right before each string):
+    `process_timer_events` turns the rail on, then "memsic sbefore read id", "Read chip id", and WHO-AM-I compared
+    with 0x10; otherwise "Read WHO-AM-I error" / "memsic Unsupported Sensor", then "Find Sensor. hw_is_present".
+    Both parts on bus 1 failing that read points at the bus or the parts' supply, which the DSP owns. Its messages go
+    out only through Qualcomm diag, which this phone's sensor DSP offers neither over GLINK nor QRTR here.
+  - Next, if picked up again: the SSC's own bus-1 pins and pull-up supply (from a schematic or the firmware's GPIO and
+    rail tables), or a way to the DSP's diag. With a magnetometer: the heading for iOS (CoreLocation's `CLHeading`).
 - **Not done:** CoreMotion for apps (locationd would want the iPhone X's motion coprocessor protocol). `slpi=1` is not in the default arguments yet. See [../TODO.md](../TODO.md) T47.
 
 GPS belongs to the modem (QMI LOC, `userland/src/hk_location.m`, research/modem-sdx55.md). Redwood: not present.

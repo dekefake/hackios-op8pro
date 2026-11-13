@@ -128,8 +128,16 @@ sleep_ms(uint32_t ms)
 #define FRPC_STREAM             0x541                   /* dt: qcom,msm_fastrpc_compute_cb13 */
 #define FRPC_IOVA               0x80000000ull           /* dt: its qcom,iommu-dma-addr-pool */
 #define FRPC_CB_BITS            ((uint64_t)(FRPC_STREAM & 0xf) << 32)
-#define FRPC_POOL               (2u << 20)              /* two halves: the listener's calls and the others' */
-#define FRPC_HALF               (FRPC_POOL / 4)   /* four slots: each session's listener and its other calls */
+#define FRPC_POOL               (2u << 20)
+/*
+ * Eight slots of 256 KB (2026-11-13; four of 512 KB before): 0-3 each session's listener and its other calls (slot, slot + 1),
+ * 4-5 a call made while one of the session's reverse calls is served (FRPC_NESTED: the remote map apps_mem asks for), 6-7 the
+ * memory the DSP's log goes into (FRPC_LOGBUF: adspmsgd's init3 asks apps_mem for it). FRPC_HALF is a slot's size.
+ */
+#define FRPC_HALF               (FRPC_POOL / 8)
+#define FRPC_CALL_SLOTS         6
+#define FRPC_NESTED(se)         (4 + (se)->slot / 2)
+#define FRPC_LOGBUF(se)         (6 + (se)->slot / 2)
 
 static struct {
 	vm_offset_t base, second, context;
@@ -334,6 +342,7 @@ mmu_keep(void)
 #define FRPC_MAX_ARGS           16
 
 #define AEE_EFAILED             1
+#define AEE_ENOMEMORY           2
 #define AEE_EBADPARM            0x0e
 #define AEE_EUNSUPPORTED        0x14
 #define AEE_EINVHANDLE          0x2c
@@ -356,7 +365,7 @@ static struct {
 	volatile bool answered;
 	volatile int32_t result;
 	uint64_t ctx;
-} slots[4];
+} slots[FRPC_CALL_SLOTS];
 
 /*
  * Two sessions, as Android has two daemons: the root process (pd 0: what Android's sscrpcd without an argument serves --
@@ -391,7 +400,7 @@ hk_fastrpc_input(const uint8_t *data, uint32_t length)
 	memcpy(&ctx, data, 8);
 	memcpy(&result, data + 8, 4);
 	answers++;
-	for (int s = 0; s < 4; s++) {
+	for (int s = 0; s < FRPC_CALL_SLOTS; s++) {
 		if (slots[s].ctx == ctx && !slots[s].answered) {
 			slots[s].result = result;
 			__asm__ volatile ("dmb ish");
@@ -461,7 +470,7 @@ frpc_call(const struct frpc_session *session, int slot, bool kernel, uint32_t ha
 	for (bool taken = true; taken;) {
 		next_ctx = next_ctx >= 255 ? 1 : next_ctx + 1;
 		taken = false;
-		for (int k = 0; k < 4; k++) {
+		for (int k = 0; k < FRPC_CALL_SLOTS; k++) {
 			taken = taken || (k != slot && !slots[k].answered && (slots[k].ctx >> 4) == next_ctx);
 		}
 	}
@@ -1170,8 +1179,11 @@ string_of(const struct frpc_arg *a)
 	return (const char *)a->ptr;
 }
 
+static int32_t apps_mem(struct frpc_session *se, uint32_t method, uint32_t nin, uint32_t nout, struct frpc_arg *in,
+    struct frpc_arg *out);
+
 static int32_t
-serve(uint32_t handle, uint32_t sc, struct frpc_arg *in, struct frpc_arg *out)
+serve(struct frpc_session *se, uint32_t handle, uint32_t sc, struct frpc_arg *in, struct frpc_arg *out)
 {
 	uint32_t method = SC_METHOD(sc), nin = SC_IN(sc), nout = SC_OUT(sc);
 
@@ -1208,6 +1220,9 @@ serve(uint32_t handle, uint32_t sc, struct frpc_arg *in, struct frpc_arg *out)
 			}
 		}
 		return 0;
+	}
+	if (handle == FRPC_APPS_MEM) {
+		return apps_mem(se, method, nin, nout, in, out);
 	}
 	if (handle != FRPC_APPS_STD) {
 		if (unsupported++ < 30) {
@@ -1389,6 +1404,126 @@ serve(uint32_t handle, uint32_t sc, struct frpc_arg *in, struct frpc_arg *out)
 	return AEE_EUNSUPPORTED;
 }
 
+/*
+ * (2026-11-13) apps_mem (quic/fastrpc apps_mem_imp.c / apps_mem_skel.c): memory the DSP asks the AP for. Only request_map64
+ * (method 2: {heapid, lflags, rflags, pad, vin u64, len u64}; {vapps u64, vadsp u64}) for one buffer a session, the one
+ * adspmsgd's init3 wants for the DSP's log (256 KB): slot FRPC_LOGBUF of the pool, already in the SMMU, mapped into the DSP
+ * as Linux fastrpc_req_mmap does -- a kernel call on handle 1, INIT_MMAP (method 4): {client_id, flags, vaddr, num} and one
+ * physical page {addr, size} in, {vaddr} out. The call goes on the session's FRPC_NESTED slot: its other slot is the one
+ * waiting for init3. vapps is our kernel address of it (adspmsgd's reader finds the ring there), vadsp the DSP's.
+ * request_unmap64 (3): said, nothing undone. The rest: not supported.
+ */
+static struct {
+	uint8_t *buffer;
+	uint32_t size, read_at;
+	uint64_t vadsp;
+} logbufs[2];
+
+static int32_t
+apps_mem(struct frpc_session *se, uint32_t method, uint32_t nin, uint32_t nout, struct frpc_arg *in, struct frpc_arg *out)
+{
+	int k = se->slot / 2;
+
+	if (method == 2 && nin == 1 && nout == 1 && in[0].length >= 32 && out[0].length >= 16) {
+		int32_t heapid = (int32_t)u32_at(&in[0], 0), result = -1;
+		uint32_t lflags = u32_at(&in[0], 4), rflags = u32_at(&in[0], 8);
+		uint64_t vin, len, vapps, rsp = 0;
+		struct { int32_t client_id; uint32_t flags; uint64_t vaddr; int32_t num, pad; } req;
+		struct { uint64_t addr, size; } page;
+		struct frpc_arg a[3];
+		int error;
+
+		memcpy(&vin, (const uint8_t *)in[0].ptr + 16, 8);
+		memcpy(&len, (const uint8_t *)in[0].ptr + 24, 8);
+		say("frpc: %s: apps_mem request_map64(heap %d, lflags %#x, rflags %#x, vin %#llx, %llu bytes)\n", se->name, heapid, lflags,
+		    rflags, vin, len);
+		if (logbufs[k].buffer != NULL || len == 0 || len > FRPC_HALF) {
+			return AEE_ENOMEMORY;
+		}
+		logbufs[k].buffer = (uint8_t *)(pool + (vm_offset_t)FRPC_LOGBUF(se) * FRPC_HALF);
+		logbufs[k].size = (uint32_t)len;
+		bzero(logbufs[k].buffer, FRPC_HALF);
+		FlushPoC_DcacheRegion((vm_offset_t)logbufs[k].buffer, FRPC_HALF);
+		req = (typeof(req)){ .client_id = se->tgid, .flags = rflags, .vaddr = 0, .num = sizeof(page) };
+		page.addr = dsp_address(logbufs[k].buffer);
+		page.size = (len + 4095) & ~4095ull;
+		a[0] = (struct frpc_arg){ &req, 24 };
+		a[1] = (struct frpc_arg){ &page, sizeof(page) };
+		a[2] = (struct frpc_arg){ &rsp, 8 };
+		error = frpc_call(se, FRPC_NESTED(se), true, 1, SC(4, 2, 1), a, &result, 10000);
+		say("frpc: %s: INIT_MMAP of %llu bytes at %#llx: %d, result %#x, DSP address %#llx\n", se->name, page.size, page.addr, error,
+		    result, rsp);
+		if (error != 0 || result != 0) {
+			logbufs[k].buffer = NULL;
+			return error != 0 ? AEE_EFAILED : result;
+		}
+		logbufs[k].vadsp = rsp;
+		vapps = (uint64_t)(uintptr_t)logbufs[k].buffer;
+		memcpy(out[0].ptr, &vapps, 8);
+		memcpy((uint8_t *)out[0].ptr + 8, &rsp, 8);
+		return 0;
+	}
+	if (method == 3) {
+		say("frpc: %s: apps_mem request_unmap64: left mapped\n", se->name);
+		return 0;
+	}
+	say("frpc: %s: apps_mem method %u (%u in, %u out): not served\n", se->name, method, nin, nout);
+	return AEE_EUNSUPPORTED;
+}
+
+/*
+ * adspmsgd's ring (quic/fastrpc adspmsgd.c): the buffer's last 4 bytes are the DSP's write position, the rest NUL-ended
+ * messages going round. Read every 100 ms, each message to trace_dsp_line() (kern.hackios.dsplog) and, the first 400, said.
+ */
+static void
+logbuf_thread(void *p, __unused wait_result_t w)
+{
+	struct frpc_session *se = p;
+	int k = se->slot / 2;
+	char message[300];
+	unsigned said = 0;
+
+	for (;;) {
+		uint8_t *b = logbufs[k].buffer;
+		uint32_t ring, at, write;
+
+		delay_for_interval(100, NSEC_PER_MSEC);
+		if (b == NULL || leaving) {
+			if (leaving) {
+				break;
+			}
+			continue;
+		}
+		ring = logbufs[k].size - 4;
+		FlushPoC_DcacheRegion((vm_offset_t)b, logbufs[k].size);
+		memcpy(&write, b + ring, 4);
+		if (write >= ring) {
+			continue;
+		}
+		at = logbufs[k].read_at;
+		while (at != write) {
+			uint32_t n = 0;
+
+			while (at != write && b[at] == 0) {
+				at = (at + 1) % ring;
+			}
+			while (at != write && b[at] != 0 && n < sizeof(message) - 1) {
+				message[n++] = (char)b[at];
+				at = (at + 1) % ring;
+			}
+			message[n] = 0;
+			if (n > 0) {
+				trace_dsp_line(message, n);
+				if (said++ < 400) {
+					say("frpc: dsp %s: %s\n", se->pd ? "sns" : "root", message);
+				}
+			}
+		}
+		logbufs[k].read_at = at;
+	}
+	thread_terminate(current_thread());
+}
+
 static bool
 listener_init(struct frpc_session *se)
 {
@@ -1492,7 +1627,7 @@ listener_thread(void *p, __unused wait_result_t w)
 				out_length = 0;
 				continue;
 			}
-			result = serve(handle, sc, in, out);
+			result = serve(se, handle, sc, in, out);
 			{
 				static int trace = -1;
 				static uint32_t traced;
@@ -1580,6 +1715,24 @@ session_up(struct frpc_session *se)
 		if (PE_parse_boot_argn("slpi_dsplog", &dsplog, sizeof(dsplog)) && dsplog != 0) {
 			error = frpc_call(se, se->slot + 1, false, 5, SC(2, 0, 0), a, &result, 10000);
 			say("frpc: %s: adspmsgd_adsp1 init2 (the DSP's log to us): %d, result %#x\n", se->name, error, result);
+			if (error != 0 || result != 0) {
+				/*
+				 * (2026-11-13) init3 on the same static handle, as Android's adspmsgd_init does first: {heapid 0, ion_flags
+				 * RPCMEM_HEAP_DEFAULT, filter 0x1f001f, pad, buf_size u64 256 KB}; {buff_addr u64}. The DSP gets its buffer from
+				 * us through apps_mem (above) meanwhile; logbuf_thread reads it.
+				 */
+				uint32_t i3_in[6] = { 0, 0x80000000u, 0x1f001f, 0, 256 * 1024, 0 };
+				uint64_t i3_out = 0;
+				thread_t reader;
+
+				a[0] = (struct frpc_arg){ i3_in, 24 };
+				a[1] = (struct frpc_arg){ &i3_out, 8 };
+				error = frpc_call(se, se->slot + 1, false, 5, SC(4, 1, 1), a, &result, 15000);
+				say("frpc: %s: adspmsgd_adsp1 init3: %d, result %#x, buffer %#llx\n", se->name, error, result, i3_out);
+				if (error == 0 && result == 0 && kernel_thread_start(logbuf_thread, se, &reader) == KERN_SUCCESS) {
+					thread_deallocate(reader);
+				}
+			}
 			if (error != 0 || result != 0) {
 				/* a remote_handle64 interface (quic/fastrpc adspmsgd_adsp1.h): opened by its name in a user process */
 				char mname[] = "adspmsgd_adsp1";
