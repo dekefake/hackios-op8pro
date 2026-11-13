@@ -274,8 +274,14 @@ FAT (`image/`, `hk_fw_partition_file()` in `instantnoodle_modem.c`; nothing bund
     not in any local copy of the phone's vendor files (only part of `/vendor/lib/rfsa/adsp` and the `dsp` partition
     were pulled). Also asked for and not served: `oemconfig.so` (not on the phone either), `sns_bring_to_ear.so` and
     `wigig_sensing.so` (in the `dsp` partition's `sdsp/`), and an AP-side `sns_registry` module.
-  - Next: the vendor partition's `lib/rfsa/adsp` (from `super` on UFS), served for bare `.so` names; then the DSP's
-    log for the bus-1 parts. With a magnetometer: the heading for iOS (locationd/CoreLocation's `CLHeading`).
+  - The phone's own `vendor_a` (EROFS in `super`, read block by block with `hk_lun`; `vendor_b`'s first extent is no
+    file system start, probably a Virtual A/B snapshot) has the same 37 modules in `lib/rfsa/adsp` as the earlier pull and
+    no `libadspmsgd_adsp1_skel.so`: Android does not load it either. Its way is `adspmsgd_adsp1` init3 (quic/fastrpc
+    adspmsgd.c: heap 0, filter 0x1f001f, a 256 KB buffer, then `wait()`), for which the DSP asks the AP for the buffer
+    through `apps_mem` (`request_map64`) and the AP maps it into the DSP (Linux fastrpc's INIT_MMAP on the process
+    handle). Neither is served here yet.
+  - Next: `apps_mem` and the remote map, then init3 in the sensors process, then the DSP's log for the bus-1 parts.
+    With a magnetometer: the heading for iOS (locationd/CoreLocation's `CLHeading`).
 - **Not done:** CoreMotion for apps (locationd would want the iPhone X's motion coprocessor protocol). `slpi=1` is not in the default arguments yet. See [../TODO.md](../TODO.md) T47.
 
 GPS belongs to the modem (QMI LOC, `userland/src/hk_location.m`, research/modem-sdx55.md). Redwood: not present.
