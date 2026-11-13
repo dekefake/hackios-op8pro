@@ -27,7 +27,7 @@ for t in "$@"; do
 	gl) M=/ws/xnu-deps/build/mesa/out; python3 mkeagl.py src/eagl_slots.txt $M/gl.xml $M/exported-gl.txt src/eagl.c > obj/eagl_gen.h; $DYN -dynamiclib -install_name /hackios/lib/libhackios-gl.dylib -Iobj -framework CoreFoundation -framework IOKit -framework IOSurface -lobjc $M/libOSMesa.8.dylib -o obj/libhackios-gl.dylib src/eagl.c src/gl_osmesa.c; rm -f obj/eagl_gen.h ;;
 	phone) $DYN -O2 -dynamiclib -install_name /hackios/lib/libhackios-phone.dylib -lobjc -o obj/libhackios-phone.dylib src/inject_phone.c ;;
 	call) $DYN -O2 -dynamiclib -install_name /hackios/lib/libhackios-call.dylib -framework CoreFoundation -lobjc -o obj/libhackios-call.dylib src/inject_call.c ;;
-	app) $DYN -dynamiclib -install_name /hackios/lib/libhackios-app.dylib -lobjc -framework CoreFoundation -framework CoreMedia -o obj/libhackios-app.dylib src/inject_app.c src/oslog_mirror.c ;;
+	app) $DYN -dynamiclib -install_name /hackios/lib/libhackios-app.dylib -lobjc -framework CoreFoundation -framework CoreMedia -framework Foundation -fobjc-arc -o obj/libhackios-app.dylib src/inject_app.c src/oslog_mirror.c src/weather_standin.m ;;
 	ui) $DYN -O2 -dynamiclib -install_name /hackios/lib/libhackios-ui.dylib -lobjc -o obj/libhackios-ui.dylib src/inject_ui.c ;;
 	cell) $DYN -O2 -o obj/hk_cell src/hk_cell.c ;;
 	im) $DYN -O1 -fobjc-arc -dynamiclib -install_name /hackios/lib/libhackios-im.dylib -framework Foundation -lobjc -o obj/libhackios-im.dylib src/inject_im.m ;;

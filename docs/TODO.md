@@ -208,6 +208,9 @@ GNSS belongs to the modem (T06); location via its QMI service 16. `locationd` de
   Also missing, and not what stops it: `com.apple.kvsd` (iCloud key-value store), `com.apple.bird` (iCloud Drive). So Weather
   waits on the same FairPlay as the App Store: Apple's device attestation, not something to fake. Ways around it that do not
   touch FairPlay would change where the data comes from (another provider fed to the app), which is the owner's call.
+  **Done 2026-11-13 (the owner chose another source):** Weather and its widget show Open-Meteo's weather, answered on the phone by
+  `userland/src/weather_standin.m` (research/ios-userland.md §4a). Left: air quality (Open-Meteo has a separate API), the
+  maps' overlays, severe weather alerts.
 - **Refs:** research/ios-userland.md §4; K11.
 
 ### T16 Brightness: prove the light changes — Display · Partial · P2

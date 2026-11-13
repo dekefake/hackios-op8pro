@@ -254,6 +254,54 @@ All in `userland/src/inject_sb.c` (replacements located by class, selector and e
 - Other denied hardware daemons (bluetooth, locationd, nfcd, biometrickitd, pearld, camera, thermalmonitord, keybagd, sepd…) have
   no hardware or no Secure Enclave.
 
+## 4a. Weather (WeatherDaemon, iOS 16.5) and the stand-in (2026-11-13) [observed on the phone, images 383-396; source: the 20F66 shared cache]
+
+- **In process.** The Weather app and its widget run WeatherDaemon (private framework) inside their own process.
+  `WDSJWTAuthenticator` asks `+[AMSMescal signatureFromData:type:bag:error:]` (AppleMediaServices, type 1) for a FairPlay
+  signature of a token request. Without FairPlay that fails (`AMSFairPlayGetHardwareInfo` -42184, "Mescal Failed"), so no token
+  is asked and no data request is made. (`WDSHMACSigner` and the defaults `weatherdaemon.enableJWTTokenAuth` and
+  `weatherdaemon.useDemoWeatherData` exist for internal builds.)
+- **Requests**, seen with the stand-in answering them:
+  - `POST https://weatherkit.apple.com/v3/token` (also on `weather-data.apple.com`);
+  - `GET https://weatherkit.apple.com/v3/availability/{lat}/{lon}?...`;
+  - `GET https://weatherkit.apple.com/v3/weather/{lang}/{lat}/{lon}?dataSets=currentWeather,forecastDaily,forecastHourly,`
+    `severeWeather,weatherChange,airQuality,forecastNextHour,appLocationConfig&...`;
+  - `GET https://weather-map2.apple.com/v1/mapOverlay/{lang}/metadata`.
+  The answers are **JSON** (`Accept: application/json`, Swift Codable), not FlatBuffers.
+- **The model**, from WeatherDaemon's Swift field descriptors (`__swift5_fieldmd`). The data sets are optional in the
+  response, but `WeatherModel` throws `missing(product:)`, error 0 ("WeatherModel.Errors 0"), for any data set asked
+  and not given.
+  - `Metadata`: `readTime`, `expireTime`, `version` (Int), `latitude`, `longitude` are required; `reportedTime`,
+    `language`, `providerName`, `providerLogo`, `temporarilyUnavailable`, `units` ("m"), `attributionURL` are optional.
+  - `CurrentWeather`, required: `cloudCover`, `conditionCode`, `daylight` (a JSON boolean: 0/1 is refused), `humidity`,
+    `precipitationAmount1h/6h/24h`, `precipitationIntensity`, `snowfallAmount1h/6h/24h`, `temperature`, `uvIndex` (Int),
+    `visibility`, `windSpeed`. Optional: `asOf`, `pressure`, `pressureTrend`, `sunrise`, `sunset`, `temperatureApparent`,
+    `temperatureDewPoint`, `temperatureTodayMax/Min`, `windDirection` (Int), `windGust`.
+  - Hour, required: `forecastStart`, `cloudCover`, `conditionCode`, `daylight`, `humidity`, `precipitationAmount`,
+    `precipitationChance`, `temperature`, `uvIndex`, `visibility`, `windSpeed`.
+  - Day (no `forecastEnd`), required: `forecastStart`, `maxUvIndex`, `precipitationAmount`, `precipitationChance`,
+    `snowfallAmount`, `temperatureMax`, `temperatureMin`. Optional: the sun and moon times, `moonPhase`,
+    `temperatureMax/MinTime`, and `daytimeForecast` / `overnightForecast` / `restOfDayForecast`. A day part requires
+    `cloudCover`, `conditionCode`, `humidity`, `precipitationChance`, `windSpeed`.
+  - Next hour: `metadata`, `condition` (an array), `summary` ({`startTime`, `endTime`, `condition`: clear / precipitation
+    / rain / snow...}), `minutes` ({`startTime`, `precipitationChance`, `precipitationIntensity`,
+    `precipitationIntensityPerceived` 0-3}).
+  - Also: `weatherChange` {`metadata`, `changes`}, `severeWeather` {`metadata`, `events`}, `weatherAlerts`
+    {`metadata`, `alerts`}, `airQuality` {`metadata`, all else optional}.
+  - Enums: conditionCode is WeatherKit's (Clear, MostlyClear, PartlyCloudy, MostlyCloudy, Cloudy, Rain, HeavyRain,
+    Drizzle, Snow...); precipitation type lowercase (clear, rain, snow, sleet, hail, mixed); pressure trend rising /
+    falling / steady.
+- **The stand-in** (`userland/src/weather_standin.m`, in libhackios-app for Weather and WeatherWidget):
+  - The Mescal call answers a placeholder, only when the caller is WeatherDaemon.
+  - An NSURLProtocol put first in every session configuration answers every request to Apple's weather hosts, and any
+    request carrying the placeholder, on the phone; nothing is sent to Apple.
+  - The weather comes from Open-Meteo (`api.open-meteo.com`, the place rounded to 0.01 degree) and is turned into the
+    model above.
+  - Verified on the phone (image 395/396): the app shows the temperature, the condition, high/low, the hourly strip
+    and the 10-day list, and the home screen widget shows the same.
+  - Not given: air quality (empty), alerts, weather changes; the maps' overlays are answered 404.
+  - `weather_standin=0` turns it off.
+
 ## 5. IO80211 / Wi-Fi (details in [../subsystems/wifi.md](../subsystems/wifi.md))
 - wifid → Apple80211 ioctls (`SIOCGA80211/SIOCSA80211`); `IO80211.framework` fills/reads the same structs
   (`Apple80211GetWithIOCTL`, `_getScanData`, `_addScanResultToList`, `_performAssociation`, `_dispatchAsyncAssocEvent`,
