@@ -399,6 +399,8 @@ Sysctls: `kern.hackios.sensors` (the sensors SEE reported and their last values)
 | `battery_empty_mv` | Empty-battery threshold in mV (default 3300). |
 | `battery_shutdown` | 0: only log an empty battery. |
 | `charge_icl` | 0: leave the charger input limit to the firmware. |
+| `charge_limit` | OnePlus 8 Pro: stop charging at this percent (50-100, default 95; charging resumes 5 points below). |
+| `charge_wd_test` | OnePlus 8 Pro, tests only: 1 stops petting the PMIC's charging watchdog after a minute (charging then stops); 2 stops it from 60 s to 150 s. |
 
 ### `bsd/dev/instantnoodle_slider.c`
 
@@ -567,4 +569,4 @@ Added 2026-11-12 (camera: telephoto and video, [subsystems/input-peripherals.md]
 
 Also 2026-11-12 (camera, iOS's photograph pipeline): `cam_main=4` (kernel: the IMX689 in its 2000x1128 mode always; default 4000x3000 for photographs, 2000x1128 for video as the stream asks), `mediamtl=0` (mediaserverd's capture stack does not get the Metal device; now kept by default, and `mediamtl=1` is gone), `photo_gnr=0` (photographs go past iOS's noise reduction), `photo_gnr_trace=1` (GNR and its Metal bindings traced), `photo_sis=1` (the photograph's quality prioritization as asked: SIS brackets), `scene_classifier=1` (the scene classifier's sink left as iOS has it: it keeps the graph from stopping), `media_stopwatch=1` (a capture graph slow to stop lists its sinks and where the end of the data went), `media_list=Class,...` (each named class's methods and ivars in mediaserverd, a reading aid). `dual=1` (the camera device offers the wide and telephoto streams as a synchronized streams group, for the Back Dual Camera: work in progress).
 
-Added 2026-11-12 (OnePlus 8 Pro charging, [subsystems/power.md](subsystems/power.md)): `charge_enable=0` (the PM8150B's charging command left as the boot chain set it: off), and the sysctls `kern.hackios.charger_pm8150b` (the charger's registers), `kern.hackios.battery_stage` (the gauge thread's progress), `kern.hackios.warp` (the Warp MCU: answers, its lines).
+Added 2026-11-12 (OnePlus 8 Pro charging, [subsystems/power.md](subsystems/power.md)): `charge_enable=0` (the PM8150B's charging command left as the boot chain set it: off), and the sysctls `kern.hackios.charger_pm8150b` (the charger's registers), `kern.hackios.battery_stage` (the gauge thread's progress), `kern.hackios.warp` (the Warp MCU: answers, its lines). Added 2026-11-13: `charge_enable=0` now also turns off the charging limits and the PMIC watchdog (nothing is written to the charger); `charge_limit`, `charge_wd_test`, sysctl `kern.hackios.charge_control` (whether charging is allowed, and why not).

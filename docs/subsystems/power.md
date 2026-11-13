@@ -194,6 +194,35 @@ The cable-replug fix was not re-run.
   charger (DCP) the limit is 2000 mA. `sysctl kern.hackios.charger_pm8150b` (with `hk_sysctl` on the phone) gives the
   charger's registers at any time. The gauge thread's own log lines fall in the part of a busy run's log the loader does
   not keep; `kern.hackios.battery_stage` says how far it is.
+- **Charging limits, OnePlus 8 Pro (2026-11-13, verified on the phone, kernel data103-105, RAM images 374-378).** Android's
+  OnePlus charger code is not here, so `charge_control()` in `instantnoodle_battery.c` keeps its limits, every reading (5 s).
+  Charging is on only while all of these hold, and the command is cleared (the phone runs from USB, the cell is left alone)
+  as soon as one does not:
+  - the gauge answered this reading (no reading, no charging);
+  - the cell is under `charge_limit` percent (**95 by default**; on again at 5 points below, 90);
+  - the cell is under 4400 mV (on again under 4300), and between 5.0 and 45.0 C (on again 2 C inside). OnePlus's device
+    tree stops at 50 C (`hot_bat_decidegc`) and lowers the float at 45 C and the current under 12 C; nothing here
+    lowers the current by temperature, so the window is stricter;
+  - less than 10 h of charging since the cable went in (OnePlus's `max_chg_time_sec`); after that, not again before the
+    cable comes out.
+
+  Under that, the PMIC's own limits: the float voltage (`fv_cfg` 0x1070, firmware 0x4b = 4.35 V; OxygenOS charges to
+  4.435 V) and the fast-charge current (`fcc_cfg` 0x1061, 0x28 = 2 A) are capped at those values (a higher value is
+  lowered, a lower one kept); the termination (`chgr_cfg1` 0x38) and the PMIC's safety timers (`safety_en` 0x3,
+  fast-charge timer 384 min) are as the firmware set them. Hardware JEITA is **off** on this phone (`jeita_en` 0x1090
+  reads 0; OnePlus does it in software), so the temperature window above is the only temperature limit.
+  If the gauge thread stops (a hung kernel, a panic, CrashDump), the PMIC's bark-bite watchdog turns charging off by
+  itself. It is set up as `smb5_init_hw` does: `SNARL_BARK_BITE_WD_CFG` 0x1653 = 0xf7 (bite disables charging, bark
+  32 s, bite 8 s), `WD_CFG` 0x1651 = 0x2 (on at plug-in, no AFP), petted through `BARK_BITE_WDOG_PET` 0x1643 every
+  reading.
+
+  Measured (`kern.hackios.charge_control`, `kern.hackios.charger_pm8150b`):
+  - At 57% with `charge_limit=55`: command 0, state 7 (disable).
+  - `charge_wd_test=1` (no petting after the first minute): the PMIC went to state 7 with the command still set, 45-65 s
+    after the last pet.
+  - A bite stays after petting resumes (`charge_wd_test=2`, no petting from 60 s to 150 s). The thread therefore clears
+    and sets the command when the charger reads "disable" with charging allowed and the watchdog petted for two
+    readings. Charging was full-on again 25 s after the petting resumed.
 - **Warp (VOOC) fast charging: not done.** The 8 Pro's device tree (OxygenOS 13) has an STM8S MCU, `oplus,stm8s-fastcg`
   at I2C 0x26 on the gauge's bus (se16), with the USB D+/D- switch on gpio 82, its reset on gpio 10, a clock on gpio 131
   and data on gpio 129 (TLMM north, north, south, south), firmware type 0x27, and its charging limits in the charger node
@@ -205,7 +234,7 @@ The cable-replug fix was not re-run.
   message means and the decisions are in its userspace daemon (dashd), not in the kernel, and the OPPO "vooc" driver of
   the OxygenOS 13 tree was not found in public sources. Next: the message codes (dashd, or OPPO's oplus_vooc.h), then the
   AP's half behind a boot-arg, tried with a Warp adapter in the port (it needs the owner: a charger and cable).
-- Hardware JEITA limits come from the UEFI's `QcomChargerCfg.cfg` (hard hot 55 C).
+- Hardware JEITA limits come from the UEFI's `QcomChargerCfg.cfg` (hard hot 55 C) on redwood; on the 8 Pro hardware JEITA is off (above).
 
 ## Shutdown, restart, the stock modes
 

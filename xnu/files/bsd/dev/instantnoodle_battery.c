@@ -43,6 +43,8 @@
 #include <sys/systm.h>
 #include <sys/sysctl.h>
 
+SYSCTL_DECL(_kern_hackios);
+
 
 #define GAUGE_ADDR              0x55
 #define DEVICE_TYPE_BQ27411     0x0421
@@ -174,31 +176,199 @@ icl_follow(bool plugged)
  * (2026-11-12) Charging itself. The boot chain leaves the PM8150B's charging command off (CHARGING_ENABLE_CMD 0x1042 bit 0
  * clear; the charge state then reads 7, "disable"), and nothing turned it on: with the cable in the phone ran from USB and the
  * battery stayed where it was, all day at 46% (image 370: status1 0x47, chg_en_cmd 0). Android's smb5 votes it on at its start
- * (qpnp-smb5.c smb5_init_hw: "enable the charging path", smblib_chg_disable_vote_callback writes the bit). It is set here
- * while a cable is in, read back; the PMIC's own JEITA, float voltage (fv_cfg) and fast-charge current (fcc_cfg) limits stay
- * as the firmware set them. charge_enable=0: left as it is.
+ * (qpnp-smb5.c smb5_init_hw: "enable the charging path", smblib_chg_disable_vote_callback writes the bit).
+ *
+ * (2026-11-13) And when it must not charge: Android's OnePlus charger code is not here, so its limits are, every reading
+ * (5 s), in charge_control(). Charging is on only while all of these hold, and off (the phone then runs from USB, the cell
+ * left alone) as soon as one does not:
+ *   - the gauge answered this reading (no reading, no charging);
+ *   - the cell under charge_limit percent (95 by default; on again at 5 below), under CHARGE_MAX_MV (on again under
+ *     CHARGE_RESUME_MV), between CHARGE_MIN_DC and CHARGE_MAX_DC tenths of a degree (on again 2 degrees inside them):
+ *     OnePlus's device tree (qpnp-smb5: hot_bat_decidegc 50 C stops, warm 45 C lowers the float, cool 5 C lowers the
+ *     current), taken stricter, since nothing here lowers the current by temperature;
+ *   - less than CHARGE_MAX_S of charging since the cable went in (OnePlus's max_chg_time_sec, 10 h): then not again
+ *     before the cable comes out.
+ * The PMIC's own limits under that: the float voltage (fv_cfg 0x1070, 3.6 V + 10 mV a step) and the fast-charge current
+ * (fcc_cfg 0x1061, 50 mA a step) no higher than CHARGE_FV_MV and CHARGE_FCC_MA (the firmware's own 4.35 V and 2 A; a higher
+ * value is lowered, a lower one kept); its termination current and hardware JEITA as the firmware set them.
+ * And should this thread stop (a hung kernel, a panic, the CrashDump mode), the PMIC's bark-bite watchdog (smb5-reg.h
+ * SNARL_BARK_BITE_WD_CFG 0x1653, WD_CFG 0x1651, pet BARK_BITE_WDOG_PET 0x1643; set up as smb5_init_hw does): petted every
+ * reading, it barks after 32 s unpetted and bites 8 s later, which turns the charging off in the PMIC itself.
+ * charge_enable=0: none of this, the charger left as it is. charge_limit=N: another cap (50 to 100).
+ * charge_wd_test=1: the watchdog not petted after the first minute (for seeing it bite: status1 should leave 1-3); =2: not
+ * petted from the first minute to the 150th second (whether charging comes back after a bite).
  */
 #define CHGR_CHARGING_ENABLE_CMD        0x42
 #define CHARGING_ENABLE_CMD_BIT         (1u << 0)
-static uint32_t charge_enable_on = 1;
+#define CHGR_FCC_CFG                    0x61
+#define CHGR_FV_CFG                     0x70
+#define CHARGE_FV_MV                    4350
+#define CHARGE_FCC_MA                   2000
+#define CHARGE_MAX_MV                   4400
+#define CHARGE_RESUME_MV                4300
+#define CHARGE_MIN_DC                   50      /* 5.0 C */
+#define CHARGE_MAX_DC                   450     /* 45.0 C */
+#define CHARGE_MAX_S                    (10 * 3600)
+#define MISC_WDOG_PET                   0x43
+#define MISC_WD_CFG                     0x51
+#define MISC_SNARL_BARK_BITE_WD_CFG     0x53
+#define WD_TIMER_EN_ON_PLUGIN           (1u << 1)
+#define WD_TRIGGER_AFP_EN               (1u << 7)
+#define WD_BITE_DISABLE_CHARGING        (1u << 7)
+#define WD_SNARL_8S                     0x70
+#define WD_BARK_32S                     (1u << 2)       /* ilog2(32 / 16) << 2 */
+#define WD_BITE_8S                      0x3
+
+static uint32_t charge_enable_on = 1, charge_limit = 95, charge_wd_test;
+static struct {
+	bool allowed, held, timed_out, wd_ready;
+	uint64_t plugged_at;                    /* mach_absolute_time() when the cable went in, 0 while out */
+	const char *why;
+	char line[256];
+} chg = { .allowed = true, .why = "" };
+SYSCTL_STRING(_kern_hackios, OID_AUTO, charge_control, CTLFLAG_RD | CTLFLAG_LOCKED, chg.line, sizeof(chg.line),
+    "the charging limits: whether it may charge, why not");
 
 static void
-charge_enable(bool plugged)
+charge_wd_setup(void)
 {
-	uint8_t cmd = 0;
-	static bool said;
+	uint8_t cfg = 0, wd = 0;
 
-	if (!charge_enable_on || !plugged || hk_spmi_read(PM8150B_CHGR, CHGR_CHARGING_ENABLE_CMD, &cmd, 1) != 0 ||
-	    (cmd & CHARGING_ENABLE_CMD_BIT)) {
+	if (hk_spmi_read(PM8150B_MISC, MISC_SNARL_BARK_BITE_WD_CFG, &cfg, 1) || hk_spmi_read(PM8150B_MISC, MISC_WD_CFG, &wd, 1)) {
+		printf("battery: the PMIC's charging watchdog cannot be read: not set up\n");
 		return;
 	}
-	hk_spmi_write(PM8150B_CHGR, CHGR_CHARGING_ENABLE_CMD, cmd | CHARGING_ENABLE_CMD_BIT);
-	cmd = 0;
-	hk_spmi_read(PM8150B_CHGR, CHGR_CHARGING_ENABLE_CMD, &cmd, 1);
-	if (!said || !(cmd & CHARGING_ENABLE_CMD_BIT)) {
-		said = true;
-		printf("battery: charging enabled (CHARGING_ENABLE_CMD reads %#x)\n", cmd);
+	hk_spmi_write(PM8150B_MISC, MISC_WDOG_PET, 1);
+	hk_spmi_write(PM8150B_MISC, MISC_SNARL_BARK_BITE_WD_CFG, WD_BITE_DISABLE_CHARGING | WD_SNARL_8S | WD_BARK_32S | WD_BITE_8S);
+	hk_spmi_write(PM8150B_MISC, MISC_WD_CFG, (uint8_t)((wd & ~WD_TRIGGER_AFP_EN) | WD_TIMER_EN_ON_PLUGIN));
+	hk_spmi_write(PM8150B_MISC, MISC_WDOG_PET, 1);
+	printf("battery: the PMIC's charging watchdog: wd_cfg %#x -> ", wd);
+	hk_spmi_read(PM8150B_MISC, MISC_WD_CFG, &wd, 1);
+	printf("%#x, bark/bite cfg %#x -> ", wd, cfg);
+	hk_spmi_read(PM8150B_MISC, MISC_SNARL_BARK_BITE_WD_CFG, &cfg, 1);
+	printf("%#x (charging off 40 s after this thread stops)\n", cfg);
+	chg.wd_ready = true;
+}
+
+/* a PMIC limit no higher than max_value: lowered when the firmware set it higher */
+static void
+charge_cap_register(uint8_t reg, uint8_t max_value, const char *name)
+{
+	uint8_t v = 0;
+
+	if (hk_spmi_read(PM8150B_CHGR, reg, &v, 1) == 0 && v > max_value) {
+		hk_spmi_write(PM8150B_CHGR, reg, max_value);
+		printf("battery: the charger's %s %#x lowered to %#x\n", name, v, max_value);
 	}
+}
+
+/* b NULL: the gauge did not answer */
+static void
+charge_control(const struct hk_battery_state *b, unsigned tick)
+{
+	uint8_t cmd = 0;
+	bool plugged, want;
+	int percent = 0, mv = 0, dc = 0;
+	uint64_t now = mach_absolute_time(), ns = 0;
+	const char *why = NULL;
+
+	if (!charge_enable_on) {
+		return;
+	}
+	if (!chg.wd_ready) {
+		charge_wd_setup();
+		charge_cap_register(CHGR_FV_CFG, (CHARGE_FV_MV - 3600) / 10, "float voltage");
+		charge_cap_register(CHGR_FCC_CFG, CHARGE_FCC_MA / 50, "fast-charge current");
+	}
+	if (chg.wd_ready && !(charge_wd_test == 1 && tick >= 12) && !(charge_wd_test == 2 && tick >= 12 && tick < 30)) {
+		hk_spmi_write(PM8150B_MISC, MISC_WDOG_PET, 1);
+	}
+	plugged = b != NULL ? b->external : true;
+	if (b != NULL && !b->external) {
+		chg.plugged_at = 0;
+		chg.timed_out = false;
+		chg.held = false;
+	} else if (chg.plugged_at == 0) {
+		chg.plugged_at = now;
+	}
+	absolutetime_to_nanoseconds(now - chg.plugged_at, &ns);
+
+	if (b == NULL) {
+		why = "the gauge does not answer";
+	} else {
+		percent = b->percent_hundredths / 100;
+		mv = b->voltage_uv / 1000;
+		dc = b->temperature_hundredths / 10;
+		if (ns / NSEC_PER_SEC >= CHARGE_MAX_S) {
+			chg.timed_out = true;
+		}
+		/* the cap, with its 5 points back */
+		if (percent >= (int)charge_limit) {
+			chg.held = true;
+		} else if (percent <= (int)charge_limit - 5) {
+			chg.held = false;
+		}
+		if (chg.timed_out) {
+			why = "10 h of charging (until the cable comes out)";
+		} else if (chg.held) {
+			why = "the charge limit";
+		} else if (mv >= CHARGE_MAX_MV || (!chg.allowed && chg.why != NULL && strcmp(chg.why, "the cell's voltage") == 0 &&
+		    mv >= CHARGE_RESUME_MV)) {
+			why = "the cell's voltage";
+		} else if (dc >= CHARGE_MAX_DC || (!chg.allowed && chg.why != NULL && strcmp(chg.why, "too warm") == 0 &&
+		    dc >= CHARGE_MAX_DC - 20)) {
+			why = "too warm";
+		} else if (dc < CHARGE_MIN_DC || (!chg.allowed && chg.why != NULL && strcmp(chg.why, "too cold") == 0 &&
+		    dc < CHARGE_MIN_DC + 20)) {
+			why = "too cold";
+		}
+	}
+	want = why == NULL;
+	if (!plugged && want) {
+		chg.allowed = true;
+		chg.why = "";
+		return;                         /* (nothing to charge from: the bit is left as it is until the next cable) */
+	}
+	if (hk_spmi_read(PM8150B_CHGR, CHGR_CHARGING_ENABLE_CMD, &cmd, 1) == 0 &&
+	    ((cmd & CHARGING_ENABLE_CMD_BIT) != 0) != want) {
+		hk_spmi_write(PM8150B_CHGR, CHGR_CHARGING_ENABLE_CMD,
+		    (uint8_t)(want ? (cmd | CHARGING_ENABLE_CMD_BIT) : (cmd & ~CHARGING_ENABLE_CMD_BIT)));
+		cmd = 0xff;
+		hk_spmi_read(PM8150B_CHGR, CHGR_CHARGING_ENABLE_CMD, &cmd, 1);
+	}
+	/*
+	 * A bite stays: the charger goes on reading "disable" (status1 7) with the command set, even once petted again (image 377,
+	 * charge_wd_test=2). Charging allowed, the watchdog petted for two readings, the command set and the charger disabled:
+	 * the command cleared and set again, which starts it over.
+	 */
+	{
+		static unsigned petted_ticks;
+		uint8_t st = 0;
+		bool petted = chg.wd_ready && !(charge_wd_test == 1 && tick >= 12) && !(charge_wd_test == 2 && tick >= 12 && tick < 30);
+
+		petted_ticks = petted ? petted_ticks + 1 : 0;
+		if (want && plugged && petted_ticks >= 2 && cmd != 0xff && (cmd & CHARGING_ENABLE_CMD_BIT) &&
+		    hk_spmi_read(PM8150B_CHGR, CHGR_STATUS_1, &st, 1) == 0 && (st & 7) == 7) {
+			hk_spmi_write(PM8150B_CHGR, CHGR_CHARGING_ENABLE_CMD, (uint8_t)(cmd & ~CHARGING_ENABLE_CMD_BIT));
+			delay_for_interval(20, NSEC_PER_MSEC);
+			hk_spmi_write(PM8150B_CHGR, CHGR_CHARGING_ENABLE_CMD, cmd);
+			delay_for_interval(200, NSEC_PER_MSEC);
+			hk_spmi_read(PM8150B_CHGR, CHGR_STATUS_1, &st, 1);
+			printf("battery: the charger was disabled with charging allowed (a watchdog bite?): the command set again, state now %u\n",
+			    st & 7);
+		}
+	}
+	if (want != chg.allowed || (why != NULL && chg.why != NULL && strcmp(why, chg.why) != 0)) {
+		printf("battery: charging %s%s%s (%d%%, %d mV, %d.%d C; CHARGING_ENABLE_CMD %#x)\n", want ? "on" : "OFF",
+		    want ? "" : ": ", want ? "" : why, percent, mv, dc / 10, (dc < 0 ? -dc : dc) % 10, cmd);
+	}
+	chg.allowed = want;
+	chg.why = want ? "" : why;
+	snprintf(chg.line, sizeof(chg.line), "charging %s%s; limit %u%%, %d%% %d mV %d.%d C, plugged %llu s, watchdog %s",
+	    want ? "allowed" : "OFF: ", want ? "" : why, charge_limit, percent, mv, dc / 10, (dc < 0 ? -dc : dc) % 10,
+	    chg.plugged_at ? (unsigned long long)(ns / NSEC_PER_SEC) : 0ULL,
+	    !chg.wd_ready ? "not set up" : (charge_wd_test == 1 && tick >= 12) || (charge_wd_test == 2 && tick >= 12 && tick < 30) ?
+	    "NOT PETTED (test)" : "petted");
 }
 
 /* For the system's sleep (bsd/dev/hk_power.c): the battery low and no charger at the last reading. */
@@ -214,9 +384,8 @@ instantnoodle_battery_low(void)
  * (2026-11-12) The last account, for sysctl kern.hackios.charger_pm8150b (hk_sysctl on the phone): the log's tail is a minute or two
  * of a busy run, and the account is said only every ten minutes.
  */
-static char charger_line[512];
+static char charger_line[768];
 static int battery_stage;               /* how far the thread has come: 1 started, 2 gauge asked, 3 in its loop (+ ticks * 10) */
-SYSCTL_DECL(_kern_hackios);
 SYSCTL_INT(_kern_hackios, OID_AUTO, battery_stage, CTLFLAG_RD | CTLFLAG_LOCKED, &battery_stage, 0, "the OnePlus gauge thread's progress");
 SYSCTL_STRING(_kern_hackios, OID_AUTO, charger_pm8150b, CTLFLAG_RD | CTLFLAG_LOCKED, charger_line, sizeof(charger_line),
     "the PM8150B charger's registers, the last reading");
@@ -242,8 +411,12 @@ charger_say(void)
 		{ 0x215, 0x06, "typec_snk" }, { 0x215, 0x07, "typec_snk_dbg" }, { 0x215, 0x0b, "typec_misc" },
 		{ PM8150B_USBIN, 0x10, "usbin_rt" }, { PM8150B_CHGR, 0x08, "status3" }, { PM8150B_CHGR, 0x0e, "chgr_rt" },
 		{ PM8150B_CHGR, 0x60, "chgr_cfg" }, { PM8150B_CHGR, 0x52, "pre_cfg" }, { PM8150B_MISC, 0x40, "misc_cmd" },
+		/* (2026-11-13) the safety limits the PMIC keeps itself: hardware JEITA (0x1090), the safety timers (0x10a0, its
+		 * fast-charge one 0x10a2), the termination (0x1050 chgr_cfg1), the watchdog (0x1653) and MISC's interrupt status */
+		{ PM8150B_CHGR, 0x90, "jeita_en" }, { PM8150B_CHGR, 0xa0, "safety_en" }, { PM8150B_CHGR, 0xa2, "fast_timer" },
+		{ PM8150B_CHGR, 0x50, "chgr_cfg1" }, { PM8150B_MISC, 0x53, "wd_bark_bite" }, { PM8150B_MISC, 0x10, "misc_rt" },
 	};
-	char line[512];
+	char line[768];
 	size_t n = 0;
 
 	n += snprintf(line + n, sizeof(line) - n, "battery: charger");
@@ -478,7 +651,7 @@ battery_thread(__unused void *parameter, __unused wait_result_t result)
 			hk_battery_report(&b);
 			empty_check(&b);
 			icl_follow(b.external);
-			charge_enable(b.external);
+			charge_control(&b, tick);
 			if (tick % 120 == 0 || b.external != said_external || (b.external && tick % 12 == 0)) {
 				said_external = b.external;     /* (every ten minutes, and when the cable goes in or out) */
 				charger_say();
@@ -491,7 +664,7 @@ battery_thread(__unused void *parameter, __unused wait_result_t result)
 				    b.charge_uah / 1000, b.full_uah / 1000, b.design_uah / 1000, b.cycles, flags,
 				    b.external ? "plugged" : "unplugged", chgr, b.status, bus.errors);
 			}
-		} else if (++failed == 1 || failed % 12 == 0) {
+		} else if (charge_control(NULL, tick), ++failed == 1 || failed % 12 == 0) {
 			printf("battery: the gauge at %#x does not answer (%u times in a row)\n", GAUGE_ADDR, failed);
 			instantnoodle_i2c_recover(&bus);
 		}
@@ -513,6 +686,11 @@ instantnoodle_battery_init(void)
 	PE_parse_boot_argn("battery_empty_mv", &empty_mv, sizeof(empty_mv));  /* (a test: above the cell's voltage, unplugged) */
 	PE_parse_boot_argn("charge_icl", &icl_on, sizeof(icl_on));
 	PE_parse_boot_argn("charge_enable", &charge_enable_on, sizeof(charge_enable_on));
+	PE_parse_boot_argn("charge_limit", &charge_limit, sizeof(charge_limit));
+	PE_parse_boot_argn("charge_wd_test", &charge_wd_test, sizeof(charge_wd_test));
+	if (charge_limit < 50 || charge_limit > 100) {
+		charge_limit = 95;
+	}
 	if (!enabled) {
 		return;
 	}
