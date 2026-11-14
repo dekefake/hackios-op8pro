@@ -361,6 +361,71 @@ store installs (same crypto, run at fault time instead of ahead of time).
 `fairplay-decrypt` is GPL-3.0 (this is a clean C reimplementation of its published algorithm; its inclusion is the owner's
 licensing call).
 
+## 4c. Standalone on-device anisette (OTP) -- working off-phone (2026-11-13, `userland/src/hk_adi.c`) [verified on 16K-page Darwin; phone test pending]
+
+App Store / AuthKit sign-in needs **anisette** headers `X-Apple-I-MD` (a one-time password) and `X-Apple-I-MD-M` (a machine
+id). Genuine iOS generates them in `akd`/CoreADI from a provisioned machine identity held by the SEP -- which the OnePlus
+does not have. The standard non-Apple workaround (AltStore/SideStore/Provision) is to run Apple's **obfuscated ADI library**
+(`libstoreservicescore.so` + `libCoreADI.so`, aarch64 ELF from *Apple Music for Android*) against a provisioned `adi.pb`.
+The OTP math is deterministic given `adi.pb` + the Android id; it is **not** account-specific (one machine identity serves
+any Apple ID at sign-in) and needs no network at OTP time.
+
+**What was built.** `hk_adi.c` is a self-contained ~325-line C program: a minimal ELF loader (maps `PT_LOAD`, applies
+AArch64 relocations RELATIVE/GLOB_DAT/JUMP_SLOT/ABS64, resolves imports from a ~25-entry shim table of libc + stubs --
+no bionic, no Android runtime), a nested loader for `libCoreADI.so` via the ADI's own `dlopen`, then the ADI call sequence
+(obfuscated symbols `kq56gsgHG6`=LoadLibraryWithPath, `nf92ngaK92`=SetProvisioningPath, `Sph98paBcz`=SetAndroidID,
+`aslgmuibau`=GetLoginCode/isMachineProvisioned, `qi864985u0`=OTPRequest, `jk24uiwqrg`=Dispose; dsId **-2**). This is a
+clean reimplementation of Dadoum/Provision's `androidlibrary.d`/`symbols.d`/`adi.d` (GPL-3.0). It prints the two header
+values on stdout; `HK_ADI_TRACE=1` adds file-I/O + loader diagnostics.
+
+**Two bugs had to be fixed to run the Android library on Darwin/16K pages -- both also required on iOS (arm64, 16K pages,
+Darwin `struct stat`):**
+1. **16K-page load shift.** The libraries are laid out for 0x1000 (4K) pages; macOS/arm64 **and iOS/XNU/arm64 use 0x4000
+   (16K)**. Where two adjacent `PT_LOAD` segments make a W/X transition on the same 16K page (libCoreADI text ends 0x1b2f50,
+   data starts 0x1b3000; libSSC text ends 0x2375e0, data 0x2385e0) they cannot be `mprotect`ed apart. A single uniform
+   shift (`pageCeil(headerStart)-headerStart`, rounded to 4K) moves the whole image so the W-boundary segment lands on its
+   own 16K page while every internal RELATIVE reference stays consistent. (Mirrors `androidlibrary.d`'s `shift`.)
+2. **`struct stat` ABI translation.** The ADI does `fstat(fd,&st); read(fd,buf,st.st_size)`. The library expects the
+   **Linux/Android aarch64** `struct stat` (st_size at offset 48); macOS/iOS `fstat` fills the **Darwin** layout. Handing
+   it the Darwin struct made it read `st_size` from the wrong offset (observed: n=1794567266 ~1.79 GB), so it parsed garbage
+   past the real 612 bytes and reported "not provisioned" (-45061). The `lstat`/`fstat` shims now call the real Darwin
+   call and translate into the Linux layout. (On the Linux container the two layouts coincide, which is why it worked there
+   first and masked the bug.)
+
+**Evidence ladder.** Built `hk_adi` for Linux/arm64 and ran it in a `gcc` container (4K pages) against a freshly provisioned
+`adi.pb`: `GetLoginCode(-2) -> 0`, `OTPRequest -> 0`, machine id identical to the reference anisette server's. On macOS/arm64
+(16K) it first returned -45061; after fixes 1+2 it returns the **same** machine id and a valid OTP. The reference `adi.pb`
+was provisioned once by Dadoum's `anisette-v3-server` (Docker, permitted by the owner) talking to Apple's gsa servers; a
+fresh process reloads `adi.pb` and serves OTP without re-provisioning (verified by container restart), so the identity is a
+file set, not a live session. Built for iOS 16.5 (`ubuild/build.sh` `anisette` target, installed to `/hackios/bin/hk_adi`,
+links only libSystem).
+
+**The anisette identity is a USER-DATA file set** (Apple files, never in git): `adi.pb` (provisioned machine, 612 B),
+`device.json` (`UUID` -> `X-Mme-Device-Id`; `localUUID` -> `X-Apple-I-MD-LU`; `clientInfo` -> `X-MMe-Client-Info`;
+`identifier` -> the Android id passed to the loader), and the two `.so`. Proposed on-phone path
+`/private/var/mobile/Library/anisette/{adi.pb,device.json,lib/*.so}`. The full header set AuthKit needs: MD + MD-M from
+`hk_adi`; MD-LU, Device-Id, Client-Info from `device.json`; `X-Apple-I-MD-RINFO` (constant, e.g. 17106176); and
+Client-Time/TimeZone/Locale generated per request.
+
+**AuthKit wiring built (2026-11-13, `userland/src/anisette_standin.m`, in libhackios-store beside `store_standin.m`).**
+AuthKit's client chokepoint is `AKAnisetteProvisioningController`, which turns an `AKAnisetteData {MID, OTP, RD}` into the
+`X-Apple-I-MD*` headers (`ak_anisetteHeadersWithData:`). The provider (injected into appstored/AppStore, gated
+`anisette_standin=0`) swizzles the four client accessors -- `anisetteDataWithError:`, `anisetteDataWithCompletion:`,
+`fetchAnisetteDataAndProvisionIfNecessary:error:`/`:withCompletion:` -- to return an `AKAnisetteData` it builds by KVC
+(`machineID`, `oneTimePassword` from a spawned `/hackios/bin/hk_adi`; `routingInfo` = 17106176; `clientInfo` NSData from
+device.json), caching the OTP ~20 s. `hk_adi` runs as a short-lived child (keeps the ADI's mmap/mprotect + globals out of
+appstored). This covers both sync and async callers without touching the XPC path to akd. Built (ubuild `store`). Identity
+reads from USER DATA `/private/var/mobile/Library/anisette/{adi.pb,device.json,lib/*.so}` (`HK_ANISETTE_DIR` overrides);
+deploy tree staged at `scratchpad/anisette-deploy{,.tar}` (Apple files, not git).
+
+**Still to do (on-phone, needs the owner watching a run):** push the identity tree into
+`/private/var/mobile/Library/anisette`; full userland build + RAM boot; open the App Store and watch the console for
+`anisette-standin:` lines and whether `sf-api-token` turns from 401 to 200 (Today/Apps tabs populate). Risks to verify on
+device: (1) the W->X `mprotect` on anonymous memory -- needs the port's no-code-signing kernel to permit it (expected per
+AMFI-accepts-everything, unverified); (2) can appstored `posix_spawn` `/hackios/bin/hk_adi` under its sandbox (expected
+permissive on the port); (3) whether the request also needs `X-Apple-I-MD-LU` / `X-MMe-Client-Info` to match the provisioned
+identity -- if the 401 persists, also hook `AKDevice` localUserUUID/clientInfo to our device.json values.
+
 ## 5. IO80211 / Wi-Fi (details in [../subsystems/wifi.md](../subsystems/wifi.md))
 - wifid → Apple80211 ioctls (`SIOCGA80211/SIOCSA80211`); `IO80211.framework` fills/reads the same structs
   (`Apple80211GetWithIOCTL`, `_getScanData`, `_addScanResultToList`, `_performAssociation`, `_dispatchAsyncAssocEvent`,

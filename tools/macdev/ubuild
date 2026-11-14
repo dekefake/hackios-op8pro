@@ -28,7 +28,7 @@ for t in "$@"; do
 	phone) $DYN -O2 -dynamiclib -install_name /hackios/lib/libhackios-phone.dylib -lobjc -o obj/libhackios-phone.dylib src/inject_phone.c ;;
 	call) $DYN -O2 -dynamiclib -install_name /hackios/lib/libhackios-call.dylib -framework CoreFoundation -lobjc -o obj/libhackios-call.dylib src/inject_call.c ;;
 	app) $DYN -dynamiclib -install_name /hackios/lib/libhackios-app.dylib -lobjc -framework CoreFoundation -framework CoreMedia -framework Foundation -fobjc-arc -o obj/libhackios-app.dylib src/inject_app.c src/oslog_mirror.c src/weather_standin.m ;;
-	store) $DYN -O2 -dynamiclib -install_name /hackios/lib/libhackios-store.dylib -framework CoreFoundation -framework Foundation -lobjc -lc++abi -o obj/libhackios-store.dylib src/inject_store.c src/store_standin.m ;;
+	store) $DYN -O2 -dynamiclib -install_name /hackios/lib/libhackios-store.dylib -framework CoreFoundation -framework Foundation -lobjc -lc++abi -o obj/libhackios-store.dylib src/inject_store.c src/store_standin.m src/anisette_standin.m ;;
 	ui) $DYN -O2 -dynamiclib -install_name /hackios/lib/libhackios-ui.dylib -lobjc -o obj/libhackios-ui.dylib src/inject_ui.c ;;
 	cell) $DYN -O2 -o obj/hk_cell src/hk_cell.c ;;
 	im) $DYN -O1 -fobjc-arc -dynamiclib -install_name /hackios/lib/libhackios-im.dylib -framework Foundation -lobjc -o obj/libhackios-im.dylib src/inject_im.m ;;
@@ -39,6 +39,7 @@ for t in "$@"; do
 	sysctl) $DYN -O2 -o obj/hk_sysctl src/hk_sysctl.c ;;
 	lun) $DYN -O2 -o obj/hk_lun src/hk_lun.c ;;
 	fpdecrypt) $DYN -O2 -o obj/hk_fpdecrypt src/hk_fpdecrypt.c ;;
+	anisette) $DYN -O2 -o obj/hk_adi src/hk_adi.c ;;  # on-device anisette OTP: custom ELF loader runs Apple's ADI .so (16K-page shift + Linux->Darwin stat xlate)
 	metal) M="-framework Foundation -framework IOKit -framework Metal -lobjc"; $DYN -dynamiclib -install_name /hackios/lib/libhackiosmetal.dylib $M -o obj/libhackiosmetal.dylib src/hkmetal.m src/hkdrawable.m && $DYN -bundle $M -o obj/HKMetal src/hkmetal.m src/hkdrawable.m ;;
 	cb_test) $DYN -O1 -fobjc-arc -framework Foundation -lobjc -o obj/cb_test src/cb_test.m ;;
 	location) $DYN -O1 -fobjc-arc -framework Foundation -framework CoreLocation -lobjc -o obj/hk_location src/hk_location.m ;;

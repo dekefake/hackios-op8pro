@@ -23,7 +23,7 @@ Order inside each section is by priority. Update an item when you change its sta
 | T04 | Motion, light and proximity sensors (screen rotation, auto-brightness) | In Progress (8 Pro: the DSP's sensors report, verified 2026-11-07; rotation and proximity into iOS built, unverified; see T47) | P1 |
 | T05 | Bluetooth | Working in RAM runs (owner-verified); gaps listed | P1 |
 | T47 | 8 Pro: Wi-Fi auto-join, sleep, AirDrop, sensors, charging | Open (see section) | P1 |
-| T48 | Apple ID and App Store sign-in do not work properly | Not Started (owner's priority, 2026-11-08) | P0 |
+| T48 | Apple ID and App Store sign-in do not work properly | In Progress (anisette OTP works off-phone 2026-11-13; owner's priority) | P0 |
 | T49 | Hardware video encoding: the Snapdragon's Venus (H.264/H.265) for VideoToolbox | Not Started | P1 |
 | T06 | Cellular modem, telephony, SMS | In progress (image 44, built and RAM-tested, not flashed: **Settings > Cellular, the status bar's LTE and bars, SIM and operator through CoreTelephony** (stand-in for CommCenter, research/modem-sdx55.md); flashed image 43: LTE registration, SIM PIN, **mobile data on en1 (verified)**, SMS send, SMS receive with iOS notifications (verified: banner, lock screen, Messages list and conversation), bars, RTC date; open: calls/VoLTE/VoWiFi, tethering, IPv6) | P1 |
 | T07 | OnePlus 8 cameras | Partial (back and front stream, autofocus, flash: owner-tested 2026-10-27; 2026-11-07 fixes built, unverified) | P1 |
@@ -337,9 +337,20 @@ README lists video and Live Photo recording as not working (redwood). No encoder
     But `sf-api-token-service.itunes.apple.com/apiToken` -> **401** (the storefront API token needs a valid device
     attestation / anisette signature, which we don't have), and `apps.mzstatic.com` (the ios-appstore.jetpack UI bundle)
     and others drop with **NSURLErrorNetworkConnectionLost (-1005) x6** (likely modem throughput on large transfers).
-  - **So the remaining walls, in order:** (1) **anisette** -- a valid storefront token (and later Apple ID sign-in via
-    GrandSlam) needs ADI-provisioned anisette headers with a synthetic Apple device identity (serial/model/UUID,
-    Hackintosh-SMBIOS style); without it the Today/Apps tabs 401. (2) **modem stability** for large transfers (the jetpack).
+  - **(2026-11-13) Anisette is now SOLVED off-phone** (research/ios-userland.md §4c, `userland/src/hk_adi.c`): a minimal
+    ELF loader runs Apple's ADI library on-device to generate `X-Apple-I-MD`/`X-Apple-I-MD-M` from a provisioned `adi.pb`,
+    no SEP, no Mac server at runtime. Verified on 16K-page Darwin (machine id matches the reference anisette server). Two
+    fixes were needed, both also required on iOS (16K pages, Darwin `struct stat`): a 16K-page load shift and a
+    Linux->Darwin `struct stat` ABI translation in the `fstat`/`lstat` shims. Built for iOS 16.5 (`/hackios/bin/hk_adi`).
+    **AuthKit wiring now built** (`userland/src/anisette_standin.m`, in libhackios-store): swizzles
+    `AKAnisetteProvisioningController`'s four anisette accessors to return an `AKAnisetteData` from a spawned
+    `/hackios/bin/hk_adi` (machineID/OTP) + device.json, gated `anisette_standin=0`. **Remaining: on-phone test** -- push
+    the identity tree to `/private/var/mobile/Library/anisette` (staged `scratchpad/anisette-deploy.tar`), full userland
+    build + RAM boot (owner watching), open the App Store, watch for `anisette-standin:` console lines and `sf-api-token`
+    401->200. Risks: W->X mprotect on anon memory (no-codesigning kernel), appstored spawning hk_adi (sandbox), and maybe
+    needing `X-Apple-I-MD-LU`/`X-MMe-Client-Info` to match (then also hook `AKDevice`).
+  - **So the remaining walls, in order:** (1) **anisette** -- OTP solved + AuthKit wiring built; left is the on-phone test.
+    (2) **modem stability** for large transfers (the jetpack).
     (3) **FairPlay app DRM** for the actual install -- App Store binaries are FairPlay-encrypted per device+Apple-ID and the
     device decrypts with SEP/FairPlay keys this OnePlus lacks, so even a free app (Spotify) downloaded from the store cannot
     be decrypted/run *by Apple's runtime* without a real FairPlay root of trust. **But the DRM is breakable offline**
