@@ -91,7 +91,8 @@ SpringBoard, mediaserverd (and others by `INJECT`); `init`/`stage0` bring the sy
 CoreAnimation (backboardd) → OpenGL ES → Mesa (freedreno, Darwin patches) → `HKGPU` (msm-DRM-shaped user client) → Adreno via the GMU
 and its ring; frames are scaled by the GPU into scanout surfaces and pushed by the MDP on TE (OnePlus 8) or copied on the panel's
 scan (redwood). Without `gpu=1`, CoreAnimation's software renderer draws (QEMU). Metal is a separate, experimental road to the same
-GPU (`hkmetal.m` → `libhackiosair.dylib` → Mesa/ir3 → `HKGPU`). See [gpu.md](subsystems/gpu.md), [display.md](subsystems/display.md).
+GPU (`hkmetal.m` → `libhackiosair.dylib` → Mesa/ir3 → `HKGPU`), on by default since 2026-11-07 (loader `metal=2 metal_profile=1`; `metal=0` opts out).
+See [gpu.md](subsystems/gpu.md), [display.md](subsystems/display.md).
 
 ## Power
 Governed CPU/memory votes → screen off → powerd-driven system sleep implemented as cores off + WFI (not SoC vdd-min) → off-mode
