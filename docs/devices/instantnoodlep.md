@@ -19,13 +19,19 @@ Seen working on the phone itself (RAM runs, or the flashed standalone image wher
 | Boot to SpringBoard, 8 cores with `cpufreq=1` | works |
 | Display 120 Hz (command panel, DSC, push path) | works; the native QHD+ mode does **not** (`fb_qhd`, left the panel black: do not use) |
 | Adreno 650 for CoreAnimation, speakers, haptics, flashlight | works (firmware from the phone) |
-| Wi-Fi | works in RAM runs; does not join a saved network by itself (K44) |
-| Bluetooth | works in RAM runs: inquiry, pairing, A2DP audio ([../subsystems/bluetooth.md](../subsystems/bluetooth.md)) |
-| Back camera | works in the Camera app (`cam=5`); no autofocus control from iOS yet, no front camera, no video recording |
-| Cellular | LTE registration, SIM PIN, SMS send, signal bars in the flashed image ([../research/modem-sdx55.md](../research/modem-sdx55.md)); no calls, mobile data, or SMS receive in Messages |
+| Wi-Fi | works in RAM runs; auto-join fixed via `hk_wifijoin` (K44 fixed) |
+| Bluetooth | works in RAM runs: inquiry, pairing, A2DP audio (bt=1..6); bt=4 downloads QCA6390 firmware, bt=5 runs beside wifi=1, bt=6 registers kernel control com.apple.uart.bluetooth for BlueTool UART transport ([../subsystems/bluetooth.md](../subsystems/bluetooth.md)) |
+| Back camera | works in Camera app (`cam=5`); IMX689 4000x3000 photos, 2000x1128 @ 30 fps video, H.264 recording via `h264enc`, telephoto S5K3M5 (sensor 3) streaming, orientation fixed; no front camera yet; no Live Photo recording |
+| Cellular | LTE registration, SIM PIN, SMS send/receive, signal bars, operator name in flashed image ([../research/modem-sdx55.md](../research/modem-sdx55.md)); native IPv6 mobile data over `en1` with router discovery in kernel; no calls, no SMS receive in Messages app yet |
 | Boot from flash, boot menu, persistent `/private/var` | works: UEFI in `boot_a`, iOS volume in a `darwin` partition cut from `userdata`, Android stays on slot B |
-| System sleep | off by default (K45) |
-| Not done | sensors, headphones/USB-C audio, fingerprint, location, fast charging, AirDrop, Metal for apps |
+| System sleep | off by default (K45) — Wi-Fi radio does not come back after wake; modem link lost |
+| Charging | 95% cap, voltage/temperature/time cut-offs, PMIC watchdog; input limit from Type-C advertised current; `adsp=1` required for charging |
+| Sensors | SLPI + FastRPC enabled by default (`slpi=1` in loader 15); ALS (`als=1`) and proximity (`prox=1`) no longer crash backboardd; magnetometer firmware isolates fault to QUPV3_2 SE1 (still DSP-walled); `slpi_dsplog=1` asks sensor DSP for its own log |
+| Display features | Night Shift, True Tone, Auto-Brightness via colour matrices on the display; ALS service for MobileGestalt |
+| Weather | Open-Meteo integration via WeatherDaemon v3 JSON model stand-in |
+| App Store | reaches Apple (bag 200); walls are anisette, modem, FairPlay DRM ([../research/ios-userland.md](../research/ios-userland.md)) |
+| FairPlay | research: app DRM breakable offline (fairplay-decrypt); credential may be extractable from owner's Mac; on-device FairPlay decryptor prototype (`fpdecrypt` target) |
+| Not done | front camera, sensors (rotation, compass, barometer), headphones/USB-C audio, fingerprint, location, fast charging, AirDrop, Metal for apps (experimental: `metal=2 metal_profile=1` runs system on Metal, 263/271 system fragment shaders draw) |
 
 ## Building for this phone
 
