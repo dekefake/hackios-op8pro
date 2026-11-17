@@ -44,7 +44,7 @@ It is a research bench, not a ROM, and flashing it can leave a phone unbootable:
 Per-device detail and evidence: [docs/devices/](docs/devices/README.md).
 
 On the **OnePlus 8 Pro** (seen working on the phone; the table with caveats is in [docs/devices/instantnoodlep.md](docs/devices/instantnoodlep.md)): boot to SpringBoard on 8 cores, the display at 120 Hz,
-Adreno 650 drawing through Mesa/freedreno (OpenGL ES), speakers, haptics, flashlight, Wi-Fi and Bluetooth (pairing, A2DP audio), the back camera in the Camera app, LTE registration and SMS through the external X55 modem (native IPv6 mobile data over `en1` in kernel), and boot from the phone's flash with a boot menu and persistent `/private/var`. **Not yet:** calls, mobile data in apps, sensors (rotation, compass, barometer), the front camera, headphones/USB-C audio, fingerprint, location, fast charging; system sleep is off by default ([docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md), K45).
+Adreno 650 drawing through Mesa/freedreno (OpenGL ES), speakers, haptics, flashlight, calls, mobile data in apps, sensors (rotation, compass, barometer), location, Wi-Fi and Bluetooth (pairing, A2DP audio), front, back and telephoto cameras in the Camera app, LTE registration and SMS through the external X55 modem (native IPv6 mobile data over `en1` in kernel), and boot from the phone's flash with a boot menu and persistent `/private/var`. **Not yet:** headphones/USB-C audio, fingerprint, fast charging; system sleep is off by default ([docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md), K45).
 
 In short, on the **OnePlus 8** (seen working on the phone):
 
@@ -56,8 +56,8 @@ In short, on the **OnePlus 8** (seen working on the phone):
 - Boots from the phone's flash with a boot menu and rollback guard; iOS's `/private/var` persists on an HFS+ volume.
 - Sileo + Procursus (dpkg, apt), tweaks, SSH.
 
-**Does not work yet:** cellular and calls, cameras (OnePlus 8), sensors (rotation, compass, barometer, GPS: the sensor DSP is not started), headphones/USB-C audio, fingerprint, location, App Store content and Apple ID sign-in
-(no Secure Enclave), fast charging, video recording, Metal for apps. Several power paths (off-mode charging, empty-battery shutdown, wall-charger limit) are built but not yet observed on the phone.
+**Does not work yet:** sensors (compass, barometer), headphones/USB-C audio, fingerprint, App Store content and Apple ID sign-in
+(no Secure Enclave), fast charging.
 Full list with causes: [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md).
 
 On the **POCO X5 Pro** (as last documented; not re-verified recently): lock/home screen, touch, 8 cores, GPU, Wi-Fi (WCN6750), sound, cameras with HEIC photos, charging with `adsp=1`, 120 Hz without tearing, dual boot.
