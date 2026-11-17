@@ -44,21 +44,19 @@ It is a research bench, not a ROM, and flashing it can leave a phone unbootable:
 Per-device detail and evidence: [docs/devices/](docs/devices/README.md).
 
 On the **OnePlus 8 Pro** (seen working on the phone; the table with caveats is in [docs/devices/instantnoodlep.md](docs/devices/instantnoodlep.md)): boot to SpringBoard on 8 cores, the display at 120 Hz,
-Adreno 650 drawing through Mesa/freedreno (OpenGL ES), speakers, haptics, flashlight, Wi-Fi and Bluetooth (pairing, A2DP audio), the back camera in the Camera app, LTE registration and SMS sending through the external X55 modem,
-and boot from the phone's flash with a boot menu and persistent `/private/var`. **Not yet:** calls and mobile data, sensors, the front camera, headphones, fingerprint, location, fast charging; system sleep is off by default
-([docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md)).
+Adreno 650 drawing through Mesa/freedreno (OpenGL ES), speakers, haptics, flashlight, Wi-Fi and Bluetooth (pairing, A2DP audio), the back camera in the Camera app, LTE registration and SMS through the external X55 modem (native IPv6 mobile data over `en1` in kernel), and boot from the phone's flash with a boot menu and persistent `/private/var`. **Not yet:** calls, mobile data in apps, sensors (rotation, compass, barometer), the front camera, headphones/USB-C audio, fingerprint, location, fast charging; system sleep is off by default ([docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md), K45).
 
 In short, on the **OnePlus 8** (seen working on the phone):
 
 - Boot to SpringBoard, lock screen, home screen, system gestures, Control Center, Settings, Safari and the stock apps; 8 cores, prime core at 2.84 GHz.
 - 90 Hz display without tearing; touch screen, power and volume keys, alert slider (ring/silent and Do Not Disturb); battery level and charging.
-- Adreno 650 drawing through Mesa/freedreno (OpenGL ES) for CoreAnimation; an experimental Metal driver (off by default, see [gpu.md](docs/subsystems/gpu.md)).
+- Adreno 650 drawing through Mesa/freedreno (OpenGL ES) for CoreAnimation; an experimental Metal driver, on by default since 2026-11-07 (`metal=2 metal_profile=1`; `metal=0` opts out, see [gpu.md](docs/subsystems/gpu.md)). ~293 of 456 system shaders draw; Metal for apps is untested.
 - Wi-Fi (QCA6390): scan, join from Settings (WPA2, WPA2/TKIP, WPA3), DHCP, Safari. Speakers, iOS sounds and the main microphone; haptics; flashlight.
 - Display off/on, system sleep and wake (not the SoC's deepest state), GPU powered down in sleep.
 - Boots from the phone's flash with a boot menu and rollback guard; iOS's `/private/var` persists on an HFS+ volume.
 - Sileo + Procursus (dpkg, apt), tweaks, SSH.
 
-**Does not work yet:** cellular and calls, Bluetooth, cameras (OnePlus 8), sensors (rotation, light, proximity), headphones, fingerprint, location, App Store content and Apple ID sign-in
+**Does not work yet:** cellular and calls, cameras (OnePlus 8), sensors (rotation, compass, barometer, GPS: the sensor DSP is not started), headphones/USB-C audio, fingerprint, location, App Store content and Apple ID sign-in
 (no Secure Enclave), fast charging, video recording, Metal for apps. Several power paths (off-mode charging, empty-battery shutdown, wall-charger limit) are built but not yet observed on the phone.
 Full list with causes: [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md).
 
