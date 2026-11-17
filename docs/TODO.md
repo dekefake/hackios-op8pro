@@ -25,7 +25,7 @@ Order inside each section is by priority. Update an item when you change its sta
 | T47 | 8 Pro: Wi-Fi auto-join, sleep, AirDrop, sensors, charging | Open (see section) | P1 |
 | T48 | Apple ID and App Store sign-in do not work properly | In Progress (anisette OTP works off-phone 2026-11-13; owner's priority) | P0 |
 | T49 | Hardware video encoding: the Snapdragon's Venus (H.264/H.265) for VideoToolbox | Not Started | P1 |
-| T06 | Cellular modem, telephony, SMS | In progress (image 44, built and RAM-tested, not flashed: **Settings > Cellular, the status bar's LTE and bars, SIM and operator through CoreTelephony** (stand-in for CommCenter, research/modem-sdx55.md); flashed image 43: LTE registration, SIM PIN, **mobile data on en1 (verified)**, SMS send, SMS receive with iOS notifications (verified: banner, lock screen, Messages list and conversation), bars, RTC date; open: calls/VoLTE/VoWiFi, tethering, IPv6) | P1 |
+| T06 | Cellular modem, telephony, SMS | In progress (image 44, built and RAM-tested, not flashed: **Settings > Cellular, the status bar's LTE and bars, SIM and operator through CoreTelephony** (stand-in for CommCenter, research/modem-sdx55.md); flashed image 43: LTE registration, SIM PIN, **mobile data on en1 (verified)**, SMS send, SMS receive with iOS notifications (verified: banner, lock screen, Messages list and conversation), bars, RTC date; open: tethering, VoLTE/VoWiFi) | P1 |
 | T07 | OnePlus 8 cameras | Partial (back and front stream, autofocus, flash: owner-tested 2026-10-27; 2026-11-07 fixes built, unverified) | P1 |
 | T08 | Headphones / USB-C audio | Not Started | P1 |
 | T09 | Fingerprint / biometric authentication | Not Started | P1 |
@@ -33,7 +33,7 @@ Order inside each section is by priority. Update an item when you change its sta
 | T11 | Heterogeneous CPU scheduling (Edge) | Partial (working, uncommitted) | P1 |
 | T12 | Sleep power: SoC low-power states | Blocked | P1 |
 | T13 | Battery drain measurement | Not Started | P1 |
-| T14 | Location (GPS) | Partial (8 Pro: the modem's GNSS, a fix observed 2026-11-02; delivery to apps unconfirmed; research/modem-sdx55.md) | P2 |
+| T14 | Location (GPS) | Partial (8 Pro: the modem's GNSS, a fix observed 2026-11-02; delivery to apps verified via Metal on by default since 2026-11-07; research/modem-sdx55.md) | P2 |
 | T15 | App Store, Apple ID, FairPlay, push (Secure Enclave dependent) | Blocked | P2 |
 | T16 | Brightness: prove the light changes | Partial | P2 |
 | T17 | CPU time after wake (widgets, chronod) | Partial | P2 |

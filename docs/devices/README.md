@@ -2,7 +2,7 @@
 
 | Device | Doc | Role | State |
 |---|---|---|---|
-| OnePlus 8 Pro (instantnoodlep, SM8250) | [instantnoodlep.md](instantnoodlep.md) | **active development** (this repository's focus); iOS in a `darwin` partition next to Android | SpringBoard, GPU, Wi-Fi, Bluetooth, back camera, LTE + SMS, installed boot (see doc) |
+| OnePlus 8 Pro (instantnoodlep, SM8250) | [instantnoodlep.md](instantnoodlep.md) | **active development** (this repository's focus); iOS in a `darwin` partition next to Android | SpringBoard, GPU, Wi-Fi, Bluetooth, back + front + telephoto cameras, calls, mobile data in apps, LTE + SMS, sensors, location, installed boot (see doc) |
 | OnePlus 8 (instantnoodle, SM8250) | [instantnoodle.md](instantnoodle.md) | worked example for the Pro; iOS root on its own flash, no Android | SpringBoard, Wi-Fi, audio, sleep, installed boot work (see doc) |
 | POCO X5 Pro 5G (redwood, SM7325) | [redwood.md](redwood.md) | where the port was born; owner asked not to run redwood checks | works per the project; not re-verified recently |
 | QEMU `virt` | [qemu.md](qemu.md) | no phone needed; CI-like scenarios | works |
@@ -21,7 +21,7 @@ Cross-device feature matrix:
 | Wi-Fi | WCN6750 | QCA6390 PCIe | QCA6390 PCIe | virtio-net |
 | speakers / mic | AW88261 / analog | TFA9874 / digital | yes (`sound=4`) | virtio-sound |
 | haptics / torch | yes / yes | yes / yes | yes / yes | no |
-| cameras | yes | no | back camera | no |
+| cameras | yes | no | back + front + telephoto | no |
 | system sleep | no | yes | off by default (K45) | test only |
 | installed boot | dual boot (Android kept) | standalone | dual boot (Android on slot B) | scenario tests |
 | battery | DSP battery manager | bq27541 gauge | see [power.md](../subsystems/power.md) | none |

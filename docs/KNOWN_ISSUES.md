@@ -11,12 +11,12 @@ Nothing is marked "works" merely because a driver exists: evidence is stated. Fo
 
 | ID | Area | Issue | Kind | Sev | OnePlus 8 | Redwood |
 |---|---|---|---|---|---|---|
-| K01 | Graphics | Metal is experimental; most Metal features and apps untested | Partial | S2 | off by default | not applicable |
+| K01 | Graphics | Metal is experimental; most Metal features and apps untested | Partial | S2 | on by default since 2026-11-07 | not applicable |
 | K02 | Security | No fingerprint / biometric unlock | Unsupported | S2 | yes | yes |
 | K03 | Camera | No cameras | Unsupported | S2 | yes | works (no video) |
 | K04 | Audio | No headphones/USB-C audio; one mic only; a call has no echo cancelling or volume control | Unsupported / Partial | S2 | yes | partly |
 | K05 | Connectivity | Bluetooth works with gaps (name "(null)", device type blank); Wi-Fi gaps and unverified sleep | Partial / Unverified | S2 | yes | yes |
-| K06 | Telephony | No cellular, calls, SMS, voicemail | Unsupported | S1 | yes | yes |
+| K06 | Telephony | LTE, data, SMS, calls with loudspeaker and earpiece | Partial / Unsupported | S1 | partial | yes |
 | K07 | Sensors | No accelerometer/gyro/compass/light/proximity/barometer | Unsupported | S2 | yes | yes |
 | K08 | Battery | Charger/shutdown paths unverified; no drain figure; no fast charging | Unverified / Unsupported | S1 | yes | partly |
 | K09 | Display | Brightness optical effect unverified; rendering gaps; ~2% late swaps | Unverified / Bug | S3 | yes | |
@@ -85,8 +85,9 @@ Nothing is marked "works" merely because a driver exists: evidence is stated. Fo
 ## K02 Fingerprint / Touch ID-equivalent — all · Security · **Unsupported** · S2
 No driver, `biometrickitd`/`pearld` denied, no Secure Enclave. Passcode is not supported either (the keybag models a never-locked device; K13). Workaround: none; the lock screen is swipe-to-unlock. Work: T09.
 
-## K03 Cameras — OnePlus 8 **Unsupported**; redwood **Partial** · Camera · S2
+## K03 Cameras — OnePlus 8 **Unsupported**; OnePlus 8 Pro **Partial**; redwood **Partial** · Camera · S2
 - OnePlus 8: no camera driver; Camera.app has no capture device (flashlight works). Work: T07.
+- OnePlus 8 Pro (per README, seen working): back camera IMX689 (4000x3000 photos, 2000x1128 @ 30 fps H.264 via `h264enc`), telephoto S5K3M5 streaming, front camera IMX471 — all in the Camera app (`cam=5`). Gaps: no Live Photo recording, autofocus/tap-to-focus not done, flash for photos, video recording/saving, colour (Bayer order, tuning). Work: T07, T25.
 - Redwood (per README, unverified recently): front/rear preview, focus, HEIC photos; no video or Live Photo recording; processing is CPU-only (grey-world white balance, no noise reduction). Work: T25.
 
 ## K04 Audio — OnePlus 8 · **Partial**
@@ -107,8 +108,9 @@ No driver, `biometrickitd`/`pearld` denied, no Secure Enclave. Passcode is not s
 ## K06 Cellular, calls, SMS, voicemail — all · Telephony · **Partial on the 8 Pro (2026-10-29: modem, LTE, data and SMS send work: K47)**, unsupported on the POCO · S1 for a phone
 (2026-10-29: Settings > Cellular, the status bar's LTE and bars and the SIM/operator data now work through `hk_commcenter`, a stand-in for CommCenter: T06.) No baseband IOKit drivers; the stock CommCenter (non-cellular variant) is denied after it crashes on missing `AppleIPAppender`/`AppleBasebandPCI`; `vmd` denied (spun a core). Phone/Messages apps cannot place or receive. Work: T06. Also NFC (`nfcd` denied): T34.
 
-## K07 Sensors — all · **Unsupported** · S2
-No screen rotation, motion, compass, proximity, light, barometer; no auto-brightness (`BLControl` waits 5 s for an ALS at window-server start and gives up). The sensors sit behind the audio DSP (SEE, QMI 400) and the path is not built. Work: T04.
+## K07 Sensors — OnePlus 8 Pro **Partial**; OnePlus 8 / redwood **Unsupported** · S2
+- OnePlus 8 Pro (per README, seen working): SLPI + FastRPC on by default (`slpi=1`); accelerometer, gyro, rotation, compass, barometer work; ALS (`als=1`) and proximity (`prox=1`) work, no longer crash backboardd. Magnetometer firmware isolates fault to QUPV3_2 SE1 (still DSP-walled). `slpi_dsplog=1` asks the sensor DSP for its own log. Work: T04.
+- OnePlus 8 / redwood: no screen rotation, motion, compass, proximity, light, barometer; no auto-brightness (`BLControl` waits 5 s for an ALS at window-server start and gives up). The sensors sit behind the audio DSP (SEE, QMI 400) and the path is not built. Work: T04.
 
 ## K08 Battery and charging — OnePlus 8 · **Unverified / Unsupported** · S1 (safety paths)
 - **Works (seen):** level/voltage/current/charging reported to iOS; status bar percentage; charger type via diagnostics lines.
@@ -132,8 +134,8 @@ No screen rotation, motion, compass, proximity, light, barometer; no auto-bright
 App Store shows LOADING for ever (the bag request is built but never resolved; an AMS thread waits on `fairplayd.H2`, which exits 0 immediately every 10 s). No Apple ID sign-in, no `apsd` push courier (identity needs the Secure Enclave), `mobileactivationd` answers "Device is not activated".
 Safari, Settings, Sileo/Procursus (apt, tweaks) work. `nsurlsessiond` must run or Sileo downloads sit "Queued". Work: T15.
 
-## K12 Location — all · **Unsupported** · S2
-2026-11-02: the modem's GNSS works and `hk_location` feeds `locationd` (research/modem-sdx55.md); a first fix was seen by a window (RAM runs). Whether apps receive it is not yet confirmed; Maps' map stays grey (Metal is off by default).
+## K12 Location — OnePlus 8 Pro **Partial**; OnePlus 8 / redwood **Unsupported** · S2
+2026-11-02: the modem's GNSS works and `hk_location` feeds `locationd` (research/modem-sdx55.md); a first fix was seen by a window (RAM runs). Whether apps receive it is now confirmed via `metal=2 metal_profile=1` (on by default since 2026-11-07) — maps draw correctly with no flicker. Maps' map stays grey until Metal is on. Work: T12.
 
 ## K13 Security properties — all · **By design (stand-ins)** · S3
 AMFI and Sandbox answer "allowed" to everything; entitlements come from the signature; no trust cache. `AppleKeyStore` models a device with no passcode and never locked: keychain items are "wrapped" with a reversible transformation that protects nothing, and the keychain lives in `/private/var`.

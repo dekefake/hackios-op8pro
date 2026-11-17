@@ -146,7 +146,7 @@ switcher, `sb3` blur refusal, the Control Center glyph opacity workaround).
 - Tools: `metal_dump=NAME` + `build/mesa-host/build/src/compiler/air/air2nir` (in the `hk-ws` volume) read any app's shader as NIR; `metal_skip=NAME` finds
   which pipeline paints what; `metal_texlog=1`. The cross build of the library needs `CPATH` to a one-file `endian.h` (the SDK has only machine/endian.h).
 
-**Do not read "Metal runs" as "Metal apps work".** What exists is an experimental driver, off by default.
+**Do not read "Metal runs" as "Metal apps work".** What exists is an experimental driver, on by default since 2026-11-07 (loader `default_args`; `metal=0` opts out).
 
 - `metal=1`: Metal serves test programs. `metal=2 metal_profile=1`: Metal is handed to the whole system (backboardd's
   compositor too); this reaches the home screen. Metal for the whole system is **not** the default; chronod's widgets

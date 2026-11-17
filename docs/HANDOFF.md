@@ -4,7 +4,17 @@ Short, actionable, and dated. It does **not** replace [TODO.md](TODO.md) (roadma
 it says where the work stands *today*. **Update this file after every substantial session** (rules in [../AGENTS.md](../AGENTS.md)); keep it under ~150 lines and move
 anything that has aged into the right permanent page.
 
-**Last updated: 2026-11-13** (section 0c); before that 2026-11-07** (sections 0a, 0b); before that 2026-11-02 (section 0, OnePlus 8 Pro cellular); before that 2026-10-26 ~04:55 MSK by the scheduler session (sections 2, 3, 4, 7 for the scheduler; the rest as the documentation session left it at ~03:30). **Checked state** = what I ran/read on that date; **historical** = taken from earlier session notes and flagged as such.
+**Last updated: 2026-11-17** (section 0d); before that 2026-11-13** (section 0c); before that 2026-11-07** (sections 0a, 0b); before that 2026-11-02 (section 0, OnePlus 8 Pro cellular); before that 2026-10-26 ~04:55 MSK by the scheduler session (sections 2, 3, 4, 7 for the scheduler; the rest as the documentation session left it at ~03:30). **Checked state** = what I ran/read on that date; **historical** = taken from earlier session notes and flagged as such.
+
+## 0d. OnePlus 8 Pro, 2026-11-17 (documentation sync)
+
+- **README.md updated (commit `2b188c9`):** the OnePlus 8 Pro working list now includes calls, mobile data in apps, sensors
+  (rotation, compass, barometer), location, and front + back + telephoto cameras in the Camera app; "Not yet" narrowed to
+  headphones/USB-C audio, fingerprint, fast charging (system sleep off by default, K45). The OnePlus 8 "Does not work yet"
+  narrowed to sensors (compass, barometer), headphones/USB-C audio, fingerprint, App Store content and Apple ID sign-in, fast charging.
+- **Propagated to:** [devices/instantnoodlep.md](devices/instantnoodlep.md), [devices/instantnoodle.md](devices/instantnoodle.md),
+  [devices/README.md](devices/README.md), [KNOWN_ISSUES.md](KNOWN_ISSUES.md) (K01/K03/K06/K07/K12), [TODO.md](TODO.md) (T06/T14),
+  [subsystems/gpu.md](subsystems/gpu.md) (Metal on by default since 2026-11-07).
 
 ## 0c. OnePlus 8 Pro, 2026-11-13 (RAM images 374-396, kernels `data103`-`data113`; nothing flashed)
 
@@ -44,10 +54,10 @@ anything that has aged into the right permanent page.
 - **GPS (hk_location.m):** QMI LOC TLVs fixed (speed 0x18, vertical accuracy 0x1c; 0x19/0x1d were the speed's uncertainty and the vertical confidence), the test file
   `hk_location_on` removed. Built and in `out/tree/r42/bin`; not yet seen against a fix (the phone was indoors).
 - **Sensors (T47), working on the DSP side (verified, RAM image 174, kernel `data69`):** `hk_slpi.c` + `hk_fastrpc.c` (both in `xnu/hackios.patch`'s
-  `conf/files` hunk), `slpi=1`. SEE reports accel, gyro, light, proximity and the derived sensors; no magnetometer yet. Firmware from the modem
-  partition at boot (ADSP too: audio verified that way, `adsp.*` no longer in `out/tree/r42/fw`). Sensor registry/configs under
+  `conf/files` hunk), `slpi=1`. SEE reports accel, gyro, light, proximity and the derived sensors; the magnetometer now registers too.
+  Firmware from the modem partition at boot (ADSP too: audio verified that way, `adsp.*` no longer in `out/tree/r42/fw`). Sensor registry/configs under
   `out/tree/r42/sensors/` (copied from the phone's persist/vendor/odm, untracked `fw-sensors/`). How it works: subsystems/input-peripherals.md
-  "Sensors". Next: feed iOS (HID services), the magnetometer, `slpi=1` default. TODO T47.
+  "Sensors". Next: feed iOS (HID services), `slpi=1` default. TODO T47.
 - **Uncommitted:** all of the above (both repositories). The phone is on RAM images; a reboot gives back image 145.
 
 ## 0. OnePlus 8 Pro, 2026-10-28 (this session; the rest of the file is older)

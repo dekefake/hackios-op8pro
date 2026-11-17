@@ -33,7 +33,7 @@ What has been **seen working on the phone itself** (the kernel's log of a run sa
 | Boot from flash, boot menu, boot guard, `/private/var` on HFS+ | works (installed 2026-10-24) | `common/flash/install-xl.sh` | [storage.md](../subsystems/storage.md), INSTALL.md |
 | Custom boot logo | works | `userland/mkbootlogo.py` | research/ios-userland.md §7 |
 | Metal driver | on by default (metal=2 metal_profile=1) — experimental, ~293 of 456 system shaders draw | `metal=1`/`2` | gpu.md |
-| Not done | headphones/USB-C audio, sensors (accelerometer, gyro, compass, light, GPS: the sensor DSP is not started), voice calls/VoLTE/VoWiFi, mobile data and tethering, AirDrop, location, fast charging (Warp), SoC low-power states, auto-brightness | | [../TODO.md](../TODO.md), [../KNOWN_ISSUES.md](../KNOWN_ISSUES.md) |
+| Not done | headphones/USB-C audio, sensors (compass, barometer; accelerometer/gyro/light/GPS via the sensor DSP not started), voice calls/VoLTE/VoWiFi, mobile data and tethering, AirDrop, location, fast charging (Warp), SoC low-power states, auto-brightness | | [../TODO.md](../TODO.md), [../KNOWN_ISSUES.md](../KNOWN_ISSUES.md) |
 
 ## Setting up (RAM-only run)
 
